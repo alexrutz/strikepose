@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+out/
+*.png
+!docs/*.png
+models/
+assets/
+bodies/

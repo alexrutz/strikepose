@@ -1,0 +1,5 @@
+# The editor runs on the standard library plus tkinter alone.
+# Everything below unlocks an optional feature.
+pillow>=10          # PNG export
+numpy>=1.24         # depth maps
+# torch, smplx     # only for the SMPL-X depth source
