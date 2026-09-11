@@ -76,11 +76,43 @@ read 176 degrees of jump between neighbouring poses as success. Both suites
 now sweep a limb right round and assert the frame never steps further than the
 pose did.
 
+**A model never writes coordinates.** `pose_agent` hands a local LLM a command
+vocabulary - point a bone, bend a joint, turn the figure - and applies it
+through `move_joint` and `rotate_about_axis`, the same rotations a drag uses.
+Every bone-length invariant above then holds for free, whatever the model
+returns. A 7B model asked for eighteen keypoints returns mismatched limbs, and
+writing those in would walk straight through `check_lengths`. Commands are
+named in the *figure's* frame, not the world's or the viewer's, which is what
+lets them compose after a `turn`; a bend reads its own sign off the geometry
+rather than tabulating one per side.
+
+**A bad command is skipped, not fatal.** A local model gets one wrong every so
+often. Losing the whole pose to a misspelled joint would make the CLI useless
+exactly where a small local model is the point. `apply_commands` returns the
+warnings and carries on.
+
 **Assets ride the body's pose solution.** `solve_pose` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
 solve an asset separately or it will drift from the body.
 
 ## Platform and format gotchas
+
+- Local runtimes disagree about how a JSON schema is passed. Ollama takes it
+  as `format` on `/api/chat`; everything else takes `response_format` on
+  `/v1/chat/completions`, and llama.cpp has shipped releases that reject the
+  OpenAI spelling of it. `LocalLLM.complete` tries them in order and drops to
+  unconstrained JSON rather than failing, and `parse_json_object` digs the
+  object out of a fence, because a small model wraps its answer more often
+  than not. `tests/test_pose_agent.py` serves all of that from a stub.
+- A view is chosen by how much of the pose's *departure from rest* survives
+  projection, not by how much of each bone does. A crouch seen head-on still
+  shows 71% of the thigh and reads as a figure standing up straight, because
+  what makes it a crouch is the part aimed at the lens. Bones that did not
+  move get no say. A camera the prompt or the model names is never overruled.
+- Framing has to fit the *export rectangle*, not the window. A figure lying
+  down is twice as wide as the standing one and was cropped by framing on the
+  view, and framing on the keypoints alone cuts the hands off, which reach
+  another 17 cm past the wrist.
 
 - A tk `Canvas` defaults to 378 px wide. Five in a row overflow their strip and
   the last ones collapse to 1 px. Ask for `width=10` and let `expand` share.

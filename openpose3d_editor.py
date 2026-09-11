@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.20.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.21.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -36,6 +36,7 @@ import json
 import time
 import math
 import os
+import sys
 from copy import deepcopy
 
 try:
@@ -1517,6 +1518,71 @@ def render_depth(groups, width, height, blend=0.0, near=255, far=45,
 
 
 # ---------------------------------------------------------------------------
+# Framing and export
+#
+# The pose PNG and the depth map have to line up pixel for pixel, which means
+# both have to be framed the same way. That framing lives here rather than on
+# the editor window so a headless run produces the identical image: the window
+# passes its canvas size, a headless run passes the camera's.
+# ---------------------------------------------------------------------------
+
+def frame_rect(view_w, view_h, aspect):
+    """Safe frame of the given aspect ratio, centred in a view that size."""
+    fh = view_h * 0.92
+    fw = fh * aspect
+    if fw > view_w * 0.92:
+        fw = view_w * 0.92
+        fh = fw / aspect
+    return ((view_w - fw) / 2.0, (view_h - fh) / 2.0,
+            (view_w + fw) / 2.0, (view_h + fh) / 2.0)
+
+
+def project_people(figures, camera, rect, out_w, out_h):
+    """Every figure's keypoints in export pixels, with their visibility."""
+    x0, y0, x1, y1 = rect
+    sx, sy = out_w / (x1 - x0), out_h / (y1 - y0)
+    return [([((px - x0) * sx, (py - y0) * sy)
+              for px, py, _ in (camera.project(pt) for pt in figure.points)],
+             list(figure.visible))
+            for figure in figures]
+
+
+def pose_image(figures, camera, rect, out_w, out_h, thick_lines=True):
+    """The OpenPose conditioning image for a scene."""
+    stick = resolution_stickwidth(out_w, out_h) if thick_lines else 4
+    return render_openpose(project_people(figures, camera, rect, out_w, out_h),
+                           out_w, out_h, stickwidth=stick, dot_radius=stick)
+
+
+def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0):
+    """Depth map from the built-in anatomy, framed to match `pose_image`.
+
+    The always-available depth source: no model files, no torch, numpy and
+    Pillow only. The rigged-mesh and SMPL-X sources live on the editor because
+    they need files the user has to supply.
+    """
+    x0, y0, _x1, _y1 = rect
+    s = out_w / (rect[2] - rect[0])
+    k = camera.zoom * s                   # world units -> pixels, same for z
+    right, up, fwd = camera.basis()
+    groups = []
+    for figure in figures:
+        parts = []
+        for part in body_parts(figure, thickness):
+            out = []
+            for kind, centre, axes, radii in part:
+                pc = camera.project(centre)
+                cam_axes = tuple((vdot(u, right), -vdot(u, up), vdot(u, fwd))
+                                 for u in axes)
+                out.append((kind,
+                            ((pc[0] - x0) * s, (pc[1] - y0) * s, pc[2] * k),
+                            cam_axes, tuple(r * k for r in radii)))
+            parts.append(out)
+        groups.append(parts)
+    return render_depth(groups, out_w, out_h, blend=2.0 * k)
+
+
+# ---------------------------------------------------------------------------
 # Scene serialisation
 # ---------------------------------------------------------------------------
 
@@ -1707,6 +1773,14 @@ class EditorApp:
         self.root.configure(bg=BG)
 
         self.preset_name = tk.StringVar(value=DEFAULT_PRESET)
+        self.prompt_text = tk.StringVar(value="")
+        self.prompt_host = tk.StringVar(
+            value=os.environ.get("POSE_AGENT_HOST", ""))
+        self.prompt_model = tk.StringVar(
+            value=os.environ.get("POSE_AGENT_MODEL", ""))
+        self.prompt_status = tk.StringVar(
+            value="Describe a pose and press Enter. Needs a local model "
+                  "running; falls back to keywords without one.")
         self.figures = [Skeleton(preset_params(DEFAULT_PRESET))]
         self.active = 0
         self.figure_label = tk.StringVar(value="Person 1 of 1")
@@ -1977,6 +2051,22 @@ class EditorApp:
             entry.bind("<FocusOut>", lambda _e: self.redraw())
             return entry
 
+        # ---- prompt -------------------------------------------------------
+        body = section("Prompt")
+        entry = tk.Entry(body, textvariable=self.prompt_text, bg=CONTROL,
+                         fg=FG, relief="flat", insertbackground=FG,
+                         highlightthickness=1, highlightbackground=EDGE,
+                         highlightcolor=ACCENT)
+        entry.pack(fill="x", padx=12, pady=(0, 3), ipady=4)
+        entry.bind("<Return>", lambda _e: self.pose_from_prompt())
+        self.prompt_entry = entry
+        buttons(body, [("Pose it", self.pose_from_prompt)], cols=1)
+        field(body, "Model host", self.prompt_host, width=18)
+        field(body, "Model", self.prompt_model, width=18)
+        tk.Label(body, textvariable=self.prompt_status, bg=PANEL, fg=MUTED,
+                 anchor="w", justify="left", wraplength=210,
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
+
         # ---- scene --------------------------------------------------------
         body = section("Scene")
         tk.Label(body, textvariable=self.figure_label, bg=PANEL, fg=FG,
@@ -2238,6 +2328,37 @@ class EditorApp:
                                                    len(self.figures)))
         self.preset_name.set(self.skeleton.body.get("preset", DEFAULT_PRESET))
 
+    def pose_from_prompt(self):
+        """Pose the scene from the prompt box with a local model.
+
+        Replaces the figures rather than editing them: a prompt describes a
+        whole pose, and undo puts the old scene back. The import is deferred
+        because pose_agent imports this module.
+        """
+        prompt = self.prompt_text.get().strip()
+        if not prompt:
+            self.prompt_status.set("Type what the figure should be doing.")
+            return
+        import pose_agent
+        self.prompt_status.set("Asking the model\u2026")
+        self.root.update_idletasks()
+        llm = pose_agent.discover(host=self.prompt_host.get().strip() or None,
+                                  model=self.prompt_model.get().strip() or None)
+        width, height = self._sizes()
+        figures, camera, report = pose_agent.pose_from_prompt(
+            prompt, llm, self.camera.width, self.camera.height, width / height)
+        self.push_undo()
+        self.figures = figures
+        self.camera.yaw, self.camera.pitch = camera.yaw, camera.pitch
+        self.camera.target, self.camera.zoom = camera.target, camera.zoom
+        self.set_active(0, announce=False)
+        self.redraw()
+        note = "read by %s" % report["source"]
+        if report["warnings"]:
+            note += "; %d command(s) skipped" % len(report["warnings"])
+        self.prompt_status.set(note)
+        self.status.set("Posed from prompt (%s). Ctrl+Z puts it back." % note)
+
     def push_undo(self):
         self.undo_stack.append(self.scene_snapshot())
         del self.undo_stack[:-120]
@@ -2360,22 +2481,16 @@ class EditorApp:
             aspect = max(1, self.out_w.get()) / max(1, self.out_h.get())
         except tk.TclError:
             aspect = 512 / 768
-        fh = h * 0.92
-        fw = fh * aspect
-        if fw > w * 0.92:
-            fw = w * 0.92
-            fh = fw / aspect
-        return ((w - fw) / 2.0, (h - fh) / 2.0, (w + fw) / 2.0, (h + fh) / 2.0)
+        return frame_rect(w, h, aspect)
 
     def export_points(self, out_w, out_h, figure=None):
-        x0, y0, x1, y1 = self.frame_rect()
-        sx, sy = out_w / (x1 - x0), out_h / (y1 - y0)
-        return [((px - x0) * sx, (py - y0) * sy)
-                for px, py, _ in self.projected(figure)]
+        which = self.figures if figure is None else [self.figures[figure]]
+        return project_people(which, self.camera, self.frame_rect(),
+                              out_w, out_h)[0][0]
 
     def export_people(self, out_w, out_h):
-        return [(self.export_points(out_w, out_h, f), list(fig.visible))
-                for f, fig in enumerate(self.figures)]
+        return project_people(self.figures, self.camera, self.frame_rect(),
+                              out_w, out_h)
 
     # -- mouse -------------------------------------------------------------
     def on_resize(self, event):
@@ -3052,25 +3167,8 @@ class EditorApp:
             if image is not None:
                 return image
             self.use_smplx.set(False)
-        x0, y0, x1, y1 = self.frame_rect()
-        s = width / (x1 - x0)
-        k = self.camera.zoom * s          # world units -> pixels, same for z
-        right, up, fwd = self.camera.basis()
-        groups = []
-        for figure in self.figures:
-            parts = []
-            for part in body_parts(figure, self._thickness()):
-                out = []
-                for kind, centre, axes, radii in part:
-                    pc = self.camera.project(centre)
-                    cam_axes = tuple((vdot(u, right), -vdot(u, up), vdot(u, fwd))
-                                     for u in axes)
-                    out.append((kind,
-                                ((pc[0] - x0) * s, (pc[1] - y0) * s, pc[2] * k),
-                                cam_axes, tuple(r * k for r in radii)))
-                parts.append(out)
-            groups.append(parts)
-        return render_depth(groups, width, height, blend=2.0 * k)
+        return anatomy_depth_image(self.figures, self.camera, self.frame_rect(),
+                                   width, height, self._thickness())
 
     def preview_depth(self):
         if np is None or Image is None:
@@ -3350,7 +3448,14 @@ class EditorApp:
                 canvas.create_line(x0, y0, x1, y1, fill="#22222a")
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv:
+        # A prompt run needs no display at all, which is the point of it: the
+        # same posing and the same framing, driven by a local model instead of
+        # the mouse. pose_agent imports this module, so it is imported here.
+        import pose_agent
+        return pose_agent.main(argv)
     if tk is None:
         raise SystemExit(
             "tkinter is not available.\n"
@@ -3363,7 +3468,8 @@ def main():
     root.minsize(900, 560)
     EditorApp(root)
     root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

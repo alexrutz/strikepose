@@ -29,6 +29,42 @@ Inspect a rig before loading it:
 
     python3 mesh_backend.py --inspect body.glb
 
+## Posing from a text prompt with a local LLM
+
+`pose_agent.py` turns a sentence into a pose and exports both conditioning
+images. The editor's own entry point forwards to it, so either works:
+
+    python3 openpose3d_editor.py --prompt "a boxer in a guard, three quarters"
+    python3 pose_agent.py --prompt "someone kneeling, looking up" --out out/
+
+writing `pose.png`, `depth.png` and a `scene.json` the editor can load. There is
+a **Prompt** box at the top of the editor's panel that does the same to the open
+scene; Ctrl+Z puts the old one back.
+
+The model is found automatically on the usual ports - Ollama on 11434, LM Studio
+on 1234, llama.cpp's server on 8080, vLLM on 8000 - or name one:
+
+    python3 pose_agent.py --prompt "..." --host http://localhost:11434 \
+                          --model qwen2.5:7b-instruct
+
+`--backend ollama` uses Ollama's `/api/chat`, `--backend openai` the
+OpenAI-compatible `/v1/chat/completions` everything else serves; `auto` tries
+both. Generation is constrained to a JSON schema, which is what makes a 7B model
+usable for this. `POSE_AGENT_HOST` and `POSE_AGENT_MODEL` set the defaults. No
+extra Python package is needed: it is urllib and the standard library.
+
+The model does not return coordinates - it returns a short list of commands
+(`point`, `bend`, `turn`, `lean`, `look`, `stance`, `hide`), applied through the
+same rotations a mouse drag uses, so no bone can change length whatever it asks
+for and an invented command is reported and skipped. `--list` prints the whole
+vocabulary; `scene.json` carries the plan, so a run can be hand-edited and
+replayed. With no model running the prompt is still read, by keyword, and the
+run says so - use `--require-llm` if you would rather it failed.
+
+Name a view in the prompt and you get it. Say nothing and the camera turns
+until the pose reads: a crouch seen head-on is a figure standing up straight,
+because the part that makes it a crouch is the part pointing at the lens.
+
 ## Tests
 
     ./tests/run_all.sh
