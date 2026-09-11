@@ -5,7 +5,8 @@ OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 os.makedirs(OUT, exist_ok=True)
 
 from openpose3d_editor import (Skeleton, Camera, LIMB_SEQ, KEYPOINT_NAMES, PARENT,
-                               vlen, vsub, vdot, vadd, vmul, rotation_between, matvec,
+                               vlen, vsub, vdot, vadd, vmul, vnorm, vcross,
+                               rotation_between, matvec, body_parts, carry_frame,
                                render_openpose, scene_to_dict, scene_from_dict)
 
 ok = True
@@ -116,6 +117,94 @@ sk2 = Skeleton()
 sk2.points = [(0,0,0)]*18
 scene_from_dict(json.loads(json.dumps(d)), sk2, cam)
 check("json round trip restores pose", all(vlen(vsub(a,b)) < 1e-4 for a,b in zip(sk.points, sk2.points)))
+
+# --- limb volumes: the swept cross-section must not twist or flip
+#
+# Every station of a limb carries a half width, a half depth and a forward
+# offset, so which way round the cross-section sits is visible in the depth
+# map. Deriving that from the body's facing direction per bone - which is what
+# this did - left it undefined for a bone pointing along `facing` and flipped
+# it a full 180 degrees either side: a reach, a sitting thigh or a kick came
+# out with the calf mass on the wrong side of the tibia and the width and depth
+# swapped. These are the checks that were missing.
+
+def aim_limb(sk, parent, child, direction):
+    """Point the bone parent->child along `direction`, carrying its subtree."""
+    ids = {n: i for i, n in enumerate(KEYPOINT_NAMES)}
+    origin = sk.points[ids[parent]]
+    R = rotation_between(vsub(sk.points[ids[child]], origin), direction)
+    moved, stack = set(), [ids[child]]
+    while stack:
+        j = stack.pop()
+        if j in moved:
+            continue
+        moved.add(j)
+        stack.extend(c for pa, c in LIMB_SEQ if pa == j)
+    for j in moved:
+        sk.points[j] = vadd(origin, matvec(R, vsub(sk.points[j], origin)))
+
+
+def limb_cross(parent, child, direction):
+    """(axis, forward) of the swept cross-section of one posed limb bone."""
+    ids = {n: i for i, n in enumerate(KEYPOINT_NAMES)}
+    sk = Skeleton()
+    aim_limb(sk, parent, child, direction)
+    start = sk.points[ids[parent]]
+    axis = vnorm(vsub(sk.points[ids[child]], start))
+    for part in body_parts(sk):
+        if part[0][0] == "slab" and vlen(vsub(part[0][1], start)) < 1.0:
+            return axis, part[0][2][1]
+    raise AssertionError("no swept part starts at " + parent)
+
+
+def twist_of(parent, child, direction):
+    """Roll the cross-section has picked up that the bone's swing does not
+    account for. A limb keeps its shape only while this stays zero."""
+    axis, fwd = limb_cross(parent, child, direction)
+    rest_axis, rest_fwd = limb_cross(parent, child, (0.0, -1.0, 0.0))
+    want = matvec(rotation_between(rest_axis, axis), rest_fwd)
+    want = vsub(want, vmul(axis, vdot(want, axis)))
+    if vlen(want) < 1e-9:
+        return 0.0
+    want = vnorm(want)
+    return abs(math.degrees(math.atan2(vdot(vcross(want, fwd), axis),
+                                       max(-1.0, min(1.0, vdot(want, fwd))))))
+
+
+for label, direction in (("hanging", (0, -1, 0)),
+                         ("reaching straight forward", (0, 0, 1)),
+                         ("reaching forward and up", (0, 1, 1)),
+                         ("reaching forward and out", (1, 0, 1)),
+                         ("out sideways", (1, 0, 0)),
+                         ("just short of forward", (0, -0.02, 1)),
+                         ("just past forward", (0, 0.02, 1))):
+    worst = max(twist_of("l_shoulder", "l_elbow", vnorm(direction)),
+                twist_of("l_hip", "l_knee", vnorm(direction)))
+    check("a limb %s keeps its cross-section square" % label, worst < 1.0,
+          "%.1f deg of twist" % worst)
+
+# and it must not jump: swing a limb right through the body's own forward
+worst, prev = 0.0, None
+for deg in range(-170, 171, 4):
+    a = math.radians(deg)
+    axis, fwd = limb_cross("l_hip", "l_knee", vnorm((0.0, -math.cos(a), math.sin(a))))
+    if prev is not None:
+        worst = max(worst, math.degrees(math.acos(
+            max(-1.0, min(1.0, vdot(prev, fwd))))))
+    prev = fwd
+check("and does not jump swung right round", worst < 12.0,
+      "worst step %.1f deg over 4 deg moves" % worst)
+
+# carry_frame is what guarantees it: a swing adds no roll of its own
+axis = vnorm((0.3, -0.5, 0.8))
+fwd, side = carry_frame(((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)), axis)
+check("carry_frame returns a frame square to the bone",
+      abs(vdot(fwd, axis)) < 1e-12 and abs(vdot(side, axis)) < 1e-12
+      and abs(vdot(fwd, side)) < 1e-12 and abs(vlen(fwd) - 1.0) < 1e-12)
+check("and leaves a bone that has not moved alone",
+      vlen(vsub(carry_frame(((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
+                            (0.0, -1.0, 0.0))[0], (0.0, 0.0, 1.0))) < 1e-12)
+
 
 print("\nALL PASS" if ok else "\nFAILURES PRESENT")
 sys.exit(0 if ok else 1)

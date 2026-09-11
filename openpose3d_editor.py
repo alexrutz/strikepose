@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.19.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.20.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -1045,21 +1045,68 @@ def sample_profile(profile, t):
     return tuple(_catmull(p0[j], p1[j], p2[j], p3[j], s) for j in (1, 2, 3))
 
 
-def _tube(a, b, fwd_ref, side_ref, profile, scale_w=1.0, scale_d=1.0,
+def carry_frame(ref, axis):
+    """Carry a cross-section frame from one bone direction onto another.
+
+    `ref` is (reference axis, reference forward) - the frame the bone inherits
+    its roll from, forward perpendicular to the reference axis. The frame is
+    swung onto `axis` by the *minimal* rotation between the two directions, so
+    the bone gains no twist about itself that the reference did not already
+    have. Returns (forward, side), both perpendicular to `axis`.
+
+    Projecting a fixed reference onto the bone instead - which is what this
+    used to do - is discontinuous. `facing - axis * (facing . axis)` vanishes
+    the moment a bone points along the body's forward direction (a reach, a
+    sitting thigh, a kick), so the cross-section snapped 90 degrees there and
+    flipped a full 180 either side of it: the calf mass jumped from behind the
+    tibia to in front of it and the profile's width and depth swapped over. In
+    plain diagonal poses it was 45 degrees out. That is what wrung the limbs in
+    the depth map. A swing has no such singularity: it only degenerates when
+    the bone points exactly opposite its reference, which down a limb chain
+    means folded back on itself.
+    """
+    ref_axis, ref_fwd = ref
+    fwd = matvec(rotation_between(ref_axis, axis), ref_fwd)
+    fwd = vsub(fwd, vmul(axis, vdot(fwd, axis)))
+    if vlen(fwd) < 1e-6:
+        fwd = any_perpendicular(axis)
+    fwd = vnorm(fwd)
+    return fwd, vnorm(vcross(axis, fwd))
+
+
+def carry_chain(ref, *joints):
+    """One (axis, forward) frame per bone along a chain of joints.
+
+    Each bone inherits the roll of the one above it, so a bent elbow carries
+    the forearm round with it instead of letting it pick its own orientation.
+    A zero-length bone passes its parent's frame straight through rather than
+    restarting the chain from the torso.
+    """
+    out = []
+    for a, b in zip(joints, joints[1:]):
+        axis = vnorm(vsub(b, a))
+        if vlen(axis) < 1e-9:
+            out.append(ref)
+            continue
+        ref = (axis, carry_frame(ref, axis)[0])
+        out.append(ref)
+    return out
+
+
+def _tube(a, b, ref, profile, scale_w=1.0, scale_d=1.0,
           spacing=0.45, round_start=True, round_end=True, coarsen=1.0):
-    """Sweep a profile from a to b as a chain of oriented ellipsoids."""
+    """Sweep a profile from a to b as a chain of oriented ellipsoids.
+
+    `ref` is the (axis, forward) frame this bone takes its roll from; see
+    `carry_frame`. Passing the bone's own axis as the reference axis means
+    "use this forward as it stands".
+    """
     span = vsub(b, a)
     length = vlen(span)
     if length < 1e-6:
         return []
     axis = vmul(span, 1.0 / length)
-    fwd = vsub(fwd_ref, vmul(axis, vdot(fwd_ref, axis)))
-    if vlen(fwd) < 1e-4:
-        fwd = vsub(side_ref, vmul(axis, vdot(side_ref, axis)))
-    if vlen(fwd) < 1e-4:
-        fwd = any_perpendicular(axis)
-    fwd = vnorm(fwd)
-    side = vnorm(vcross(axis, fwd))
+    fwd, side = carry_frame(ref, axis)
 
     t0, t1 = profile[0][0], profile[-1][0]
     steps = max(5, int(abs(t1 - t0) * length / (spacing * coarsen)) + 1)
@@ -1136,9 +1183,16 @@ def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
     if vlen(facing) < 1e-6:
         facing = (0.0, 0.0, 1.0)
 
+    # Frames. Every swept part takes its roll from the one above it, ending
+    # at the torso, so a limb keeps the orientation it has in the rest pose
+    # however it is posed. See `carry_frame` for why deriving each bone's
+    # frame from `facing` on its own twisted them instead.
+    down = vmul(up_t, -1.0)
+    trunk_ref = (vnorm(vsub(hip_mid, sh_mid)), facing)
+
     # trunk
     if vis("r_shoulder", "l_shoulder", "r_hip", "l_hip"):
-        emit(tube(sh_mid, hip_mid, facing, side, torso_profile(B),
+        emit(tube(sh_mid, hip_mid, trunk_ref, torso_profile(B),
                    round_start=False, round_end=False))
 
     # bust: two masses on the front of the ribcage
@@ -1174,26 +1228,34 @@ def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
     for sd in ("r", "l"):
         sh, el, wr = sd + "_shoulder", sd + "_elbow", sd + "_wrist"
         hp, kn, an = sd + "_hip", sd + "_knee", sd + "_ankle"
+        # The chains are built whole, before anything is emitted: a hidden
+        # upper arm must not change how the forearm below it is rolled.
+        # The rest pose hangs both limbs straight down, so both start from the
+        # torso's own forward with `down` as the reference axis.
+        upper, fore = carry_chain((down, facing), pt(sh), pt(el), pt(wr))
+        thigh, calf = carry_chain((down, facing), pt(hp), pt(kn), pt(an))
         if vis(sh, el):
-            emit(tube(pt(sh), pt(el), facing, side, P_UPPER_ARM,
-                       girth[0], girth[0]))
+            emit(tube(pt(sh), pt(el), upper, P_UPPER_ARM, girth[0], girth[0]))
         if vis(el, wr):
-            emit(tube(pt(el), pt(wr), facing, side, P_FOREARM,
-                       girth[1], girth[1]))
+            emit(tube(pt(el), pt(wr), fore, P_FOREARM, girth[1], girth[1]))
         if vis(wr, el):
+            # the hand runs on along the forearm, so it shares its frame: the
+            # palm keeps facing the way it does with the arm hanging
             d = vnorm(vsub(pt(wr), pt(el)))
             emit(tube(pt(wr), vadd(pt(wr), vmul(d, 17.0 * B["hand"])),
-                       facing, side, P_HAND, B["hand"], B["hand"]))
+                       fore, P_HAND, B["hand"], B["hand"]))
         if vis(hp, kn):
-            emit(tube(pt(hp), pt(kn), facing, side, P_THIGH, girth[2], girth[2]))
+            emit(tube(pt(hp), pt(kn), thigh, P_THIGH, girth[2], girth[2]))
         if vis(kn, an):
-            emit(tube(pt(kn), pt(an), facing, side, P_CALF, girth[3], girth[3]))
+            emit(tube(pt(kn), pt(an), calf, P_CALF, girth[3], girth[3]))
         if vis(an):
-            drop = vnorm(vsub(pt(an), pt(kn))) if vis(kn) else vmul(up_t, -1.0)
+            drop = vnorm(vsub(pt(an), pt(kn))) if vis(kn) else down
             sole = vadd(pt(an), vmul(drop, 3.2 * B["foot"]))
             heel = vadd(sole, vmul(facing, -6.0 * B["foot"]))
             toe = vadd(sole, vmul(facing, 19.0 * B["foot"]))
-            emit(tube(heel, toe, drop, side, P_FOOT, B["foot"], B["foot"]))
+            # the foot turns off the shin, so its thickness stays across the
+            # sole however the leg is posed
+            emit(tube(heel, toe, calf, P_FOOT, B["foot"], B["foot"]))
 
     # neck and head
     neck = pt("neck")
@@ -1215,10 +1277,12 @@ def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
     nk = B["neck_girth"]
     emit(tube(vsub(neck, vmul(head_axis, 3.0)),
                vsub(ear_mid, vmul(head_axis, 8.0 * h)),
-               facing, side, P_NECK, nk, nk, round_start=False))
+               (up_t, facing), P_NECK, nk, nk, round_start=False))
+    # the skull has a forward of its own - the face - so it is its own
+    # reference rather than inheriting the neck's
     head = tube(vsub(ear_mid, vmul(head_axis, 10.6 * h)),
                  vadd(ear_mid, vmul(head_axis, 10.4 * h)),
-                 face, side, P_HEAD, h * B.get("jaw", 1.0), h,
+                 (head_axis, face), P_HEAD, h * B.get("jaw", 1.0), h,
                  round_start=False, round_end=False)
     head_side = vnorm(vcross(head_axis, face))
     if vis("nose"):

@@ -56,6 +56,26 @@ has twist bones specifically to catch this.
 rest orientation instead. Rolling a bone about its own axis must not move the
 joint it points at.
 
+**Roll is carried along a limb, never re-derived per bone.** Both depth paths
+learned this the hard way. `openpose3d_editor.carry_frame` swings a bone's
+cross-section frame onto its axis by the *minimal* rotation from the frame
+above it; `mesh_backend`'s roll reset does the same against the chain-carried
+rest reference. Projecting a fixed reference onto each bone instead - the
+body's `facing` for the anatomy, the pelvis-rotated rest frame for the rig -
+is discontinuous: it is undefined the moment a bone points along the
+reference, flips a full 180 degrees either side of it, and is 45 degrees out
+in plain diagonal poses. That is what kept coming out of the depth map as
+crooked and twisted limbs. Aiming a bone at a keypoint already composes
+minimal rotations down the tree, which *is* parallel transport, so the rig's
+roll reset should confirm what aiming worked out, never overrule it.
+
+**A frame test must compare a moved bone with a moved reference.** The check
+that was meant to guard the above compared the posed bone against the rest
+reference left where it was, which measures the swing, not the twist - so it
+read 176 degrees of jump between neighbouring poses as success. Both suites
+now sweep a limb right round and assert the frame never steps further than the
+pose did.
+
 **Assets ride the body's pose solution.** `solve_pose` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
 solve an asset separately or it will drift from the body.

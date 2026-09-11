@@ -71,6 +71,14 @@ AIM_CHAIN = [
     ("r_knee", "r_ankle", "r_ankle"),
 ]
 
+# Which bone each aimed bone takes its roll from. Roll is carried down a limb
+# rather than derived for each bone on its own, so the only direction that can
+# degenerate is a bone folded exactly back onto the one above it. Roots of a
+# chain are absent and fall back to the pelvis.
+ROLL_PARENT = {"l_shoulder": "l_collar", "r_shoulder": "r_collar",
+               "l_elbow": "l_shoulder", "r_elbow": "r_shoulder",
+               "l_knee": "l_hip", "r_knee": "r_hip"}
+
 COMPONENT = {5120: "b", 5121: "B", 5122: "h", 5123: "H", 5125: "I", 5126: "f"}
 COMPONENT_SIZE = {"b": 1, "B": 1, "h": 2, "H": 2, "I": 4, "f": 4}
 NUM_COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
@@ -526,6 +534,8 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
     # exactly where it was, so this cannot disturb the pose; the child is
     # re-aimed afterwards to bring its own subtree back.
     if rest_orient is not None:
+        carried = {}            # role -> rest space to posed space, roll and all
+
         def roll_align(role, child_role):
             if role not in roles or child_role not in roles:
                 return
@@ -539,7 +549,21 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
                                for i in range(3)]))
             reference = frame[:, k]
             current = Q[j] @ reference
-            wanted = rotation @ reference
+            # Swing the reference onto the bone's posed axis before comparing.
+            # Carrying it by the pelvis alone leaves it perpendicular to the
+            # *rest* direction, so once the bone has swung away from rest the
+            # part of it that survives projection onto the plane across `axis`
+            # shrinks towards nothing and the angle below becomes noise: 45 deg
+            # of spurious twist on an arm reaching forward and down, a clean
+            # 180 on one across the body, and the forearm of a bent elbow
+            # wrung right over. The swing is the minimal rotation, so it adds
+            # no twist of its own, and it keeps the reference the same angle
+            # off the axis as it was off rest_dir - at least 54 deg for the
+            # least-aligned column of an orthonormal frame, so never degenerate.
+            base = carried.get(ROLL_PARENT.get(role), rotation)
+            swing = rotation_between(base @ rest_dir, axis) @ base
+            carried[role] = swing
+            wanted = swing @ reference
             current = current - axis * float(np.dot(current, axis))
             wanted = wanted - axis * float(np.dot(wanted, axis))
             if np.linalg.norm(current) < 1e-6 or np.linalg.norm(wanted) < 1e-6:
@@ -1072,35 +1096,85 @@ def _selftest():
     want = unit(np.asarray(turned["nose"], float)
                 - 0.5 * (np.asarray(turned["r_ear"], float)
                          + np.asarray(turned["l_ear"], float)))
-    # twist: aiming alone leaves a large roll on the elbow
-    loose = pose_globals(rest, mesh["parents"], roles, pts, stretch=False)[0]
-    tight, tq = pose_globals(rest, mesh["parents"], roles, pts, stretch=False,
-                             rest_orient=mesh["rest_global"][:, :3, :3])
+    # Twist.
+    #
+    # Aiming composes a *minimal* rotation per bone onto its parent's global,
+    # which is parallel transport: swing a limb and its frame follows without
+    # gaining any roll of its own. So there is no leftover roll for the reset
+    # to cut, and the job of these checks is to prove the reset never invents
+    # one. The version before this measured the roll against the rest
+    # reference left where it was, found the large number that always falls
+    # out of comparing a moved bone with an unmoved one, and "corrected" it -
+    # which is what wrung the limbs in the depth map. It scored 176 degrees of
+    # jump between neighbouring poses as success.
     orient = mesh["rest_global"][:, :3, :3]
-
-    def residual_roll(Q, q, role, child):
-        j, c = roles[role], roles[child]
-        axis = unit(q[c] - q[j])
-        rest_dir = unit(rest[c] - rest[j])
-        k = int(np.argmin([abs(float(np.dot(orient[j][:, i], rest_dir)))
-                           for i in range(3)]))
-        ref = orient[j][:, k]
-        cur = Q[j] @ ref
-        cur = cur - axis * float(np.dot(cur, axis))
-        want = ref - axis * float(np.dot(ref, axis))
-        if min(np.linalg.norm(cur), np.linalg.norm(want)) < 1e-6:
-            return 0.0
-        return math.degrees(math.acos(float(np.clip(
-            np.dot(unit(cur), unit(want)), -1, 1))))
-
-    _lq = pose_globals(rest, mesh["parents"], roles, pts, stretch=False)[1]
-    before = max(residual_roll(loose, _lq, r, c) for r, c, _t in AIM_CHAIN)
-    after = max(residual_roll(tight, tq, r, c) for r, c, _t in AIM_CHAIN)
-    check("twist reset cuts the leftover roll", after < before / 5.0,
-          "%.1f deg -> %.1f deg" % (before, after))
+    loose, _lq = pose_globals(rest, mesh["parents"], roles, pts, stretch=False)
+    tight, tq = pose_globals(rest, mesh["parents"], roles, pts, stretch=False,
+                             rest_orient=orient)
     moved = max(float(np.linalg.norm(tq[roles[r]] - _lq[roles[r]]))
                 for r in ("l_wrist", "r_wrist", "l_ankle", "r_ankle"))
-    check("and moves no joint at all", moved < 1e-9, "%.2e cm" % moved)
+    check("rolling a bone moves no joint at all", moved < 1e-9, "%.2e cm" % moved)
+
+    def arm_pose(upper, lower):
+        out = dict(pts)
+        sh = np.asarray(pts["l_shoulder"], float)
+        el = sh + unit(np.asarray(upper, float)) * 28.0
+        out["l_elbow"] = tuple(el)
+        out["l_wrist"] = tuple(el + unit(np.asarray(lower, float)) * 26.0)
+        return out
+
+    def arm_frames(upper, lower, rest_orient):
+        """Where each arm bone's cross-section points, across its own axis."""
+        Q, q = pose_globals(rest, mesh["parents"], roles, arm_pose(upper, lower),
+                            stretch=False, rest_orient=rest_orient)
+        out = []
+        for role, child in (("l_shoulder", "l_elbow"), ("l_elbow", "l_wrist")):
+            j, c = roles[role], roles[child]
+            axis = unit(q[c] - q[j])
+            k = int(np.argmin([abs(float(np.dot(
+                orient[j][:, i], unit(rest[c] - rest[j])))) for i in range(3)]))
+            ref = Q[j] @ orient[j][:, k]
+            out.append(unit(ref - axis * float(np.dot(ref, axis))))
+        return out
+
+    def biggest_step(poses, rest_orient):
+        worst, prev = 0.0, None
+        for upper, lower in poses:
+            frames = arm_frames(upper, lower, rest_orient)
+            if prev is not None:
+                for a, b in zip(prev, frames):
+                    worst = max(worst, math.degrees(math.acos(
+                        float(np.clip(np.dot(a, b), -1.0, 1.0)))))
+            prev = frames
+        return worst
+
+    # A question no roll formula can satisfy by construction: a limb swung
+    # smoothly must not jump. Both sweeps run right past the directions where
+    # the old roll snapped - the arm along the body's own forward, and the
+    # forearm of a bent elbow coming back across the upper arm.
+    step = 4
+    swept = [((math.sin(math.radians(d)), -math.cos(math.radians(d)), 0.0),) * 2
+             for d in range(-170, 171, step)]
+    folded = [((0.0, 0.0, 1.0),
+               (math.cos(math.radians(d)), math.sin(math.radians(d)), 0.0))
+              for d in range(0, 360, step)]
+    for label, poses in (("a limb swung right round", swept),
+                         ("the forearm of a bent elbow", folded)):
+        for how, rest_orient in (("aimed", None), ("with the roll reset", orient)):
+            jump = biggest_step(poses, rest_orient)
+            check("%s does not jump (%s)" % (label, how), jump < 3.0 * step,
+                  "worst step %.1f deg over %d deg moves" % (jump, step))
+
+    # and the reset must agree with what aiming already worked out, not fight it
+    drift = 0.0
+    for upper, lower in swept[::5] + folded[::5]:
+        a = arm_frames(upper, lower, None)
+        b = arm_frames(upper, lower, orient)
+        for u, v in zip(a, b):
+            drift = max(drift, math.degrees(math.acos(
+                float(np.clip(np.dot(u, v), -1.0, 1.0)))))
+    check("the roll reset confirms the aimed roll rather than replacing it",
+          drift < 1.0, "worst disagreement %.2f deg" % drift)
 
     check("head turns with the face keypoints",
           float(np.dot(unit(facing), want)) > 0.98,
