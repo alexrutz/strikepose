@@ -91,6 +91,21 @@ often. Losing the whole pose to a misspelled joint would make the CLI useless
 exactly where a small local model is the point. `apply_commands` returns the
 warnings and carries on.
 
+**A garment is the body's own sweep, clipped and padded.** `wearables` does
+not carry meshes: it reads `body_segments` - the same table `body_parts`
+builds solids from - takes the stretch of a segment a garment covers and pushes
+the profile outward. That is what makes a sleeve fit every preset and every
+pose with nothing to fit and nothing to drift. Padding is centimetres, never a
+multiplier: a multiplier on a wide hip and a narrow one is two different
+garments. And a pad has to survive `render_depth`'s two-centimetre smooth
+minimum, which is why a t-shirt is a centimetre of cloth rather than the two
+millimetres it really is.
+
+**Hair falls down a back, and a back is deeper than the skull it hangs from.**
+Anchoring a fall on the head's own surface buries it in the shoulders;
+anchoring it behind the shoulders leaves a plank hovering with a gap above it.
+It starts touching the head and *leans* back over its length by the difference.
+
 **Objects reach the depth map, never the pose map.** A chair drawn into an
 OpenPose image is read as a limb. `render_scene` and the editor's exports keep
 them apart, and both suites assert the pose PNG is byte-identical with and
@@ -103,6 +118,17 @@ result. The anchor stops being true the moment anything is dragged, so keeping
 it would be keeping a lie. `under_hips` is the one anchor that sets a height
 rather than a position: the object's top meets the hip and its base still
 reaches the floor, which is what makes a chair fit a child and an adult.
+
+**A head is not a scaled copy of the body under it.** Fitting log head size
+on log stature across ANSUR II gives an exponent of 0.07 for head breadth, 0.24
+for tragion-to-crown and 0.34 for head length - a quarter - against 0.89 for
+the hand. This used stature / 175, an exponent of one, and carried a special
+case forcing a child's head back up because the result was absurd. The exponent
+does that on its own. The other sex differences worth having are in `ANSUR`
+too: a woman's head is 4% larger against her height than straight scaling
+gives, and her narrowest waist sits at 0.569 of the way from shoulder to hip
+against his 0.593. The limb girth multipliers were already right - checked, not
+assumed.
 
 **Proportions come from ANSUR II, and a test says so.** The 2012 US Army
 survey: 4082 men, 1986 women, 93 measurements, public since 2017. The `ANSUR`
@@ -152,6 +178,9 @@ solve an asset separately or it will drift from the body.
   when the jump is within 40 degrees of the reversal. A jump anywhere else is
   a bug. On a rig with arms down at rest - MakeHuman, MPFB2 - the same sweep
   steps 4 degrees and never jumps.
+- A stack of tapering cylinders seen end-on shows every flat rim it has. A
+  ponytail built with stations half a gap apart came out looking like a comb;
+  `_cloth_tube` overlaps by 0.78 of the gap, as the body's own sweep does.
 - Objects need a box primitive of their own. Swept as an elliptical cylinder
   a crate has rounded sides, and a depth map of a room built from those reads
   as a room full of cushions. `_box_z` is the same slab clip `_slab_z` does

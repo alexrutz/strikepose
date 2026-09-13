@@ -51,6 +51,7 @@ import urllib.error
 import urllib.request
 
 import props as props_module
+import wearables
 from openpose3d_editor import (
     BODY_PRESETS, DEFAULT_PRESET, KEYPOINT_NAMES, VERSION, Camera, Skeleton,
     anatomy_depth_image, carry_chain, frame_rect, inside_polygon, pose_image,
@@ -217,7 +218,16 @@ ANCHORS = {
     "overhead": ("head", "bottom"),
 }
 
-OPS = ("stance", "point", "bend", "turn", "lean", "look", "hide", "place")
+OPS = ("stance", "point", "bend", "turn", "lean", "look", "hide", "place",
+       "wear")
+
+# Every wearable, flattened: a model does far better picking one name out of a
+# list than picking a slot and then a name that has to belong to it. The slot
+# is looked up from the name, which is unambiguous because no two slots share
+# one.
+WEARABLES = {name: slot for slot in wearables.SLOTS
+             for name in wearables.options(slot) if name != "none"}
+WEARABLE_NAMES = sorted(WEARABLES)
 
 POINT_TARGETS = sorted(set(BONES) | set(LIMBS))
 SHAPE_NAMES = list(props_module.SHAPE_NAMES)
@@ -248,6 +258,7 @@ def command_schema():
             "at": {"type": "string", "enum": sorted(ANCHORS)},
             "distance": {"type": "number"},
             "size": {"type": "number"},
+            "wears": {"type": "string", "enum": WEARABLE_NAMES},
         },
         "required": ["op"],
     }
@@ -293,6 +304,7 @@ Commands, applied in order:
   {"op":"hide","target":JOINT_OR_LIMB}         mark it off-frame or occluded
   {"op":"place","shape":SHAPE,"at":ANCHOR,"distance":CM,"size":N,"degrees":N}
                                               put an object in the scene
+  {"op":"wear","wears":GARMENT}                dress the figure
 
 stance NAME: %(stances)s
 point target: %(points)s
@@ -303,6 +315,10 @@ bend target:  %(bends)s
 direction:    %(directions)s
 camera:       %(cameras)s
 preset:       %(presets)s
+
+wear:         %(wearables)s
+  one from each of hair, headgear, top, bottom and shoes at most; they stack,
+  so a coat does not remove the trousers. Leave a slot out to leave it bare.
 
 place shape:  %(shapes)s
 place at:     %(anchors)s
@@ -329,6 +345,7 @@ def system_prompt():
         "cameras": ", ".join(sorted(CAMERA_VIEWS)),
         "presets": ", ".join(sorted(BODY_PRESETS)),
         "shapes": ", ".join(SHAPE_NAMES),
+        "wearables": ", ".join(WEARABLE_NAMES),
         "anchors": ", ".join(sorted(ANCHORS)),
     }
 
@@ -550,6 +567,16 @@ def apply_command(skeleton, command, props=None):
             return "unknown hide target %r" % (target,)
         for joint in joints:
             skeleton.visible[INDEX[joint]] = False
+        return None
+
+    if op == "wear":
+        name = command.get("wears") or command.get("name") or target
+        slot = WEARABLES.get(name)
+        if slot is None:
+            return "nothing called %r to wear" % (name,)
+        outfit = dict(getattr(skeleton, "outfit", None) or {})
+        outfit[slot] = name
+        skeleton.outfit = outfit
         return None
 
     if op == "place":
@@ -885,6 +912,50 @@ KEYWORD_OBJECTS = [
 ]
 
 
+KEYWORD_WEARABLES = [
+    (r"\b(long hair|flowing hair)\b", "long"),
+    (r"\b(ponytail|pony.?tail)\b", "ponytail"),
+    (r"\b(bun|top.?knot|chignon)\b", "bun"),
+    (r"\b(bob|bobbed)\b", "bob"),
+    (r"\b(afro)\b", "afro"),
+    (r"\b(bald|shaved head|buzz.?cut)\b", "shaved"),
+    (r"\b(short hair)\b", "short"),
+    (r"\b(helmet|knight|visor)\b", "helmet"),
+    (r"\b(cap|baseball cap)\b", "cap"),
+    (r"\b(hat|fedora|sun.?hat)\b", "hat"),
+    (r"\b(beanie|woolly hat|wool hat)\b", "beanie"),
+    (r"\b(t.?shirt|tee)\b", "t_shirt"),
+    (r"\b(tank top|vest|singlet)\b", "tank_top"),
+    (r"\b(hoodie|hooded)\b", "hoodie"),
+    (r"\b(jacket|blazer)\b", "jacket"),
+    (r"\b(coat|overcoat|trench)\b", "coat"),
+    (r"\b(armou?r|breastplate|knight)\b", "armour"),
+    (r"\b(long.?sleeve|jumper|sweater|shirt)\b", "long_sleeve"),
+    (r"\b(shorts)\b", "shorts"),
+    (r"\b(trousers|pants|jeans|leggings)\b", "trousers"),
+    (r"\b(long skirt|maxi skirt)\b", "long_skirt"),
+    (r"\b(skirt)\b", "skirt"),
+    (r"\b(dress|gown)\b", "dress"),
+    (r"\b(robe|cloak|wizard|monk)\b", "robe"),
+    (r"\b(tall boots|riding boots|thigh boots)\b", "tall_boots"),
+    (r"\b(boots)\b", "boots"),
+    (r"\b(shoes|trainers|sneakers)\b", "shoes"),
+]
+
+
+def keyword_wearables(text):
+    """Clothes and hair the prompt named. First match per slot wins, so
+    "a long skirt" is a long skirt rather than a skirt and then a long one."""
+    out, taken = [], set()
+    for pattern, name in KEYWORD_WEARABLES:
+        slot = WEARABLES.get(name)
+        if slot in taken or not re.search(pattern, text):
+            continue
+        taken.add(slot)
+        out.append({"op": "wear", "wears": name})
+    return out
+
+
 def keyword_objects(text, commands):
     """Objects the prompt named, plus the one a seated figure cannot do without.
 
@@ -926,6 +997,7 @@ def keyword_plan(prompt):
             break
     if re.search(r"\b(arms? (out|wide)|spread)\b", text) and not commands:
         commands.append({"op": "stance", "name": "t_pose"})
+    commands.extend(keyword_wearables(text))
     commands.extend(keyword_objects(text, commands))
     if re.search(r"\b(lean\w* forward|bent over|bowing|bow)\b", text):
         commands.append({"op": "lean", "direction": "forward", "degrees": 30})
@@ -1198,6 +1270,7 @@ def describe_vocabulary():
         "bend       : " + ", ".join(sorted(BEND_JOINTS)),
         "directions : " + ", ".join(sorted(DIRECTIONS)),
         "cameras    : " + ", ".join(sorted(CAMERA_VIEWS)),
+        "wearables  : " + ", ".join(WEARABLE_NAMES),
         "shapes     : " + ", ".join(SHAPE_NAMES),
         "anchors    : " + ", ".join(sorted(ANCHORS)),
         "presets    : " + ", ".join(sorted(BODY_PRESETS)),
@@ -1441,6 +1514,48 @@ def _selftest():
           len(scene) == 24 and len(warnings) == 6
           and "too many" in warnings[-1], "%d placed" % len(scene))
 
+    # clothes
+    skeleton = Skeleton(preset_params(DEFAULT_PRESET))
+    before = lengths(skeleton)
+    trouble = [w for name in WEARABLE_NAMES
+               for w in apply_commands(skeleton,
+                                       [{"op": "wear", "wears": name}], [])]
+    check("every wearable can be worn", not trouble, str(trouble[:2]))
+    check("and wearing them changes no bone length",
+          max(abs(a - b) for a, b in zip(before, lengths(skeleton))) < 1e-9)
+    check("the last of each slot is what stays on",
+          skeleton.outfit == {slot: sorted(n for n in WEARABLE_NAMES
+                                           if WEARABLES[n] == slot)[-1]
+                              for slot in wearables.SLOTS},
+          str(skeleton.outfit))
+
+    skeleton = Skeleton(preset_params(DEFAULT_PRESET))
+    apply_commands(skeleton, [{"op": "wear", "wears": "jacket"},
+                              {"op": "wear", "wears": "trousers"},
+                              {"op": "wear", "wears": "nothing at all"}], [])
+    check("slots stack rather than replacing one another",
+          skeleton.outfit == {"top": "jacket", "bottom": "trousers"},
+          str(skeleton.outfit))
+    check("and a garment nobody has is reported, not worn",
+          apply_command(Skeleton(preset_params(DEFAULT_PRESET)),
+                        {"op": "wear", "wears": "cape"}) is not None)
+
+    # clothes have to reach the depth map and stay out of the pose map
+    dressed, _scene, camera, _r = build_scene({"figures": [{"commands": [
+        {"op": "wear", "wears": "coat"}, {"op": "wear", "wears": "long"}]}]})
+    bare, _s2, _c2, _r2 = build_scene({"figures": [{"commands": []}]})
+    rect = frame_rect(900, 700, 512.0 / 768.0)
+    lit = render_scene(dressed, camera, 128, 192)
+    plain = render_scene(bare, camera, 128, 192)
+    check("a coat shows up in the depth map",
+          sum(1 for v in lit[1].tobytes() if v)
+          > sum(1 for v in plain[1].tobytes() if v) + 200,
+          "%d px vs %d" % (sum(1 for v in lit[1].tobytes() if v),
+                           sum(1 for v in plain[1].tobytes() if v)))
+    check("and never in the pose map",
+          [p for p, _v in project_people(dressed, camera, rect, 128, 192)]
+          == [p for p, _v in project_people(bare, camera, rect, 128, 192)])
+
     # a seat has to reach from the floor to the hips, whatever the figure did
     for stance, preset in (("sitting", DEFAULT_PRESET),
                            ("sitting", "Child, about 7"),
@@ -1525,8 +1640,13 @@ def _selftest():
 
     # a plan end to end, with no model anywhere
     figures, scene, camera, report = pose_from_prompt(
-        "a woman sitting on a chair, seen from three quarters")
+        "a woman with long hair in a dress, sitting on a chair, seen from "
+        "three quarters")
     check("keyword route reads the prompt", report["source"] == "keywords")
+    check("and dresses her as asked",
+          figures[0].outfit.get("bottom") == "dress"
+          and figures[0].outfit.get("hair") == "long",
+          str(figures[0].outfit))
     check("and picks the figure out of it",
           figures[0].body.get("preset") == "Female, average",
           figures[0].body.get("preset"))

@@ -183,6 +183,63 @@ check("and a cylinder still comes out round", abs(ratio - math.pi / 4.0) < 0.03,
       "covers %.3f of the box around it, pi/4 is %.3f"
       % (ratio, math.pi / 4.0))
 
+# -- hair and clothes ------------------------------------------------------
+import wearables
+app.props = []
+app.active_prop = None
+w, h = app._sizes()
+bare_px = int((np.asarray(app.depth_image(w, h)) > 0).sum())
+bare_pose = app.export_people(w, h)
+
+app.outfit_vars["top"].set("coat")
+app.set_worn("top")
+app.outfit_vars["hair"].set("long")
+app.set_worn("hair")
+root.update()
+check("the panel dresses the active figure",
+      app.skeleton.outfit == {"top": "coat", "hair": "long"},
+      str(app.skeleton.outfit))
+dressed_px = int((np.asarray(app.depth_image(w, h)) > 0).sum())
+check("and the clothes reach the depth map", dressed_px > bare_px + 300,
+      "%d px vs %d" % (dressed_px, bare_px))
+check("and never reach the pose map", app.export_people(w, h) == bare_pose)
+
+app.undo()
+root.update()
+check("undo takes the last thing off",
+      app.skeleton.outfit == {"top": "coat"}, str(app.skeleton.outfit))
+check("and the panel follows it", app.outfit_vars["hair"].get() == "none")
+
+# each figure dresses itself
+app.outfit_vars["hair"].set("bun")
+app.set_worn("hair")
+app.add_figure()
+root.update()
+check("a new figure starts bare", not wearables.worn(app.skeleton.outfit),
+      str(app.skeleton.outfit))
+app.outfit_vars["headgear"].set("helmet")
+app.set_worn("headgear")
+app.set_active(0)
+root.update()
+check("switching back shows the first figure's outfit",
+      app.outfit_vars["hair"].get() == "bun"
+      and app.outfit_vars["headgear"].get() == "none",
+      str({k: v.get() for k, v in app.outfit_vars.items()}))
+
+data = scene_to_dict(app.figures, app.camera,
+                     [app.export_points(w, h, f)
+                      for f in range(len(app.figures))], w, h, app.props)
+loaded = json.loads(json.dumps(data))
+check("an outfit survives a save and a reload",
+      [e.get("outfit") for e in loaded["figures"]]
+      == [f.outfit for f in app.figures],
+      str([e.get("outfit") for e in loaded["figures"]]))
+
+app.strip()
+check("and it can all come off", not wearables.worn(app.skeleton.outfit))
+app.delete_figure()
+root.update()
+
 # -- the viewport ----------------------------------------------------------
 app.set_flag("show_body", True)
 app.redraw()

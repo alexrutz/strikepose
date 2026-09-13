@@ -79,6 +79,22 @@ Whatever the source, delete MakeHuman's helper geometry before exporting, or
 the skirt and tights read as clothing in the depth map - the loader drops small
 loose shells, but deleting them in MPFB2 is cleaner.
 
+## Hair and clothes
+
+The **Hair and clothes** panel dresses the active figure from five independent
+slots - hair, headgear, top, bottom, feet - so a coat does not take the
+trousers off. `python3 wearables.py --list` prints them all.
+
+A garment is not a mesh. It is the body's own swept profile, taken over the
+stretch it covers and pushed outward by a few millimetres of cloth, so it fits
+every preset and every pose for nothing: it *is* the arm, slightly larger. The
+cost is that cloth cannot hang - a skirt flares because it is told to, not
+because it falls - which for a depth map is the right trade, since what
+conditions the generator is the silhouette.
+
+Outfits save with the scene and ride the undo stack, and the prompt route reads
+them: "a woman with long hair in a long skirt and boots" dresses her.
+
 ## Objects
 
 A depth map conditions everything in frame, not only the person, and a figure

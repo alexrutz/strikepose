@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.24.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.25.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -211,6 +211,10 @@ ANSUR = {
         "upper_arm": 0.1909,            # acromion-radiale
         "forearm": 0.1525,              # radiale-stylion
         "ear_drop": 13.11 / 175.62,     # tragion to top of head
+        "head": 1.0,                    # head size, male mean is the reference
+        "jaw": 1.0,                     # bizygomatic breadth
+        "waist_t": 0.593,               # tenth rib, along shoulder to hip
+        "stature_ref": 175.62,
     },
     "female": {
         "shoulder_height": 0.8198,
@@ -224,8 +228,24 @@ ANSUR = {
         "upper_arm": 0.1911,
         "forearm": 0.1482,
         "ear_drop": 12.65 / 162.85,
+        "head": 0.9545,                 # head length and breadth against his
+        "jaw": 0.938,                   # bizygomatic breadth against his
+        "waist_t": 0.569,               # her narrowest point sits higher
+        "stature_ref": 162.85,
     },
 }
+
+# A head is not a scaled copy of the body it sits on. Fitting log head size on
+# log stature across the survey gives an exponent of 0.07 for head breadth,
+# 0.24 for the tragion-to-crown height and 0.34 for head length - call it a
+# quarter - against 0.89 for the hand and 0.63 for the shoulders. A tall person
+# has a head barely bigger than a short one.
+#
+# This used stature / 175, an exponent of one, and then had a special case
+# forcing a child's head back up because the result was absurd. The exponent
+# does that on its own: a 122 cm child comes out at 0.91 where the special case
+# said 0.88, and a 163 cm woman at 0.95 where straight scaling said 0.93.
+HEAD_EXPONENT = 0.25
 
 # Hip width is the one skeletal number ANSUR cannot give: it measures the iliac
 # crests and the soft-tissue hip, not the femoral heads the leg actually swings
@@ -276,7 +296,9 @@ def derive_proportions(stature, sex="male", leg_ratio=1.0):
         "forearm": forearm,
         "thigh": thigh,
         "calf": shank,
-        "head": stature / 175.0,
+        "head": m["head"] * (stature / m["stature_ref"]) ** HEAD_EXPONENT,
+        "jaw": m["jaw"],
+        "waist_t": m["waist_t"],
         # the nose tip sits a little below the ear canal, which ANSUR has no
         # landmark pair for; the offset is the one this has always carried
         "nose_up": ear_up - 0.005 * stature,
@@ -288,7 +310,7 @@ BASE_BODY = {
     # skeleton
     "shoulder_w": 19.0, "shoulder_drop": 0.0, "hip_w": 10.0, "torso_len": 52.0,
     "upper_arm": 28.5, "forearm": 26.0, "thigh": 43.0, "calf": 43.0,
-    "head": 1.0,
+    "head": 1.0, "waist_t": 0.593,
     # measured cross-sections: (half width, half depth) in centimetres
     "chest": (14.47, 12.69), "waist": (14.0, 10.4), "pelvis": (17.0, 12.0),
     "belly": 0.0,
@@ -389,11 +411,8 @@ def preset_params(name):
     sex = overrides.pop("sex", "male")
     leg_ratio = overrides.pop("leg_ratio", 1.0)
     body.update(derive_proportions(stature, sex, leg_ratio))
-    if sex == "female":
-        body["jaw"] = 0.94
-    if stature < 140:                       # a child's head is nearly adult size
-        body["head"] = 0.88
-        body["jaw"] = 0.94
+    if stature < 140:                       # a child's face is narrower
+        body["jaw"] = min(body["jaw"], 0.94)
     body.update(overrides)
     body["stature"] = stature
     body["sex"] = sex
@@ -597,7 +616,12 @@ class Skeleton:
         self.lengths = {c: vlen(vsub(self.points[c], self.points[p]))
                         for p, c in LIMB_SEQ}
         self.anchors = []           # 0: neck-rooted, 1: pivot, 2: hinge axis
-        self.assets = []            # hair and clothing worn by this figure
+        self.assets = []            # rigged-mesh add-ons on the same armature
+        # {slot: preset} of hair and clothing; empty is bare. Normalised by
+        # wearables.clean on the way in rather than validated here, so this
+        # module needs nothing from wearables at import time - wearables
+        # imports the geometry helpers from this one.
+        self.outfit = {}
 
     @staticmethod
     def torso_frame(pts):
@@ -912,7 +936,7 @@ class Skeleton:
     def snapshot(self):
         return (list(self.points), list(self.visible), dict(self.lengths),
                 dict(self.body), self.body_scale, list(self.anchors),
-                list(self.assets))
+                list(self.assets), dict(self.outfit))
 
     def restore(self, snap):
         self.points, self.visible = list(snap[0]), list(snap[1])
@@ -924,6 +948,8 @@ class Skeleton:
                 else ([] if snap[5] == ROOT else [snap[5]])
         if len(snap) > 6:
             self.assets = list(snap[6])
+        if len(snap) > 7:
+            self.outfit = dict(snap[7])
 
 
 # ---------------------------------------------------------------------------
@@ -1070,7 +1096,9 @@ def torso_profile(body):
         (0.075, 0.99 * cw, 0.97 * cd, 0.3),      # armpit line
         (0.210, 1.00 * cw, 1.00 * cd, 0.5),      # chest / bust line
         (0.420, 0.88 * cw, 0.92 * cd, 0.3 + 0.35 * belly),
-        (0.590, ww, wd, belly),                  # waist, the narrowest station
+        # the narrowest station is the tenth rib, and it sits higher on a woman:
+        # 0.569 of the way from shoulder to hip against 0.593 on a man
+        (body.get("waist_t", 0.593), ww, wd, belly),
         (0.780, 0.90 * pw, 0.94 * pd, 0.3 * belly),
         (0.930, pw, pd, -0.5),                   # hips
         (1.090, 0.95 * pw, 1.01 * pd, -1.9),     # seat
@@ -1192,16 +1220,24 @@ def _blob(centre, axes, radii):
     return [("ball", centre, axes, radii)]
 
 
-def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
-    """Posed body as a list of parts; each part is a list of oriented
-    ellipsoids (centre, orthonormal axes, radii) in world space."""
+def body_segments(skeleton, respect_visibility=True):
+    """Every swept part of the figure, before any of it is turned into solids.
+
+    Returns (segments, frame). A segment is a dict carrying what `_tube` needs:
+    where it runs from and to, the frame it takes its roll from, the profile it
+    sweeps and how much to scale that profile by.
+
+    Pulled out of `body_parts` because a garment is the body's own sweep,
+    clipped to a stretch of it and padded outward - which is what makes a
+    sleeve fit whatever preset and whatever pose it finds, with nothing to fit
+    and nothing to drift. `wearables` reads this table; so does the body.
+    """
     P = skeleton.points
     ids = {n: i for i, n in enumerate(KEYPOINT_NAMES)}
     B = getattr(skeleton, "body", None)
     if B is None or "deltoid" not in B:      # scene from an older version
         B = merge_body(B)
         skeleton.body = B
-    k = thickness * getattr(skeleton, "body_scale", 1.0)
 
     def pt(n):
         return P[ids[n]]
@@ -1210,22 +1246,6 @@ def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
         return True if not respect_visibility else all(
             skeleton.visible[ids[n]] for n in names)
 
-    def scaled(part):
-        """radii are in centimetres; k scales the whole figure"""
-        return [(kind, c, ax, (r[0] * k, r[1] * k, r[2] * k))
-                for kind, c, ax, r in part]
-
-    parts = []
-
-    def emit(part):
-        if part:
-            parts.append(scaled(part))
-
-    def tube(*args, **kw):
-        kw["coarsen"] = coarsen
-        return _tube(*args, **kw)
-
-    # torso frame
     r_sh, l_sh = pt("r_shoulder"), pt("l_shoulder")
     r_hip, l_hip = pt("r_hip"), pt("l_hip")
     sh_mid = vmul(vadd(r_sh, l_sh), 0.5)
@@ -1247,10 +1267,127 @@ def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
     down = vmul(up_t, -1.0)
     trunk_ref = (vnorm(vsub(hip_mid, sh_mid)), facing)
 
-    # trunk
+    segments = {}
+
+    def add(name, a, b, ref, profile, scale_w=1.0, scale_d=1.0, **kw):
+        segments[name] = dict(a=a, b=b, ref=ref, profile=profile,
+                              scale_w=scale_w, scale_d=scale_d, **kw)
+
     if vis("r_shoulder", "l_shoulder", "r_hip", "l_hip"):
-        emit(tube(sh_mid, hip_mid, trunk_ref, torso_profile(B),
-                   round_start=False, round_end=False))
+        add("torso", sh_mid, hip_mid, trunk_ref, torso_profile(B),
+            round_start=False, round_end=False)
+
+    girth = (B["arm_girth"], B["forearm_girth"], B["thigh_girth"], B["calf_girth"])
+    for sd in ("r", "l"):
+        sh, el, wr = sd + "_shoulder", sd + "_elbow", sd + "_wrist"
+        hp, kn, an = sd + "_hip", sd + "_knee", sd + "_ankle"
+        # The chains are built whole, before anything is emitted: a hidden
+        # upper arm must not change how the forearm below it is rolled.
+        # The rest pose hangs both limbs straight down, so both start from the
+        # torso's own forward with `down` as the reference axis.
+        upper, fore = carry_chain((down, facing), pt(sh), pt(el), pt(wr))
+        thigh, calf = carry_chain((down, facing), pt(hp), pt(kn), pt(an))
+        if vis(sh, el):
+            add(sd + "_upper_arm", pt(sh), pt(el), upper, P_UPPER_ARM,
+                girth[0], girth[0])
+        if vis(el, wr):
+            add(sd + "_forearm", pt(el), pt(wr), fore, P_FOREARM,
+                girth[1], girth[1])
+        if vis(wr, el):
+            # the hand runs on along the forearm, so it shares its frame: the
+            # palm keeps facing the way it does with the arm hanging
+            d = vnorm(vsub(pt(wr), pt(el)))
+            add(sd + "_hand", pt(wr), vadd(pt(wr), vmul(d, 17.0 * B["hand"])),
+                fore, P_HAND, B["hand"], B["hand"])
+        if vis(hp, kn):
+            add(sd + "_thigh", pt(hp), pt(kn), thigh, P_THIGH,
+                girth[2], girth[2])
+        if vis(kn, an):
+            add(sd + "_calf", pt(kn), pt(an), calf, P_CALF, girth[3], girth[3])
+        if vis(an):
+            drop = vnorm(vsub(pt(an), pt(kn))) if vis(kn) else down
+            sole = vadd(pt(an), vmul(drop, 3.2 * B["foot"]))
+            heel = vadd(sole, vmul(facing, -6.0 * B["foot"]))
+            toe = vadd(sole, vmul(facing, 19.0 * B["foot"]))
+            # the foot turns off the shin, so its thickness stays across the
+            # sole however the leg is posed
+            add(sd + "_foot", heel, toe, calf, P_FOOT, B["foot"], B["foot"])
+
+    neck = pt("neck")
+    if vis("r_ear", "l_ear"):
+        ear_mid = _lerp(pt("r_ear"), pt("l_ear"), 0.5)
+    else:
+        ear_mid = vadd(vsub(pt("nose"), vmul(facing, 5.0)), vmul(up_t, 3.0))
+    head_axis = vnorm(vsub(ear_mid, neck))
+    if vlen(head_axis) < 1e-6:
+        head_axis = up_t
+    face = vnorm(vsub(pt("nose"), ear_mid)) if vis("nose") else facing
+    if vlen(face) < 1e-6:
+        face = facing
+    face = vnorm(vsub(face, vmul(head_axis, vdot(face, head_axis))))
+    if vlen(face) < 1e-6:
+        face = facing
+
+    h = B["head"]
+    nk = B["neck_girth"]
+    add("neck", vsub(neck, vmul(head_axis, 3.0)),
+        vsub(ear_mid, vmul(head_axis, 8.0 * h)), (up_t, facing), P_NECK,
+        nk, nk, round_start=False)
+    # the skull has a forward of its own - the face - so it is its own
+    # reference rather than inheriting the neck's
+    add("head", vsub(ear_mid, vmul(head_axis, 10.6 * h)),
+        vadd(ear_mid, vmul(head_axis, 10.4 * h)), (head_axis, face), P_HEAD,
+        h * B.get("jaw", 1.0), h, round_start=False, round_end=False)
+
+    frame = {"side": side, "up": up_t, "facing": facing, "down": down,
+             "sh_mid": sh_mid, "hip_mid": hip_mid, "neck": neck,
+             "ear_mid": ear_mid, "head_axis": head_axis, "face": face,
+             "head_side": vnorm(vcross(head_axis, face)), "body": B}
+    return segments, frame
+
+
+def sweep(segment, coarsen=1.0):
+    """One segment as solids."""
+    return _tube(segment["a"], segment["b"], segment["ref"],
+                 segment["profile"], segment["scale_w"], segment["scale_d"],
+                 coarsen=coarsen,
+                 round_start=segment.get("round_start", True),
+                 round_end=segment.get("round_end", True))
+
+
+def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
+    """Posed body as a list of parts; each part is a list of oriented
+    ellipsoids (centre, orthonormal axes, radii) in world space.
+
+    Anything the figure is wearing comes with it, so the depth export, the
+    viewport preview and the silhouette all get clothes for free rather than
+    each having to remember to ask.
+    """
+    P = skeleton.points
+    ids = {n: i for i, n in enumerate(KEYPOINT_NAMES)}
+    segments, frame = body_segments(skeleton, respect_visibility)
+    B = frame["body"]
+    side, up_t, facing = frame["side"], frame["up"], frame["facing"]
+    sh_mid, hip_mid = frame["sh_mid"], frame["hip_mid"]
+    k = thickness * getattr(skeleton, "body_scale", 1.0)
+
+    def pt(n):
+        return P[ids[n]]
+
+    def vis(*names):
+        return True if not respect_visibility else all(
+            skeleton.visible[ids[n]] for n in names)
+
+    parts = []
+
+    def emit(part):
+        if part:
+            # radii are in centimetres; k scales the whole figure
+            parts.append([(kind, c, ax, (r[0] * k, r[1] * k, r[2] * k))
+                          for kind, c, ax, r in part])
+
+    if "torso" in segments:
+        emit(sweep(segments["torso"], coarsen))
 
     # bust: two masses on the front of the ribcage
     bust = B.get("bust")
@@ -1280,76 +1417,29 @@ def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
             emit(_blob(vadd(pt(shoulder), vmul(up_t, -1.6)),
                        (side, facing, up_t), (dw, dd, dh)))
 
-    # arms and legs
-    girth = (B["arm_girth"], B["forearm_girth"], B["thigh_girth"], B["calf_girth"])
-    for sd in ("r", "l"):
-        sh, el, wr = sd + "_shoulder", sd + "_elbow", sd + "_wrist"
-        hp, kn, an = sd + "_hip", sd + "_knee", sd + "_ankle"
-        # The chains are built whole, before anything is emitted: a hidden
-        # upper arm must not change how the forearm below it is rolled.
-        # The rest pose hangs both limbs straight down, so both start from the
-        # torso's own forward with `down` as the reference axis.
-        upper, fore = carry_chain((down, facing), pt(sh), pt(el), pt(wr))
-        thigh, calf = carry_chain((down, facing), pt(hp), pt(kn), pt(an))
-        if vis(sh, el):
-            emit(tube(pt(sh), pt(el), upper, P_UPPER_ARM, girth[0], girth[0]))
-        if vis(el, wr):
-            emit(tube(pt(el), pt(wr), fore, P_FOREARM, girth[1], girth[1]))
-        if vis(wr, el):
-            # the hand runs on along the forearm, so it shares its frame: the
-            # palm keeps facing the way it does with the arm hanging
-            d = vnorm(vsub(pt(wr), pt(el)))
-            emit(tube(pt(wr), vadd(pt(wr), vmul(d, 17.0 * B["hand"])),
-                       fore, P_HAND, B["hand"], B["hand"]))
-        if vis(hp, kn):
-            emit(tube(pt(hp), pt(kn), thigh, P_THIGH, girth[2], girth[2]))
-        if vis(kn, an):
-            emit(tube(pt(kn), pt(an), calf, P_CALF, girth[3], girth[3]))
-        if vis(an):
-            drop = vnorm(vsub(pt(an), pt(kn))) if vis(kn) else down
-            sole = vadd(pt(an), vmul(drop, 3.2 * B["foot"]))
-            heel = vadd(sole, vmul(facing, -6.0 * B["foot"]))
-            toe = vadd(sole, vmul(facing, 19.0 * B["foot"]))
-            # the foot turns off the shin, so its thickness stays across the
-            # sole however the leg is posed
-            emit(tube(heel, toe, calf, P_FOOT, B["foot"], B["foot"]))
+    for name, segment in segments.items():
+        if name in ("torso", "head"):
+            continue
+        emit(sweep(segment, coarsen))
 
-    # neck and head
-    neck = pt("neck")
-    if vis("r_ear", "l_ear"):
-        ear_mid = _lerp(pt("r_ear"), pt("l_ear"), 0.5)
-    else:
-        ear_mid = vadd(vsub(pt("nose"), vmul(facing, 5.0)), vmul(up_t, 3.0))
-    head_axis = vnorm(vsub(ear_mid, neck))
-    if vlen(head_axis) < 1e-6:
-        head_axis = up_t
-    face = vnorm(vsub(pt("nose"), ear_mid)) if vis("nose") else facing
-    if vlen(face) < 1e-6:
-        face = facing
-    face = vnorm(vsub(face, vmul(head_axis, vdot(face, head_axis))))
-    if vlen(face) < 1e-6:
-        face = facing
+    if "head" in segments:
+        head = sweep(segments["head"], coarsen)
+        h = B["head"]
+        head_side, face = frame["head_side"], frame["face"]
+        head_axis = frame["head_axis"]
+        if vis("nose"):
+            head += _blob(vadd(pt("nose"), vmul(face, -1.4 * h)),
+                          (head_side, face, head_axis),
+                          (1.9 * h, 3.0 * h, 2.4 * h))
+        for ear in ("r_ear", "l_ear"):
+            if vis(ear):
+                head += _blob(pt(ear), (head_side, face, head_axis),
+                              (1.3 * h, 2.6 * h, 3.2 * h))
+        emit(head)
 
-    h = B["head"]
-    nk = B["neck_girth"]
-    emit(tube(vsub(neck, vmul(head_axis, 3.0)),
-               vsub(ear_mid, vmul(head_axis, 8.0 * h)),
-               (up_t, facing), P_NECK, nk, nk, round_start=False))
-    # the skull has a forward of its own - the face - so it is its own
-    # reference rather than inheriting the neck's
-    head = tube(vsub(ear_mid, vmul(head_axis, 10.6 * h)),
-                 vadd(ear_mid, vmul(head_axis, 10.4 * h)),
-                 (head_axis, face), P_HEAD, h * B.get("jaw", 1.0), h,
-                 round_start=False, round_end=False)
-    head_side = vnorm(vcross(head_axis, face))
-    if vis("nose"):
-        head += _blob(vadd(pt("nose"), vmul(face, -1.4 * h)),
-                      (head_side, face, head_axis), (1.9 * h, 3.0 * h, 2.4 * h))
-    for ear in ("r_ear", "l_ear"):
-        if vis(ear):
-            head += _blob(pt(ear), (head_side, face, head_axis),
-                          (1.3 * h, 2.6 * h, 3.2 * h))
-    emit(head)
+    import wearables                  # deferred: it imports from this module
+    for part in wearables.parts(skeleton, segments, frame, coarsen):
+        emit(part)
 
     return parts
 
@@ -1870,6 +1960,7 @@ def scene_to_dict(figures, camera, points_list, out_w, out_h, props=()):
                         for i, n in enumerate(KEYPOINT_NAMES)},
             "visible": list(skeleton.visible),
             "assets": list(getattr(skeleton, "assets", [])),
+            "outfit": dict(getattr(skeleton, "outfit", {}) or {}),
             "body": {k: v for k, v in skeleton.body.items()},
             "body_scale": skeleton.body_scale,
         })
@@ -1917,6 +2008,7 @@ def scene_load(data, camera):
                          "body_scale": entry.get("body_scale", 1.0)},
                         skeleton, camera)
         skeleton.assets = list(entry.get("assets", []))
+        skeleton.outfit = dict(entry.get("outfit") or {})
         figures.append(skeleton)
     return figures or [Skeleton()]
 
@@ -2058,6 +2150,9 @@ class EditorApp:
         self.props = []                 # objects standing in the scene
         self.active_prop = None
         self.prop_shape = tk.StringVar(value="chair")
+        self.outfit_vars = {slot: tk.StringVar(value="none")
+                            for slot in ("hair", "headgear", "top", "bottom",
+                                         "shoes")}
         self.prop_label = tk.StringVar(value="No objects. Objects show in the "
                                               "depth map, not the pose map.")
         self.drag_prop = None
@@ -2141,6 +2236,7 @@ class EditorApp:
         self.preset_name.set(self.skeleton.body.get("preset", DEFAULT_PRESET))
         self.figure_label.set("Person %d of %d" % (self.active + 1,
                                                    len(self.figures)))
+        self.refresh_outfit()
         if self.assets:
             self.rebuild_asset_rows()
         self.selected = None
@@ -2365,6 +2461,28 @@ class EditorApp:
                        ("Delete", self.delete_figure),
                        ("Next \u21e5", self.next_figure)])
         buttons(body, [("Frame all (0)", self.frame_all)], cols=1)
+
+        # ---- worn ---------------------------------------------------------
+        body = section("Hair and clothes", opened=False)
+        import wearables
+        for slot, label in (("hair", "Hair"), ("headgear", "Headgear"),
+                            ("top", "Top"), ("bottom", "Bottom"),
+                            ("shoes", "Feet")):
+            line = tk.Frame(body, bg=PANEL)
+            line.pack(fill="x", padx=12, pady=1)
+            tk.Label(line, text=label, bg=PANEL, fg=MUTED, anchor="w", width=8,
+                     font=("TkDefaultFont", 9)).pack(side="left")
+            var = self.outfit_vars[slot]
+            menu = tk.OptionMenu(line, var, *wearables.options(slot),
+                                 command=lambda _v, s=slot: self.set_worn(s))
+            menu.configure(bg=CONTROL, fg=FG, relief="flat", bd=0, anchor="w",
+                           highlightthickness=0, activebackground=HOVER,
+                           activeforeground=FG, padx=8, pady=2, cursor="hand2",
+                           font=("TkDefaultFont", 8))
+            menu["menu"].configure(bg=PANEL, fg=FG, relief="flat", bd=0,
+                                   activebackground=HOVER, activeforeground=FG)
+            menu.pack(side="right", fill="x", expand=True)
+        buttons(body, [("Take it all off", self.strip)], cols=1)
 
         # ---- objects ------------------------------------------------------
         body = section("Objects", opened=False)
@@ -2641,6 +2759,7 @@ class EditorApp:
         self.figure_label.set("Person %d of %d" % (self.active + 1,
                                                    len(self.figures)))
         self.preset_name.set(self.skeleton.body.get("preset", DEFAULT_PRESET))
+        self.refresh_outfit()
 
     def pose_from_prompt(self):
         """Pose the scene from the prompt box with a local model.
@@ -2666,6 +2785,7 @@ class EditorApp:
         self.props = props
         self.active_prop = None
         self.refresh_props()
+        self.refresh_outfit()
         self.camera.yaw, self.camera.pitch = camera.yaw, camera.pitch
         self.camera.target, self.camera.zoom = camera.target, camera.zoom
         self.set_active(0, announce=False)
@@ -2675,6 +2795,31 @@ class EditorApp:
             note += "; %d command(s) skipped" % len(report["warnings"])
         self.prompt_status.set(note)
         self.status.set("Posed from prompt (%s). Ctrl+Z puts it back." % note)
+
+    # -- what the figure is wearing ----------------------------------------
+    def set_worn(self, slot):
+        """Put one slot on the active figure. Each slot is independent, so a
+        hat does not take the coat off."""
+        self.push_undo()
+        outfit = dict(self.skeleton.outfit or {})
+        outfit[slot] = self.outfit_vars[slot].get()
+        self.skeleton.outfit = outfit
+        self.redraw()
+        self.status.set("%s: %s." % (slot.title(), outfit[slot]))
+
+    def strip(self):
+        self.push_undo()
+        self.skeleton.outfit = {}
+        self.refresh_outfit()
+        self.redraw()
+        self.status.set("Bare again.")
+
+    def refresh_outfit(self):
+        """Point the panel at the active figure's outfit."""
+        import wearables
+        outfit = wearables.clean(getattr(self.skeleton, "outfit", None))
+        for slot, var in self.outfit_vars.items():
+            var.set(outfit.get(slot, "none"))
 
     # -- objects -----------------------------------------------------------
     def ground_level(self):

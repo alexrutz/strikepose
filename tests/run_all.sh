@@ -19,6 +19,7 @@ run "proportions"           "python3 tests/test_proportions.py"
 run "rigged mesh selftest"  "python3 mesh_backend.py --selftest"
 run "smpl-x selftest"       "python3 smplx_backend.py --selftest"
 run "props selftest"        "python3 props.py --selftest"
+run "wearables selftest"    "python3 wearables.py --selftest"
 run "pose agent selftest"   "python3 pose_agent.py --selftest"
 run "pose agent wire"       "python3 tests/test_pose_agent.py"
 for t in tests/test_editor_basics.py tests/test_depth_export.py \
