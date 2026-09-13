@@ -104,6 +104,32 @@ it would be keeping a lie. `under_hips` is the one anchor that sets a height
 rather than a position: the object's top meets the hip and its base still
 reaches the floor, which is what makes a chair fit a child and an adult.
 
+**Proportions come from ANSUR II, and a test says so.** The 2012 US Army
+survey: 4082 men, 1986 women, 93 measurements, public since 2017. The `ANSUR`
+table holds means computed from the released CSVs, and
+`tests/test_proportions.py` repeats the reference values and fails when the
+two part company. What this replaced - Drillis & Contini's 1966 constants from
+Winter's Biomechanics - put the trochanter at 0.530 of stature against 0.513
+measured: three centimetres of leg on a 175 cm figure, taken off the torso,
+uncaught for as long as nothing compared the table with anything.
+
+The landmark matters as much as the number. Trochanterion is the hip joint
+centre, the lateral femoral epicondyle the knee, the lateral malleolus the
+ankle, acromion the shoulder keypoint, tragion the ear. Thigh and shank are
+differences of measured heights, so they close on the floor by construction.
+Two things the survey cannot settle: hip width, which it measures at the iliac
+crests and not at the femoral heads the leg swings from, and the waist, which
+it measures at the navel - t = 0.71 along shoulder-to-hip - while the profile's
+waist station is the tenth rib at t = 0.59. There is no child in ANSUR either,
+so that preset is inherited and unverified.
+
+**OpenPose's neck is the midpoint of the shoulders.** It is inferred that way
+from the COCO annotations, which have no neck of their own, so `shoulder_drop`
+must be zero. It was 0.011 of stature, which put every exported neck keypoint
+two centimetres above where the format puts it and the shoulder line the same
+distance below measured acromial height - one constant, wrong against both the
+survey and the format.
+
 **Assets ride the body's pose solution.** `solve_pose` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
 solve an asset separately or it will drift from the body.
@@ -191,4 +217,8 @@ a build.
    GPU rather than the analytic rasteriser ported.
 4. Wrists and ankles are never rotated; there are no keypoints for them.
 5. The web prototype duplicates the maths in JavaScript. It is tested
-   independently (`node web/test.mjs`) but will drift from the Python.
+   independently (`node web/test.mjs`) and will drift from the Python. Its
+   preset table no longer can: it is generated from `preset_params` and
+   `tests/test_proportions.py` reads it back and compares. It had drifted by a
+   third of the child's torso, 33 cm against 44, before anything checked. The
+   rest of the file is still unguarded.

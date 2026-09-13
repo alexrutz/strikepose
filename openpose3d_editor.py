@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.23.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.24.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -182,27 +182,64 @@ for _a, _b in MIRROR_PAIRS:
 # in a straight line.
 # ---------------------------------------------------------------------------
 
-# Proportions as fractions of stature.
+# Proportions as fractions of stature, from ANSUR II - the 2012 US Army
+# anthropometric survey, 4082 men and 1986 women, 93 measurements each, public
+# since 2017. Means computed from the released records rather than quoted, so
+# every number here can be reproduced from the CSVs.
 #
-# The leg and torso come straight from the Drillis & Contini (1966)
-# proportionality constants reproduced in Winter's Biomechanics: acromion
-# height 0.818, trochanter height 0.530, thigh 0.245, shank 0.246. Those chain
-# correctly, because thigh + shank + ankle height closes on the floor.
+# It replaced the Drillis & Contini (1966) constants reproduced in Winter's
+# Biomechanics, which this used before. Those are a century-old convenience
+# table; the one that mattered was trochanter height at 0.530 of stature, which
+# is 0.513 measured. Three centimetres of leg on a 175 cm figure, taken off the
+# torso, and it showed in every export.
 #
-# The arm does not. Chaining the published acromion-radiale and radiale-stylion
-# means (33 cm and 26 cm at this height) plus a 19 cm hand gives a 194 cm arm
-# span on a 175 cm figure, which is absurd: surface segment measurements are
-# taken with the arm hanging and do not add along a straight outstretched limb.
-# So the arm is closed on the span instead, which is the one figure anyone can
-# check against themselves - arm span runs about 1.03 of stature in men and
-# about 1.00 in women - while keeping the published upper arm to forearm ratio
-# of 0.186 : 0.146.
-SEGMENTS = {"shoulder_height": 0.818, "hip_height": 0.530, "ankle_height": 0.039,
-            "thigh": 0.245, "shank": 0.246, "hand": 0.108,
-            "nose_height": 0.925, "ear_height": 0.930}
-ARM_RATIO = 0.186 / 0.146          # upper arm to forearm
+# The landmarks matter as much as the numbers. Trochanterion is the standard
+# proxy for the hip joint centre, the lateral femoral epicondyle for the knee
+# and the lateral malleolus for the ankle, so thigh and shank are differences
+# of measured heights and close on the floor exactly. Acromion is the shoulder
+# keypoint. Tragion is the ear.
+ANSUR = {
+    "male": {
+        "shoulder_height": 0.8203,      # acromial height
+        "hip_height": 0.5128,           # trochanterion height
+        "knee_height": 0.2799,          # lateral femoral epicondyle height
+        "ankle_height": 0.0415,         # lateral malleolus height
+        "shoulder_w": 0.1184,           # biacromial breadth / 2
+        "hip_w": 0.0500,                # femoral heads; see below
+        "hand": 0.1101,                 # hand length
+        "span": 1.0330,                 # fingertip to fingertip
+        "upper_arm": 0.1909,            # acromion-radiale
+        "forearm": 0.1525,              # radiale-stylion
+        "ear_drop": 13.11 / 175.62,     # tragion to top of head
+    },
+    "female": {
+        "shoulder_height": 0.8198,
+        "hip_height": 0.5190,
+        "knee_height": 0.2860,
+        "ankle_height": 0.0385,
+        "shoulder_w": 0.1122,
+        "hip_w": 0.0535,
+        "hand": 0.1112,
+        "span": 1.0195,
+        "upper_arm": 0.1911,
+        "forearm": 0.1482,
+        "ear_drop": 12.65 / 162.85,
+    },
+}
 
+# Hip width is the one skeletal number ANSUR cannot give: it measures the iliac
+# crests and the soft-tissue hip, not the femoral heads the leg actually swings
+# from. The values above are the long-standing ones, kept because the measured
+# bicristal ratio between the sexes - 0.1679 / 0.1569 = 1.070 - matches the
+# ratio they already had, 0.0535 / 0.0500 = 1.070, so the relationship is right
+# even where the absolute is inherited.
 
+# The arm still does not chain. Acromion-radiale plus radiale-stylion plus a
+# hand is 0.343 of stature, which on a 175 cm figure is a 194 cm span against a
+# measured 181. Surface segments are taken on a bent arm and do not add along a
+# straight one. So the arm is closed on the span, and the published upper arm
+# to forearm ratio decides the split - which lands the fingertip 0.400 of
+# stature from the acromion against 0.398 measured, so the closure is sound.
 def derive_proportions(stature, sex="male", leg_ratio=1.0):
     """Skeleton measurements for a given height.
 
@@ -210,37 +247,50 @@ def derive_proportions(stature, sex="male", leg_ratio=1.0):
     height have the same skeleton and differ in girth, so the body types share
     these numbers and override only the cross-sections.
     """
-    female = sex == "female"
-    shoulder_half = stature * (0.115 if not female else 0.1095)   # biacromial/2
-    hand = SEGMENTS["hand"] * stature
-    half_span = 0.5 * stature * (1.03 if not female else 1.00)
+    m = ANSUR["female" if sex == "female" else "male"]
+    shoulder_half = stature * m["shoulder_w"]
+    hand = m["hand"] * stature
+    half_span = 0.5 * stature * m["span"]
     arm = max(10.0, half_span - shoulder_half - hand)
-    forearm = arm / (1.0 + ARM_RATIO)
-    leg = (SEGMENTS["hip_height"] - SEGMENTS["ankle_height"]) * stature * leg_ratio
-    thigh_share = SEGMENTS["thigh"] / (SEGMENTS["thigh"] + SEGMENTS["shank"])
+    forearm = arm / (1.0 + m["upper_arm"] / m["forearm"])
+    # thigh and shank are differences of measured heights, so they close on the
+    # floor: thigh + shank + ankle height is hip height by construction
+    thigh = (m["hip_height"] - m["knee_height"]) * stature * leg_ratio
+    shank = (m["knee_height"] - m["ankle_height"]) * stature * leg_ratio
+    ear_up = (1.0 - m["ear_drop"] - m["shoulder_height"]) * stature
     return {
         "shoulder_w": shoulder_half,
-        "shoulder_drop": stature * 0.011,
-        "hip_w": stature * (0.050 if not female else 0.0535),   # femoral heads
-        "torso_len": (SEGMENTS["shoulder_height"]
-                      - SEGMENTS["hip_height"] * leg_ratio) * stature,
+        # OpenPose's neck, keypoint 1, is defined as the midpoint of the two
+        # shoulders - it is inferred that way from the COCO annotations, which
+        # have no neck of their own. So the shoulders sit at the neck's own
+        # height and this is zero. It was 0.011 of stature, which put every
+        # exported neck keypoint two centimetres above where the format says
+        # it goes, and dropped the shoulder line the same distance below the
+        # measured acromial height. The keys stays so scenes saved with a drop
+        # still load.
+        "shoulder_drop": 0.0,
+        "hip_w": stature * m["hip_w"],                          # femoral heads
+        "torso_len": (m["shoulder_height"]
+                      - m["hip_height"] * leg_ratio) * stature,
         "upper_arm": arm - forearm,
         "forearm": forearm,
-        "thigh": leg * thigh_share,
-        "calf": leg * (1.0 - thigh_share),
+        "thigh": thigh,
+        "calf": shank,
         "head": stature / 175.0,
-        "nose_up": (SEGMENTS["nose_height"] - SEGMENTS["shoulder_height"]) * stature,
-        "ear_up": (SEGMENTS["ear_height"] - SEGMENTS["shoulder_height"]) * stature,
+        # the nose tip sits a little below the ear canal, which ANSUR has no
+        # landmark pair for; the offset is the one this has always carried
+        "nose_up": ear_up - 0.005 * stature,
+        "ear_up": ear_up,
     }
 
 
 BASE_BODY = {
     # skeleton
-    "shoulder_w": 19.0, "shoulder_drop": 2.0, "hip_w": 10.0, "torso_len": 52.0,
+    "shoulder_w": 19.0, "shoulder_drop": 0.0, "hip_w": 10.0, "torso_len": 52.0,
     "upper_arm": 28.5, "forearm": 26.0, "thigh": 43.0, "calf": 43.0,
     "head": 1.0,
     # measured cross-sections: (half width, half depth) in centimetres
-    "chest": (17.0, 11.5), "waist": (14.0, 10.4), "pelvis": (17.0, 12.0),
+    "chest": (14.47, 12.69), "waist": (14.0, 10.4), "pelvis": (17.0, 12.0),
     "belly": 0.0,
     # girth multipliers on the anatomical limb profiles
     "arm_girth": 1.0, "forearm_girth": 1.0,
@@ -256,14 +306,14 @@ BODY_PRESETS = {
         "stature": 175, "sex": "male", "leg_ratio": 1.0,},
     "Male, athletic": {
         "stature": 178, "sex": "male", "leg_ratio": 1.0,
-        "chest": (18.0, 12.2), "waist": (13.4, 10.0), "pelvis": (16.4, 11.6),
+        "chest": (15.32, 13.46), "waist": (13.4, 10.0), "pelvis": (16.4, 11.6),
         "arm_girth": 1.16, "forearm_girth": 1.12,
         "thigh_girth": 1.12, "calf_girth": 1.12,
         "deltoid": (6.8, 7.2, 7.8), "neck_girth": 1.12,
     },
     "Male, heavy": {
         "stature": 175, "sex": "male", "leg_ratio": 1.0,
-        "chest": (19.0, 14.5), "waist": (19.0, 16.0), "pelvis": (19.0, 14.0),
+        "chest": (16.17, 16.00), "waist": (19.0, 16.0), "pelvis": (19.0, 14.0),
         "belly": 3.4,
         "arm_girth": 1.24, "forearm_girth": 1.16,
         "thigh_girth": 1.22, "calf_girth": 1.14,
@@ -272,7 +322,7 @@ BODY_PRESETS = {
     },
     "Male, slim": {
         "stature": 176, "sex": "male", "leg_ratio": 1.0,
-        "chest": (15.2, 9.8), "waist": (12.2, 8.6), "pelvis": (15.0, 10.4),
+        "chest": (12.94, 10.81), "waist": (12.2, 8.6), "pelvis": (15.0, 10.4),
         "arm_girth": 0.84, "forearm_girth": 0.86,
         "thigh_girth": 0.86, "calf_girth": 0.88,
         "deltoid": (5.2, 5.6, 6.4), "neck_girth": 0.88,
@@ -280,7 +330,7 @@ BODY_PRESETS = {
     },
     "Female, average": {
         "stature": 162, "sex": "female", "leg_ratio": 1.0,
-        "chest": (14.6, 9.6), "waist": (12.2, 9.0), "pelvis": (17.6, 12.0),
+        "chest": (13.46, 12.37), "waist": (12.2, 9.0), "pelvis": (17.6, 12.0),
         "arm_girth": 0.86, "forearm_girth": 0.86,
         "thigh_girth": 1.00, "calf_girth": 0.92,
         "deltoid": (5.4, 5.8, 6.4), "neck_girth": 0.86,
@@ -290,7 +340,7 @@ BODY_PRESETS = {
     },
     "Female, athletic": {
         "stature": 166, "sex": "female", "leg_ratio": 1.0,
-        "chest": (15.0, 9.8), "waist": (11.4, 8.4), "pelvis": (16.6, 11.2),
+        "chest": (13.83, 12.63), "waist": (11.4, 8.4), "pelvis": (16.6, 11.2),
         "arm_girth": 0.94, "forearm_girth": 0.92,
         "thigh_girth": 1.04, "calf_girth": 0.98,
         "deltoid": (5.9, 6.2, 6.8), "neck_girth": 0.90,
@@ -300,7 +350,7 @@ BODY_PRESETS = {
     },
     "Female, curvy": {
         "stature": 162, "sex": "female", "leg_ratio": 1.0,
-        "chest": (15.4, 10.2), "waist": (11.8, 9.0), "pelvis": (19.4, 13.0),
+        "chest": (14.20, 13.14), "waist": (11.8, 9.0), "pelvis": (19.4, 13.0),
         "arm_girth": 0.92, "forearm_girth": 0.90,
         "thigh_girth": 1.12, "calf_girth": 0.98,
         "deltoid": (5.4, 5.8, 6.4), "neck_girth": 0.88,
@@ -310,7 +360,7 @@ BODY_PRESETS = {
     },
     "Female, slim": {
         "stature": 165, "sex": "female", "leg_ratio": 1.0,
-        "chest": (13.4, 8.8), "waist": (10.6, 7.8), "pelvis": (15.4, 10.4),
+        "chest": (12.36, 11.34), "waist": (10.6, 7.8), "pelvis": (15.4, 10.4),
         "arm_girth": 0.76, "forearm_girth": 0.78,
         "thigh_girth": 0.88, "calf_girth": 0.84,
         "deltoid": (4.8, 5.2, 5.8), "neck_girth": 0.80,
@@ -320,7 +370,7 @@ BODY_PRESETS = {
     },
     "Child, about 7": {
         "stature": 122, "sex": "male", "leg_ratio": 0.9,
-        "chest": (10.8, 8.0), "waist": (10.0, 7.6), "pelvis": (10.6, 8.0),
+        "chest": (9.19, 8.83), "waist": (10.0, 7.6), "pelvis": (10.6, 8.0),
         "arm_girth": 0.62, "forearm_girth": 0.64,
         "thigh_girth": 0.66, "calf_girth": 0.66,
         "deltoid": (4.0, 4.2, 4.6), "neck_girth": 0.64,

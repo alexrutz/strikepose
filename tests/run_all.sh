@@ -15,6 +15,7 @@ run() {
   else echo "FAILED"; printf '%s\n' "$out" | tail -20; fail=1; fi
 }
 run "core maths"            "python3 tests/test_core.py"
+run "proportions"           "python3 tests/test_proportions.py"
 run "rigged mesh selftest"  "python3 mesh_backend.py --selftest"
 run "smpl-x selftest"       "python3 smplx_backend.py --selftest"
 run "props selftest"        "python3 props.py --selftest"

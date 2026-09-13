@@ -12,6 +12,20 @@ tkinter is required (`sudo apt install python3-tk`, or reinstall Python on
 Windows with the tcl/tk option). Pillow enables PNG export and NumPy enables
 depth maps; both are worth installing. See `requirements.txt`.
 
+## Where the proportions come from
+
+Bone lengths and cross-sections are derived from **ANSUR II**, the 2012 US Army
+anthropometric survey - 4082 men and 1986 women, 93 measurements each, public
+since 2017. The means are computed from the released CSVs rather than quoted,
+and `python3 tests/test_proportions.py` checks the figure that comes out
+against them: shoulder at acromial height, hip at the trochanter, knee at the
+femoral epicondyle, arm span closing on the measured span.
+
+Two measurements the survey cannot settle are marked as such in the code: hip
+width, which it takes at the iliac crests rather than the femoral heads, and
+the waist, which it takes at the navel while the body profile's waist station
+is the tenth rib. There is no child in ANSUR, so that preset is inherited.
+
 ## Depth sources
 
 Three, tried in order, each falling back to the next:
@@ -42,6 +56,28 @@ If the bone names are not recognised, `--inspect` lists them and a roles file
 maps them by hand:
 
     {"hips": "pelvis", "l_shoulder": "upperarm01.L", ...}
+
+### Where to get a body
+
+**MPFB2** (MakeHuman Plugin for Blender) is the one this is built around: the
+add-on is GPLv3, its bundled assets are CC0, and what you make with it is CC0,
+so it can be used commercially without conditions. The bone names its default
+rig uses - `upperarm01.L`, `lowerleg01.R` - are what the aliases here match
+first, so an export needs no roles file. Blender 4.2+.
+
+**Mixamo** characters are royalty-free for commercial and non-commercial use
+with no attribution, and its bone names (`LeftArm`, `RightForeArm`) are also
+matched. It has had no maintenance since 2015 and its authenticated features
+have been unreliable since mid-2025, so treat it as a source that may not be
+there tomorrow.
+
+**SMPL-X** is non-commercial research only; commercial use needs a sub-licence
+from Meshcapade. That is why it is a separate optional backend here rather than
+the default.
+
+Whatever the source, delete MakeHuman's helper geometry before exporting, or
+the skirt and tights read as clothing in the depth map - the loader drops small
+loose shells, but deleting them in MPFB2 is cleaner.
 
 ## Objects
 

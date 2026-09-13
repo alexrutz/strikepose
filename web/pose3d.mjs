@@ -26,19 +26,30 @@ for (const [a, b] of [[2,5],[3,6],[4,7],[8,11],[9,12],[10,13],[14,15],[16,17]]) 
   MIRROR[a] = b; MIRROR[b] = a;
 }
 
+// Generated from openpose3d_editor.preset_params, which derives them
+// from ANSUR II. tests/test_proportions.py reads this table back and
+// fails if the two drift apart - which they had, by a third of the
+// child's torso, before anything compared them.
 export const PRESETS = {
-  "Male, average":   {sw:19, sd:2, hw:10, tl:52, ua:28.5, fa:26, th:43, ca:43, head:1,
-                      chest:[17,11.5], waist:[14,10.4], pelvis:[17,12], girth:1},
-  "Female, average": {sw:16.5, sd:1.8, hw:11, tl:49, ua:26.5, fa:24, th:40.5, ca:40,
-                      head:0.95, chest:[14.6,9.6], waist:[12.2,9], pelvis:[17.6,12],
+  "Male, average":    {sw:20.7, sd:0.0, hw:8.8, tl:53.8, ua:28.0, fa:22.4,
+                      th:40.8, ca:41.7, head:1.00,
+                      chest:[14.47,12.69], waist:[14.0,10.4], pelvis:[17.0,12.0],
+                      girth:1},
+  "Female, average":  {sw:18.2, sd:0.0, hw:8.7, tl:48.7, ua:26.1, fa:20.3,
+                      th:37.7, ca:40.1, head:0.93,
+                      chest:[13.46,12.37], waist:[12.2,9.0], pelvis:[17.6,12.0],
                       girth:0.88, bust:true},
-  "Male, athletic":  {sw:20, sd:2, hw:9.5, tl:52, ua:28.5, fa:26, th:43, ca:43, head:1,
-                      chest:[18,12.2], waist:[13.4,10], pelvis:[16.4,11.6], girth:1.15},
-  "Female, curvy":   {sw:16.5, sd:1.8, hw:12, tl:49, ua:26.5, fa:24, th:40.5, ca:40,
-                      head:0.95, chest:[15.4,10.2], waist:[11.8,9], pelvis:[19.4,13],
+  "Male, athletic":   {sw:21.1, sd:0.0, hw:8.9, tl:54.7, ua:28.5, fa:22.8,
+                      th:41.5, ca:42.4, head:1.02,
+                      chest:[15.32,13.46], waist:[13.4,10.0], pelvis:[16.4,11.6],
+                      girth:1.15},
+  "Female, curvy":    {sw:18.2, sd:0.0, hw:8.7, tl:48.7, ua:26.1, fa:20.3,
+                      th:37.7, ca:40.1, head:0.93,
+                      chest:[14.20,13.14], waist:[11.8,9.0], pelvis:[19.4,13.0],
                       girth:1.0, bust:true},
-  "Child, about 7":  {sw:12.5, sd:1.4, hw:7, tl:33, ua:19, fa:17, th:28, ca:27,
-                      head:0.88, chest:[10.8,8], waist:[10,7.6], pelvis:[10.6,8],
+  "Child, about 7":   {sw:14.4, sd:0.0, hw:6.1, tl:43.8, ua:19.5, fa:15.6,
+                      th:25.6, ca:26.2, head:0.88,
+                      chest:[9.19,8.83], waist:[10.0,7.6], pelvis:[10.6,8.0],
                       girth:0.65},
 };
 
