@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.22.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.23.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -1586,16 +1586,19 @@ def _smooth_min(dst, src, k):
     return out
 
 
-def render_depth(groups, width, height, blend=0.0, near=255, far=45,
-                 background=0):
-    """Rasterise one or more figures to a shared depth map.
+def depth_buffer(groups, width, height, blend=0.0):
+    """Rasterise one or more figures to a shared z-buffer, in pixel depth.
 
     groups: a list of figures, each a list of parts. Parts inside a figure
     blend into each other with a smooth minimum; separate figures use a hard
     minimum, so two people standing close occlude cleanly instead of fusing
     into one mass.
 
-    ControlNet convention: nearest surface brightest, background black.
+    Returns the raw buffer rather than an image so a caller mixing sources -
+    a rigged mesh through the triangle rasteriser plus objects through this one
+    - can take the nearer of the two before anything is normalised. Both are in
+    the same units, world centimetres times the pixels-per-centimetre the
+    camera mapping uses, so a plain minimum is the right composite.
     """
     if np is None:
         raise RuntimeError("Depth export needs NumPy: pip install numpy")
@@ -1633,7 +1636,22 @@ def render_depth(groups, width, height, blend=0.0, near=255, far=45,
         figure[y0:y1, x0:x1] = _smooth_min(window, local, blend)
       np.minimum(zbuf, figure, out=zbuf)
 
+    return zbuf
+
+
+def render_depth(groups, width, height, blend=0.0, near=255, far=45,
+                 background=0):
+    """The same, as a ControlNet depth image. See `depth_buffer`."""
+    return depth_to_grey(depth_buffer(groups, width, height, blend),
+                         near, far, background)
+
+
+def depth_to_grey(zbuf, near=255, far=45, background=0):
+    """Normalise a z-buffer to the ControlNet convention: nearest brightest,
+    background black. Shared by every depth source, so a scene rendered from
+    the anatomy, a rigged mesh or a mix of the two is graded the same way."""
     covered = np.isfinite(zbuf)
+    height, width = zbuf.shape
     img = np.full((height, width), float(background))
     if covered.any():
         z = zbuf[covered]
@@ -1684,6 +1702,30 @@ def pose_image(figures, camera, rect, out_w, out_h, thick_lines=True):
                            out_w, out_h, stickwidth=stick, dot_radius=stick)
 
 
+def to_camera_space(part, camera, rect, out_w):
+    """One part's primitives, mapped from world centimetres into the pixel
+    space the rasteriser solves in. Depth is scaled by the same factor as x
+    and y, so a z-buffer written here is comparable with any other."""
+    x0, y0 = rect[0], rect[1]
+    s = out_w / (rect[2] - rect[0])
+    k = camera.zoom * s
+    right, up, fwd = camera.basis()
+    out = []
+    for kind, centre, axes, radii in part:
+        pc = camera.project(centre)
+        out.append((kind, ((pc[0] - x0) * s, (pc[1] - y0) * s, pc[2] * k),
+                    tuple((vdot(u, right), -vdot(u, up), vdot(u, fwd))
+                          for u in axes),
+                    tuple(r * k for r in radii)))
+    return out
+
+
+def prop_groups(props, camera, rect, out_w):
+    """Objects as render groups: one each, so they meet with an edge."""
+    return [[to_camera_space(props_module.parts(prop), camera, rect, out_w)]
+            for prop in props]
+
+
 def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
                         props=()):
     """Depth map from the built-in anatomy, framed to match `pose_image`.
@@ -1696,27 +1738,60 @@ def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
     chair occludes the figure on it with an edge instead of melting into it,
     while the parts inside one figure still blend.
     """
-    x0, y0, _x1, _y1 = rect
-    s = out_w / (rect[2] - rect[0])
-    k = camera.zoom * s                   # world units -> pixels, same for z
-    right, up, fwd = camera.basis()
-    def to_camera(part):
-        out = []
-        for kind, centre, axes, radii in part:
-            pc = camera.project(centre)
-            cam_axes = tuple((vdot(u, right), -vdot(u, up), vdot(u, fwd))
-                             for u in axes)
-            out.append((kind,
-                        ((pc[0] - x0) * s, (pc[1] - y0) * s, pc[2] * k),
-                        cam_axes, tuple(r * k for r in radii)))
-        return out
-
-    groups = [[to_camera(part) for part in body_parts(figure, thickness)]
+    k = camera.zoom * out_w / (rect[2] - rect[0])   # world -> pixels, z too
+    groups = [[to_camera_space(part, camera, rect, out_w)
+               for part in body_parts(figure, thickness)]
               for figure in figures]
-    groups += [[to_camera(props_module.parts(prop))] for prop in props]
+    groups += prop_groups(props, camera, rect, out_w)
     if not groups:
         groups = [[]]
     return render_depth(groups, out_w, out_h, blend=2.0 * k)
+
+
+def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
+    """Depth map from posed rigged meshes, framed to match `pose_image`.
+
+    `jobs` is a list of (figure, mesh, assets): the editor supplies what it has
+    loaded, a headless check supplies what it was handed on the command line.
+    Framing and the camera mapping are shared with the anatomy path, so the
+    three depth sources line up with the pose PNG and with each other.
+
+    Objects come along, rasterised the analytic way while the mesh goes through
+    the triangle z-buffer, into the same buffer.
+    """
+    import mesh_backend
+    from smplx_backend import rasterize_depth
+    x0, y0, _x1, _y1 = rect
+    s = out_w / (rect[2] - rect[0])
+    k = camera.zoom * s
+    right, up, fwd = camera.basis()
+    zbuf = np.full((out_h, out_w), np.inf)
+    for figure, mesh, assets in jobs:
+        if mesh is None:
+            continue
+        points = {name: figure.points[i]
+                  for i, name in enumerate(KEYPOINT_NAMES)}
+        solution = mesh_backend.solve_pose(mesh, points, mesh.get("roles"))
+        pieces = [(mesh_backend.skin_with(mesh, solution), mesh["faces"])]
+        for asset in assets:
+            # assets ride the body's own solution, so they cannot drift
+            pieces.append((mesh_backend.skin_with(asset, solution),
+                           asset["faces"]))
+        for verts, faces in pieces:
+            rel = verts - np.asarray(camera.target, dtype=float)
+            px = np.column_stack([
+                (rel @ np.asarray(right) * camera.zoom
+                 + camera.width / 2.0 - x0) * s,
+                (-(rel @ np.asarray(up)) * camera.zoom
+                 + camera.height / 2.0 - y0) * s,
+                rel @ np.asarray(fwd) * k])
+            np.minimum(zbuf, rasterize_depth(px, faces, out_w, out_h), out=zbuf)
+    if len(props):
+        # the triangle rasteriser and the analytic one write the same units, so
+        # the objects simply join the buffer and the nearer surface wins
+        np.minimum(zbuf, depth_buffer(prop_groups(props, camera, rect, out_w),
+                                      out_w, out_h), out=zbuf)
+    return depth_to_grey(zbuf)
 
 
 # ---------------------------------------------------------------------------
@@ -3430,36 +3505,10 @@ class EditorApp:
             self.status.set("Depth source: built-in anatomy.")
 
     def mesh_depth_image(self, width, height):
-        import mesh_backend
-        from smplx_backend import rasterize_depth, depth_to_image
-        x0, y0, x1, y1 = self.frame_rect()
-        s = width / (x1 - x0)
-        k = self.camera.zoom * s
-        right, up, fwd = self.camera.basis()
-        zbuf = np.full((height, width), np.inf)
-        for figure in self.figures:
-            mesh = self.mesh_for(figure)
-            if mesh is None:
-                continue
-            points = {name: figure.points[i]
-                      for i, name in enumerate(KEYPOINT_NAMES)}
-            solution = mesh_backend.solve_pose(mesh, points, mesh.get("roles"))
-            pieces = [(mesh_backend.skin_with(mesh, solution), mesh["faces"])]
-            for asset in self.asset_meshes(figure):
-                # assets ride the body's own solution, so they cannot drift
-                pieces.append((mesh_backend.skin_with(asset, solution),
-                               asset["faces"]))
-            for verts, faces in pieces:
-                rel = verts - np.asarray(self.camera.target, dtype=float)
-                px = np.column_stack([
-                    (rel @ np.asarray(right) * self.camera.zoom
-                     + self.camera.width / 2.0 - x0) * s,
-                    (-(rel @ np.asarray(up)) * self.camera.zoom
-                     + self.camera.height / 2.0 - y0) * s,
-                    rel @ np.asarray(fwd) * k])
-                np.minimum(zbuf, rasterize_depth(px, faces, width, height),
-                           out=zbuf)
-        return depth_to_image(zbuf)
+        jobs = [(figure, self.mesh_for(figure), self.asset_meshes(figure))
+                for figure in self.figures]
+        return rigged_depth_image(jobs, self.camera, self.frame_rect(),
+                                  width, height, self.props)
 
     def smplx_depth_image(self, width, height):
         import smplx_backend

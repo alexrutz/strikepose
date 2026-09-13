@@ -29,6 +29,20 @@ Inspect a rig before loading it:
 
     python3 mesh_backend.py --inspect body.glb
 
+and put it through the whole depth pipeline, headless, before trusting it:
+
+    python3 tests/check_glb.py body.glb
+    python3 tests/check_glb.py body.glb --roles roles.json --assets hair.glb
+
+That loads the file, maps its bones, poses it through six poses, skins it,
+renders each depth map and writes a contact sheet, checking that every mapped
+joint lands on its keypoint, that the rig is scaled to the figure, that no limb
+is pinched by the skinning, and that a limb swung right round does not jump.
+If the bone names are not recognised, `--inspect` lists them and a roles file
+maps them by hand:
+
+    {"hips": "pelvis", "l_shoulder": "upperarm01.L", ...}
+
 ## Objects
 
 A depth map conditions everything in frame, not only the person, and a figure

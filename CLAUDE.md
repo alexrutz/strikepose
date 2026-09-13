@@ -117,6 +117,15 @@ solve an asset separately or it will drift from the body.
   unconstrained JSON rather than failing, and `parse_json_object` digs the
   object out of a fence, because a small model wraps its answer more often
   than not. `tests/test_pose_agent.py` serves all of that from a stub.
+- Aiming a bone is a minimal rotation, and there is none onto the direction
+  exactly opposite where the bone started: the axis is undefined there and
+  ill-conditioned near it. A rig whose arms rest out to the side therefore has
+  an unstable roll when an arm swings round to the far side of the body. No
+  solver of this shape avoids it; the roll reset makes it smaller (46 deg to
+  14 deg on CesiumMan), and `tests/check_glb.py` reports it rather than failing
+  when the jump is within 40 degrees of the reversal. A jump anywhere else is
+  a bug. On a rig with arms down at rest - MakeHuman, MPFB2 - the same sweep
+  steps 4 degrees and never jumps.
 - Objects need a box primitive of their own. Swept as an elliptical cylinder
   a crate has rounded sides, and a depth map of a room built from those reads
   as a room full of cushions. `_box_z` is the same slab clip `_slab_z` does
