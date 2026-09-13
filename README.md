@@ -79,6 +79,12 @@ Whatever the source, delete MakeHuman's helper geometry before exporting, or
 the skirt and tights read as clothing in the depth map - the loader drops small
 loose shells, but deleting them in MPFB2 is cleaner.
 
+Shape keys can be left in the export. MPFB2 keeps the whole body - age, weight,
+muscle, proportions - in shape keys, which glTF stores as morph targets with
+default weights, and those are read and applied here. An exporter set to strip
+them writes the unshaped base mesh instead, so every body in a set comes out
+the same 167 cm mannequin while its skeleton still carries the real shape.
+
 ## Hair and clothes
 
 The **Hair and clothes** panel dresses the active figure from five independent

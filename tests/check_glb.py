@@ -135,9 +135,16 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
         verts = mesh_backend.skin_with(mesh, solution)
         check("%s: skinning produced finite geometry" % name,
               bool(np.isfinite(verts).all()))
+        # Like for like: the mesh's height against the *keypoints'* height,
+        # not against nose-to-ankle. A running figure raises an arm above its
+        # head, so nose-to-ankle stops describing how tall the pose is and the
+        # check failed every rig it was given in a pose that was not upright.
+        # The crown and the soles reach past the keypoints, hence the margin.
+        ys = [p[1] for p in skeleton.points]
         span = float(verts.max(axis=0)[1] - verts.min(axis=0)[1])
-        target = abs(skeleton.points[INDEX["l_ankle"]][1]
-                     - skeleton.points[INDEX["nose"]][1])
+        target = (max(ys) - min(ys)) + 0.16 * abs(
+            skeleton.points[INDEX["l_ankle"]][1]
+            - skeleton.points[INDEX["nose"]][1])
         if worst_scale is None or abs(span - target) > abs(worst_scale[1]
                                                            - worst_scale[2]):
             worst_scale = (name, span, target)
@@ -165,8 +172,8 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
     check("every mapped joint lands on its keypoint", worst_land < 0.5,
           "worst %.2f cm" % worst_land)
     check("the rig is scaled to the figure", worst_scale is not None
-          and abs(worst_scale[1] - worst_scale[2]) < 0.25 * worst_scale[2],
-          "worst: %s spans %.0f cm, the skeleton %.0f cm" % worst_scale)
+          and abs(worst_scale[1] - worst_scale[2]) < 0.18 * worst_scale[2],
+          "worst: %s spans %.0f cm, the pose %.0f cm" % worst_scale)
     if worst_pinch[1] is None:
         # a rig whose named bones drive no vertices on their own - a mock, or
         # one where every vertex is shared with a twist bone. Say so rather
@@ -174,6 +181,15 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
         print("  ---- limb girth not measurable: no bone owns 8 vertices "
               "outright")
     else:
+        # Linear blend skinning narrows a limb at a hard bend - the classic
+        # candy wrapper - and a running stance folds a knee 75 degrees, so
+        # some of this is the method rather than the rig. Real exports sit at
+        # 9-14%; a quarter is the line between "bends" and "collapses". This
+        # bar was once 40%, to accommodate a rig that was losing 36% - and
+        # that turned out not to be the skinning at all but a mesh loaded
+        # without its morph targets, so the body no longer matched the rig
+        # driving it. A tolerance wide enough to pass a broken export checks
+        # nothing.
         check("no limb is pinched by the skinning", worst_pinch[0] < 0.25,
               "worst: %s lost %.0f%% of its girth"
               % (worst_pinch[1], 100.0 * worst_pinch[0]))

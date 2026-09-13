@@ -18,7 +18,8 @@ VRoid exports work the same way.
 
 Export settings that matter (Blender glTF exporter):
     Include > Limit to Selected Objects: mesh + armature
-    Data > Mesh: apply modifiers, no shape keys needed (bake the body first)
+    Data > Mesh: apply modifiers; shape keys may be left in, they are read
+                 at their default weights (that is where MPFB2 keeps the body)
     Data > Skinning: on
     Transform > +Y Up: on (the default)
 """
@@ -177,23 +178,64 @@ def _buffer_bytes(gltf, binary, index, base_dir):
         return fh.read()
 
 
+NUMPY_TYPE = {"b": "<i1", "B": "<u1", "h": "<i2", "H": "<u2",
+              "I": "<u4", "f": "<f4"}
+
+
+def _typed(raw, start, count, ncomp, fmt, stride):
+    """`count` elements of `ncomp` components, honouring a byte stride.
+
+    Read a vertex at a time this used to cost one `struct.unpack` per vertex;
+    a body with thirty morph targets is half a million of them before a single
+    triangle is drawn.
+    """
+    dtype = np.dtype(NUMPY_TYPE[fmt])
+    packed = ncomp * dtype.itemsize
+    if stride == packed:
+        flat = np.frombuffer(raw, dtype=dtype, count=count * ncomp,
+                             offset=start)
+        return flat.reshape(count, ncomp).astype(np.float64)
+    rows = np.frombuffer(raw, dtype=np.uint8, count=count * stride,
+                         offset=start).reshape(count, stride)[:, :packed]
+    return rows.copy().view(dtype).reshape(count, ncomp).astype(np.float64)
+
+
+def _sparse_part(gltf, binary, base_dir, part, count, ncomp, fmt):
+    view = gltf["bufferViews"][part["bufferView"]]
+    raw = _buffer_bytes(gltf, binary, view.get("buffer", 0), base_dir)
+    start = view.get("byteOffset", 0) + part.get("byteOffset", 0)
+    size = COMPONENT_SIZE[fmt]
+    return _typed(raw, start, count, ncomp, fmt, ncomp * size)
+
+
 def _accessor(gltf, binary, index, base_dir):
-    """Read an accessor into an array, honouring byteStride and normalisation."""
+    """Read an accessor into an array, honouring byteStride, normalisation
+    and sparse storage."""
     acc = gltf["accessors"][index]
     count = acc["count"]
     ncomp = NUM_COMPONENTS[acc["type"]]
     fmt = COMPONENT[acc["componentType"]]
     size = COMPONENT_SIZE[fmt]
-    if "bufferView" not in acc:
-        return np.zeros((count, ncomp), dtype=np.float64)
-    view = gltf["bufferViews"][acc["bufferView"]]
-    raw = _buffer_bytes(gltf, binary, view.get("buffer", 0), base_dir)
-    start = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
-    stride = view.get("byteStride") or ncomp * size
-    out = np.empty((count, ncomp), dtype=np.float64)
-    for i in range(count):
-        chunk = raw[start + i * stride:start + i * stride + ncomp * size]
-        out[i] = struct.unpack("<" + fmt * ncomp, chunk)
+    if "bufferView" in acc:
+        view = gltf["bufferViews"][acc["bufferView"]]
+        raw = _buffer_bytes(gltf, binary, view.get("buffer", 0), base_dir)
+        start = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+        stride = view.get("byteStride") or ncomp * size
+        out = _typed(raw, start, count, ncomp, fmt, stride)
+    else:
+        out = np.zeros((count, ncomp), dtype=np.float64)
+    # A sparse accessor stores only the elements that differ from that base.
+    # It is how an exporter writes a morph target that moves a few hundred
+    # vertices of a body, so ignoring it reads the target as no displacement
+    # at all - which looks exactly like a mesh that has no targets.
+    sparse = acc.get("sparse")
+    if sparse:
+        n = sparse["count"]
+        idx_fmt = COMPONENT[sparse["indices"]["componentType"]]
+        where = _sparse_part(gltf, binary, base_dir, sparse["indices"],
+                             n, 1, idx_fmt).ravel().astype(np.int64)
+        out[where] = _sparse_part(gltf, binary, base_dir, sparse["values"],
+                                  n, ncomp, fmt)
     if acc.get("normalized") and acc["componentType"] in NORMALISE:
         out = out / NORMALISE[acc["componentType"]]
     return out
@@ -321,13 +363,31 @@ def load_rigged_mesh(path, drop_loose=True):
     skin = gltf["skins"][node["skin"]]
     mesh = gltf["meshes"][node["mesh"]]
 
+    # A DCC stores a shape key as a glTF morph target with a default weight,
+    # and a body built out of shape keys - which is what MakeHuman's macro
+    # sliders are - carries its whole shape there. Read the base mesh alone
+    # and every figure in a set loads as the identical unshaped base: a child
+    # and a heavy adult come out the same 167 cm mannequin, and the only sign
+    # of it is that the rig, which *is* fitted to the shape, no longer matches
+    # the mesh it drives. Node weights override the mesh's own, per the spec.
+    morph = node.get("weights")
+    if morph is None:
+        morph = mesh.get("weights") or []
+
     verts, faces, joint_idx, weights = [], [], [], []
+    applied = 0
     for prim in mesh["primitives"]:
         attrs = prim["attributes"]
         if "JOINTS_0" not in attrs:
             continue
         offset = len(verts)
         position = _accessor(gltf, binary, attrs["POSITION"], base_dir)
+        for weight, target in zip(morph, prim.get("targets", [])):
+            if abs(weight) < 1e-6 or "POSITION" not in target:
+                continue
+            position = position + weight * _accessor(
+                gltf, binary, target["POSITION"], base_dir)
+            applied += 1
         verts.extend(position)
         joint_idx.extend(_accessor(gltf, binary, attrs["JOINTS_0"], base_dir))
         weights.extend(_accessor(gltf, binary, attrs["WEIGHTS_0"], base_dir))
@@ -370,6 +430,7 @@ def load_rigged_mesh(path, drop_loose=True):
         "inverse_bind": ibm,
         "skin_joints": np.asarray(joint_idx, np.int64),
         "skin_weights": np.asarray(weights, float),
+        "morphs_applied": applied,
     }
     if drop_loose and len(shells) > 1:
         result = _keep_main_shell(result)
@@ -797,12 +858,16 @@ def inspect(path):
     return 0 if not problems else 1
 
 
-def _write_test_glb(path, lift=0.0):
+def _write_test_glb(path, lift=0.0, morph=False):
     """A small rigged humanoid, so the loader and skinning can be tested with
     no external assets. Bone names follow MakeHuman's default rig.
 
     `lift` displaces the geometry, which lets a test build an asset that is
     distinguishable from the body instead of an exact overlap.
+
+    `morph` adds two shape keys with non-zero default weights - one written
+    plainly, one sparse - which is how a DCC stores a body built out of
+    sliders. A loader that reads the base mesh alone gets neither.
     """
     bones = [
         ("pelvis", -1, (0.0, 0.95, 0.0)),
@@ -857,6 +922,12 @@ def _write_test_glb(path, lift=0.0):
 
     blobs = [verts.tobytes(), faces.tobytes(), joints.tobytes(),
              weights.tobytes(), ibm.tobytes()]
+    if morph:
+        raised = np.zeros_like(verts)
+        raised[:, 1] = np.float32(0.10)                  # a plain target
+        moved = np.array([[0.0, 0.0, 0.20]] * 3, np.float32)
+        blobs += [raised.tobytes(), np.arange(3, dtype=np.uint32).tobytes(),
+                  moved.tobytes()]                       # and a sparse one
     offsets, cursor, payload = [], 0, b""
     for blob in blobs:
         pad = (-len(payload)) % 4
@@ -868,7 +939,8 @@ def _write_test_glb(path, lift=0.0):
         "scene": 0, "scenes": [{"nodes": [0, 1]}],
         "buffers": [{"byteLength": len(payload)}],
         "bufferViews": [{"buffer": 0, "byteOffset": offsets[i],
-                         "byteLength": len(blobs[i])} for i in range(5)],
+                         "byteLength": len(blobs[i])}
+                        for i in range(len(blobs))],
         "accessors": [
             {"bufferView": 0, "componentType": 5126, "count": len(verts),
              "type": "VEC3"},
@@ -882,10 +954,27 @@ def _write_test_glb(path, lift=0.0):
              "type": "MAT4"}],
         "meshes": [{"primitives": [{"attributes": {
             "POSITION": 0, "JOINTS_0": 2, "WEIGHTS_0": 3}, "indices": 1}]}],
+        "morph_placeholder": None,
         "skins": [{"joints": list(range(2, 2 + len(bones))),
                    "inverseBindMatrices": 4}],
         "nodes": [{"name": "body", "mesh": 0, "skin": 0}],
     }
+    del gltf["morph_placeholder"]
+    if morph:
+        gltf["accessors"] += [
+            {"bufferView": 5, "componentType": 5126, "count": len(verts),
+             "type": "VEC3"},
+            # no bufferView of its own: the base is all zeros and only the
+            # three substituted elements say anything, which is how an
+            # exporter writes a target that moves a handful of vertices
+            {"componentType": 5126, "count": len(verts), "type": "VEC3",
+             "sparse": {"count": 3,
+                        "indices": {"bufferView": 6, "componentType": 5125},
+                        "values": {"bufferView": 7}}}]
+        gltf["meshes"][0]["primitives"][0]["targets"] = [{"POSITION": 5},
+                                                         {"POSITION": 6}]
+        gltf["meshes"][0]["weights"] = [0.5, 1.0]
+
     children = {}
     for b, (_n, parent, _p) in enumerate(bones):
         if parent >= 0:
@@ -955,6 +1044,31 @@ def _selftest():
           "head at y=%.3f" % mesh["rest_position"][4][1])
     check("weights normalised",
           abs(mesh["skin_weights"].sum() - len(mesh["vertices"])) < 1e-6)
+
+    # A shape key reaches glTF as a morph target with a default weight, and a
+    # body built out of sliders - MakeHuman's macros, a Daz morph dial - keeps
+    # its whole shape there. Read the base alone and every figure in a set
+    # loads as the same unshaped mannequin, while the rig, which *is* fitted
+    # to the shape, still differs: five MPFB2 bodies came in as one 167 cm
+    # base mesh with five different skeletons stretching it, and the only
+    # sign of it was a limb the skinning appeared to pinch.
+    shaped = load_rigged_mesh(
+        _write_test_glb(os.path.join(tempfile.gettempdir(), "rig_morph.glb"),
+                        morph=True), drop_loose=False)
+    check("a mesh with morph targets is loaded at its own shape",
+          shaped["morphs_applied"] == 2, "%d applied"
+          % shaped["morphs_applied"])
+    rise = shaped["vertices"][:, 1] - solid["vertices"][:, 1]
+    check("a plain target moves every vertex by its weight",
+          abs(rise.max() - 0.05) < 1e-6 and abs(rise.min() - 0.05) < 1e-6,
+          "%.4f..%.4f, wanted 0.5 x 0.10" % (rise.min(), rise.max()))
+    shift = shaped["vertices"][:, 2] - solid["vertices"][:, 2]
+    check("and a sparse target moves only the vertices it names",
+          abs(shift[:3] - 0.20).max() < 1e-6 and abs(shift[3:]).max() < 1e-9,
+          "%d of %d vertices moved" % (int((abs(shift) > 1e-9).sum()),
+                                       len(shift)))
+    check("a mesh without targets is unchanged by any of this",
+          solid["morphs_applied"] == 0)
 
     roles = resolve_bones(mesh["joint_names"])
     check("MakeHuman rig names all matched",

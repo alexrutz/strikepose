@@ -212,6 +212,18 @@ solve an asset separately or it will drift from the body.
   and an expanding sibling has already claimed the space. Use `before=`.
 - glTF splits vertices at UV seams, so index connectivity reports one body as
   dozens of shells. Weld by position before any connected-component analysis.
+- A shape key reaches glTF as a *morph target with a default weight*, and a
+  body built out of sliders keeps its whole shape there - MakeHuman's macro
+  sliders, a Daz morph dial. Reading POSITION alone loads every figure in a
+  set as the identical unshaped base mesh, and the giveaway is indirect: the
+  rig *is* fitted to the shape, so it no longer matches the mesh it drives.
+  Five MPFB2 bodies came in as one 167 cm mannequin with five skeletons
+  stretching it, and the only symptom was a limb the skinning appeared to
+  pinch by a third. Node weights override the mesh's own, per the spec.
+- A morph target is usually stored in a *sparse* accessor: no bufferView of
+  its own, a base of zeros, and only the elements that moved. Skipping sparse
+  reads such a target as no displacement at all, which looks exactly like a
+  mesh that has no targets.
 - A model's joint array is longer than its parent array. SMPL-X returns 127
   joints and 55 parents; the rest are landmarks posed by skinning. Iterate over
   the parents.
