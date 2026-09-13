@@ -137,7 +137,8 @@ check("a fenced reply is still read",
 # -- a model that refuses --------------------------------------------------
 Stub.mode = "ollama_rubbish"
 llm = pose_agent.LocalLLM(host, "ollama", "stub-7b")
-_figures, _camera, report = pose_agent.pose_from_prompt("a runner mid stride", llm)
+_figures, _props, _camera, report = pose_agent.pose_from_prompt(
+    "a runner mid stride", llm)
 check("a model that answers nothing usable falls back to keywords",
       report["source"] == "keywords" and len(report["warnings"]) == 1,
       str(report["warnings"])[:90])
@@ -150,7 +151,8 @@ check("no server at all is not an error",
 # -- the model's plan actually poses the figure ---------------------------
 Stub.mode = "ollama"
 llm = pose_agent.LocalLLM(host, "ollama", "stub-7b")
-figures, camera, report = pose_agent.pose_from_prompt("a runner mid stride", llm)
+figures, _props, camera, report = pose_agent.pose_from_prompt(
+    "a runner mid stride", llm)
 check("a model plan is used when one arrives",
       report["source"].startswith("stub-7b"), report["source"])
 check("and the preset it chose is applied",
@@ -197,6 +199,9 @@ check("and the plan, so a run can be replayed or hand-edited",
       and scene["plan"]["figures"][0]["commands"][0]["name"] == "sitting")
 check("and stays loadable as an ordinary scene file",
       len(scene["people"][0]["pose_keypoints_2d"]) == 54)
+check("and carries the objects the prompt put in the scene",
+      [o["shape"] for o in scene.get("objects", [])] == ["chair"],
+      str(scene.get("objects")))
 
 # --require-llm must fail rather than quietly produce a keyword pose
 result = subprocess.run(

@@ -50,10 +50,12 @@ import sys
 import urllib.error
 import urllib.request
 
+import props as props_module
 from openpose3d_editor import (
     BODY_PRESETS, DEFAULT_PRESET, KEYPOINT_NAMES, VERSION, Camera, Skeleton,
-    anatomy_depth_image, carry_chain, frame_rect, pose_image, preset_params,
-    project_people, scene_to_dict, vadd, vcross, vdot, vlen, vmul, vnorm, vsub,
+    anatomy_depth_image, carry_chain, frame_rect, inside_polygon, pose_image,
+    preset_params, project_people, scene_to_dict, solid_quads, vadd, vcross,
+    vdot, vlen, vmul, vnorm, vsub,
 )
 
 INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
@@ -198,9 +200,27 @@ STANCES = {
                          {"op": "point", "target": "r_shin", "direction": "forward"}],
 }
 
-OPS = ("stance", "point", "bend", "turn", "lean", "look", "hide")
+# Where an object goes, relative to the figure it is placed against.
+# (which point of the figure, how the object lines up with it). "seat" means
+# the object's *top* meets that height and its base still reaches the floor,
+# which is what a chair under the hips has to do and the only alignment that
+# cannot be written as an offset.
+ANCHORS = {
+    "ground": ("feet", "bottom"),
+    "in_front": ("feet_forward", "bottom"),
+    "behind": ("feet_back", "bottom"),
+    "left_of": ("feet_left", "bottom"),
+    "right_of": ("feet_right", "bottom"),
+    "under_hips": ("hips", "seat"),
+    "under_feet": ("feet", "seat"),
+    "at_hands": ("hands", "centre"),
+    "overhead": ("head", "bottom"),
+}
+
+OPS = ("stance", "point", "bend", "turn", "lean", "look", "hide", "place")
 
 POINT_TARGETS = sorted(set(BONES) | set(LIMBS))
+SHAPE_NAMES = list(props_module.SHAPE_NAMES)
 HIDE_TARGETS = sorted(set(LIMBS) | set(KEYPOINT_NAMES))
 
 
@@ -224,6 +244,10 @@ def command_schema():
             "direction": {"type": "string", "enum": sorted(DIRECTIONS)},
             "degrees": {"type": "number"},
             "name": {"type": "string", "enum": sorted(STANCES)},
+            "shape": {"type": "string", "enum": SHAPE_NAMES},
+            "at": {"type": "string", "enum": sorted(ANCHORS)},
+            "distance": {"type": "number"},
+            "size": {"type": "number"},
         },
         "required": ["op"],
     }
@@ -267,6 +291,8 @@ Commands, applied in order:
   {"op":"lean","direction":DIR,"degrees":N}    tip the upper body at the waist
   {"op":"look","direction":DIR}                where the head looks
   {"op":"hide","target":JOINT_OR_LIMB}         mark it off-frame or occluded
+  {"op":"place","shape":SHAPE,"at":ANCHOR,"distance":CM,"size":N,"degrees":N}
+                                              put an object in the scene
 
 stance NAME: %(stances)s
 point target: %(points)s
@@ -277,6 +303,14 @@ bend target:  %(bends)s
 direction:    %(directions)s
 camera:       %(cameras)s
 preset:       %(presets)s
+
+place shape:  %(shapes)s
+place at:     %(anchors)s
+  distance is centimetres from the figure, size multiplies the object's real
+  size (1 is life size), degrees turns it. Every shape already has the size of
+  the real thing, so leave size out unless it should be bigger or smaller than
+  usual. A figure that sits needs something under it: sit it down AND place a
+  chair "under_hips". Objects appear in the depth map, never in the pose map.
 
 Shape:
 {"figures":[{"preset":"Male, average","commands":[ ... ]}],"camera":"front"}
@@ -294,6 +328,8 @@ def system_prompt():
         "directions": ", ".join(sorted(DIRECTIONS)),
         "cameras": ", ".join(sorted(CAMERA_VIEWS)),
         "presets": ", ".join(sorted(BODY_PRESETS)),
+        "shapes": ", ".join(SHAPE_NAMES),
+        "anchors": ", ".join(sorted(ANCHORS)),
     }
 
 
@@ -354,7 +390,68 @@ def _bend_axis(skeleton, parent, pivot, child):
     return hinge if vlen(hinge) > 1e-6 else side
 
 
-def apply_command(skeleton, command):
+def ground_level(skeleton):
+    """The y the figure stands on: its lowest visible foot, less a sole."""
+    feet = [skeleton.points[INDEX[n]] for n in ("l_ankle", "r_ankle")
+            if skeleton.visible[INDEX[n]]]
+    low = min(p[1] for p in (feet or skeleton.points))
+    return low - 8.0
+
+
+def anchor_point(skeleton, at, distance):
+    """(where the object goes, which height it lines up by).
+
+    `distance` runs away from the figure along the ground, which is the only
+    reading of "80 cm in front of" that stays true once the figure turns.
+    """
+    where, align = ANCHORS[at]
+    side, up, facing = body_frame(skeleton)
+    floor = ground_level(skeleton)
+    hips = vmul(vadd(skeleton.points[INDEX["r_hip"]],
+                     skeleton.points[INDEX["l_hip"]]), 0.5)
+    flat = (hips[0], floor, hips[2])          # under the figure, on the floor
+    push = {"feet_forward": facing, "feet_back": vmul(facing, -1.0),
+            "feet_left": side, "feet_right": vmul(side, -1.0)}.get(where)
+    if push is not None:
+        offset = vmul(push, distance)
+        return (flat[0] + offset[0], floor, flat[2] + offset[2]), align, floor
+    if where == "hips":
+        return (hips[0], floor, hips[2]), align, floor
+    if where == "hands":
+        hands = vmul(vadd(skeleton.points[INDEX["r_wrist"]],
+                          skeleton.points[INDEX["l_wrist"]]), 0.5)
+        forward = vmul(facing, 12.0)
+        return vadd(hands, forward), align, floor
+    if where == "head":
+        head = skeleton.points[INDEX["nose"]]
+        return (head[0], head[1] + 16.0 + distance, head[2]), align, floor
+    return flat, align, floor
+
+
+def place_object(skeleton, shape, at="ground", distance=70.0, size=1.0,
+                 yaw=0.0):
+    """One object, positioned against the figure. Returns the prop.
+
+    A seat is the case worth spelling out: "under_hips" sets the object's
+    height so its top surface meets the hip and its base still reaches the
+    floor, rather than dropping a default-height chair under a figure whose
+    hips are nowhere near 45 cm up. That is what makes "sitting on a chair"
+    come out as a figure sitting on a chair rather than one hovering over it.
+    """
+    position, align, floor = anchor_point(skeleton, at, distance)
+    w, h, d = props_module.default_size(shape)
+    w, h, d = w * size, h * size, d * size
+    if align == "seat":
+        seat = INDEX["l_hip"] if at == "under_hips" else INDEX["l_ankle"]
+        top = skeleton.points[seat][1] - (4.0 if at == "under_hips" else 0.0)
+        h = max(6.0, top - floor)
+        position = (position[0], floor, position[2])
+    elif align == "centre":
+        position = (position[0], position[1] - h / 2.0, position[2])
+    return props_module.make(shape, (w, h, d), position, yaw)
+
+
+def apply_command(skeleton, command, props=None):
     """Apply one command. Returns None, or a string saying why it was skipped.
 
     Every path here is a rotation, so no bone can change length - which is what
@@ -378,7 +475,7 @@ def apply_command(skeleton, command):
         if name not in STANCES:
             return "unknown stance %r" % (name,)
         for step in STANCES[name]:
-            apply_command(skeleton, step)
+            apply_command(skeleton, step, props)
         return None
 
     if op == "point":
@@ -455,21 +552,46 @@ def apply_command(skeleton, command):
             skeleton.visible[INDEX[joint]] = False
         return None
 
+    if op == "place":
+        if props is None:
+            return "place needs a scene to put the object in"
+        shape = command.get("shape") or target
+        if shape not in props_module.SHAPES:
+            return "unknown shape %r" % (shape,)
+        at = command.get("at", "ground")
+        if at not in ANCHORS:
+            return "unknown anchor %r" % (at,)
+        try:
+            distance = float(command.get("distance", 70.0))
+            size = float(command.get("size", 1.0))
+        except (TypeError, ValueError):
+            return "distance and size must be numbers"
+        if not 0.0 <= distance <= 600.0 or not 0.05 <= size <= 12.0:
+            return "distance or size out of range"
+        if len(props) >= 24:
+            return "too many objects in the scene already"
+        props.append(place_object(skeleton, shape, at, distance, size, degrees))
+        return None
+
     return "unknown op %r" % (op,)
 
 
-def apply_commands(skeleton, commands):
+def apply_commands(skeleton, commands, props=None):
     """Apply a list of commands. Returns the warnings, one per bad command.
 
     A bad command is skipped, not fatal. A local model gets one wrong every so
     often, and losing a whole pose over a misspelled joint would make the CLI
     useless exactly when the model is small enough to be worth running locally.
+
+    `props` is the scene's object list; objects are appended to it. Passing
+    None refuses `place` rather than dropping it silently, so a caller that
+    has no scene to put an object in hears about it.
     """
     warnings = []
     if not isinstance(commands, list):
         return ["commands is not a list"]
     for i, command in enumerate(commands):
-        problem = apply_command(skeleton, command)
+        problem = apply_command(skeleton, command, props)
         if problem:
             warnings.append("command %d skipped: %s" % (i + 1, problem))
     return warnings
@@ -480,9 +602,11 @@ def apply_commands(skeleton, commands):
 # ---------------------------------------------------------------------------
 
 def build_scene(plan, view_w=900, view_h=700, aspect=512.0 / 768.0):
-    """A plan -> (figures, camera, warnings), ready to render."""
+    """A plan -> (figures, props, camera, warnings), ready to render."""
     warnings = []
     figures = []
+    props = []
+    owned = []              # props per figure, so they travel with their owner
     entries = plan.get("figures") if isinstance(plan, dict) else None
     if not isinstance(entries, list) or not entries:
         entries = [{"commands": []}]
@@ -498,12 +622,20 @@ def build_scene(plan, view_w=900, view_h=700, aspect=512.0 / 768.0):
                                 % (preset, DEFAULT_PRESET))
             preset = DEFAULT_PRESET
         skeleton = Skeleton(preset_params(preset))
-        warnings.extend(apply_commands(skeleton, entry.get("commands", [])))
+        mine = []
+        warnings.extend(apply_commands(skeleton, entry.get("commands", []),
+                                       mine))
         figures.append(skeleton)
+        owned.append(mine)
+        props.extend(mine)
     if not figures:
         figures = [Skeleton(preset_params(DEFAULT_PRESET))]
     for i, skeleton in enumerate(figures[1:], start=1):
         skeleton.translate((70.0 * i, 0.0, 0.0))    # stand them side by side
+        # an object was anchored against its figure where that figure stood,
+        # so it travels with it rather than staying where the chair was
+        for prop in owned[i]:
+            prop["position"][0] += 70.0 * i
 
     camera = Camera(view_w, view_h)
     view = plan.get("camera") if isinstance(plan, dict) else None
@@ -512,14 +644,39 @@ def build_scene(plan, view_w=900, view_h=700, aspect=512.0 / 768.0):
                         % (view,))
         view = None
     if view is None:
-        view = legible_view(figures)
+        view = legible_view(figures, props=props)
     yaw, pitch = CAMERA_VIEWS[view]
     camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
-    frame_scene(figures, camera, frame_rect(view_w, view_h, aspect))
-    return figures, camera, warnings
+    frame_scene(figures, camera, frame_rect(view_w, view_h, aspect), props=props)
+    return figures, props, camera, warnings
 
 
-def legible_view(figures, order=None, readable=0.8):
+def buried(figures, camera, props, limit=0.3):
+    """Is the figure hidden behind the objects from here?
+
+    A desk placed in front of a seated figure is in front of it from the
+    figure's side of the room, and a camera that agrees renders a desk with a
+    head over it. Counts the keypoints an object covers from nearer than they
+    are; more than `limit` of them and the view is no good, however well it
+    shows the pose.
+    """
+    if not props:
+        return False
+    solids = solid_quads(props, camera)
+    hidden = total = 0
+    for figure in figures:
+        for i, point in enumerate(figure.points):
+            if not figure.visible[i]:
+                continue
+            total += 1
+            sx, sy, depth = camera.project(point)
+            if any(near < depth and inside_polygon(poly, sx, sy)
+                   for poly, near, _index, _picked in solids):
+                hidden += 1
+    return total > 0 and hidden > limit * total
+
+
+def legible_view(figures, order=None, readable=0.8, props=()):
     """The named view that shows most of what makes this pose that pose.
 
     Not "is every bone visible": a crouch seen head-on still shows 71% of the
@@ -560,9 +717,18 @@ def legible_view(figures, order=None, readable=0.8):
         right, up, _fwd = camera.basis()
         scores[name] = min(math.hypot(vdot(d, right), vdot(d, up))
                            for d in moved)
-    for name in (order or VIEW_ORDER):
-        if scores[name] >= readable:
-            return name
+    def cameras():
+        for name in (order or VIEW_ORDER):
+            yaw, pitch = CAMERA_VIEWS[name]
+            camera = Camera()
+            camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
+            yield name, camera
+
+    for clear in (True, False):     # a buried view only if nothing else works
+        for name, camera in cameras():
+            if scores[name] >= readable and not (clear and buried(
+                    figures, camera, props)):
+                return name
     return max(scores, key=lambda name: (scores[name],
                                          -VIEW_ORDER.index(name)))
 
@@ -590,7 +756,7 @@ def silhouette_points(figure):
     return points
 
 
-def frame_scene(figures, camera, rect, margin=1.06):
+def frame_scene(figures, camera, rect, margin=1.06, props=(), grow=1.9):
     """Point the camera at the scene and zoom so the whole of it fits `rect`.
 
     A posed figure is not the same size on screen as the rest pose - arms up
@@ -605,6 +771,21 @@ def frame_scene(figures, camera, rect, margin=1.06):
     right, up, _fwd = camera.basis()
     xs = [vdot(p, right) for p in points]
     ys = [vdot(p, up) for p in points]
+    # The people set the scale; objects may widen the frame but only so far.
+    # A 6 m floor or a 4 m wall is a backdrop, and framing to hold all of one
+    # shrinks the figure the whole image is about to a few dozen pixels.
+    lo_x, hi_x, lo_y, hi_y = min(xs), max(xs), min(ys), max(ys)
+    room_x = (hi_x - lo_x) * (grow - 1.0) / 2.0
+    room_y = (hi_y - lo_y) * (grow - 1.0) / 2.0
+    for prop in props:
+        lo, hi = props_module.bounds(prop)
+        # the eight corners, not the two: a wall is in frame only if its far
+        # top corner is, and that is neither of them
+        for corner in ((x, y, z) for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                       for z in (lo[2], hi[2])):
+            cx, cy = vdot(corner, right), vdot(corner, up)
+            xs.append(min(max(cx, lo_x - room_x), hi_x + room_x))
+            ys.append(min(max(cy, lo_y - room_y), hi_y + room_y))
     mid_x, mid_y = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
     # put the bounding box centre on the camera target, in the camera's own
     # plane: the mean of the keypoints would pull the frame towards the head,
@@ -620,14 +801,18 @@ def frame_scene(figures, camera, rect, margin=1.06):
 
 
 def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
-                 thickness=1.0, with_depth=True):
-    """(pose image, depth image or None, export rect) for a built scene."""
+                 thickness=1.0, with_depth=True, props=()):
+    """(pose image, depth image or None, export rect) for a built scene.
+
+    Objects reach the depth map only. The pose map is the OpenPose skeleton and
+    nothing else - a chair drawn into it would be read as a limb.
+    """
     rect = frame_rect(view_w, view_h, out_w / out_h)
     pose = pose_image(figures, camera, rect, out_w, out_h)
     depth = None
     if with_depth:
         depth = anatomy_depth_image(figures, camera, rect, out_w, out_h,
-                                    thickness)
+                                    thickness, props)
     return pose, depth, rect
 
 
@@ -681,6 +866,51 @@ KEYWORD_PRESETS = [
 ]
 
 
+KEYWORD_OBJECTS = [
+    (r"\b(chair|armchair)\b", "chair", "under_hips"),
+    (r"\b(stool)\b", "stool", "under_hips"),
+    (r"\b(bench)\b", "bench", "under_hips"),
+    (r"\b(sofa|couch)\b", "bench", "under_hips"),
+    (r"\b(desk)\b", "desk", "in_front"),
+    (r"\b(table)\b", "table", "in_front"),
+    (r"\b(bed)\b", "bed", "under_hips"),
+    (r"\b(crate|box)\b", "crate", "in_front"),
+    (r"\b(barrel)\b", "barrel", "in_front"),
+    (r"\b(wall)\b", "wall", "behind"),
+    (r"\b(pillar|column)\b", "pillar", "behind"),
+    (r"\b(stairs|steps|staircase)\b", "steps", "in_front"),
+    (r"\b(doorway|archway|door frame)\b", "archway", "ground"),
+    (r"\b(ball|football|basketball)\b", "ball", "at_hands"),
+    (r"\b(floor|ground|standing on)\b", "floor", "ground"),
+]
+
+
+def keyword_objects(text, commands):
+    """Objects the prompt named, plus the one a seated figure cannot do without.
+
+    A figure told to sit with nothing under it reads as a figure hovering, and
+    the depth map is the part that gives that away, so a sitting stance with no
+    seat named gets a chair. Nothing else is invented: an object nobody asked
+    for in the frame is worse than a bare one.
+    """
+    out = []
+    sittable = {"chair", "stool", "bench", "bed", "crate", "barrel",
+                "platform", "steps", "box"}
+    sitting = any(c.get("name") == "sitting" for c in commands)
+    for pattern, shape, at in KEYWORD_OBJECTS:
+        if not re.search(pattern, text):
+            continue
+        # "sitting on a crate" puts the figure on the crate, not next to one:
+        # whatever was named goes under the hips if it can be sat on
+        if sitting and shape in sittable and re.search(r"\b(on|onto|astride)\b",
+                                                      text):
+            at = "under_hips"
+        out.append({"op": "place", "shape": shape, "at": at})
+    if sitting and not any(c["at"] == "under_hips" for c in out):
+        out.append({"op": "place", "shape": "chair", "at": "under_hips"})
+    return out
+
+
 def keyword_plan(prompt):
     """What can be read out of a prompt with no model at all.
 
@@ -696,6 +926,7 @@ def keyword_plan(prompt):
             break
     if re.search(r"\b(arms? (out|wide)|spread)\b", text) and not commands:
         commands.append({"op": "stance", "name": "t_pose"})
+    commands.extend(keyword_objects(text, commands))
     if re.search(r"\b(lean\w* forward|bent over|bowing|bow)\b", text):
         commands.append({"op": "lean", "direction": "forward", "degrees": 30})
     if re.search(r"\b(lean\w* back|arch\w*)\b", text):
@@ -946,13 +1177,13 @@ def pose_from_prompt(prompt, llm=None, view_w=900, view_h=700,
                      aspect=512.0 / 768.0):
     """Everything between a sentence and a posed scene.
 
-    Returns (figures, camera, report), report carrying the plan, which route
-    read the prompt and every command that was skipped.
+    Returns (figures, props, camera, report), report carrying the plan, which
+    route read the prompt and every command that was skipped.
     """
     plan, source, warnings = plan_for(prompt, llm)
-    figures, camera, more = build_scene(plan, view_w, view_h, aspect)
-    return figures, camera, {"plan": plan, "source": source,
-                             "warnings": warnings + more}
+    figures, props, camera, more = build_scene(plan, view_w, view_h, aspect)
+    return figures, props, camera, {"plan": plan, "source": source,
+                                    "warnings": warnings + more}
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1198,8 @@ def describe_vocabulary():
         "bend       : " + ", ".join(sorted(BEND_JOINTS)),
         "directions : " + ", ".join(sorted(DIRECTIONS)),
         "cameras    : " + ", ".join(sorted(CAMERA_VIEWS)),
+        "shapes     : " + ", ".join(SHAPE_NAMES),
+        "anchors    : " + ", ".join(sorted(ANCHORS)),
         "presets    : " + ", ".join(sorted(BODY_PRESETS)),
     ])
 
@@ -981,9 +1214,11 @@ def run(args):
                   % (args.host or ", ".join(e for _k, e in DEFAULT_ENDPOINTS)),
                   file=sys.stderr)
             return 2
-    figures, camera, report = pose_from_prompt(args.prompt, llm,
-                                              aspect=args.width / args.height)
-    print("prompt read by: %s" % report["source"])
+    figures, props, camera, report = pose_from_prompt(
+        args.prompt, llm, aspect=args.width / args.height)
+    print("prompt read by: %s%s" % (report["source"],
+                                    "" if not props else
+                                    "; %d object(s) placed" % len(props)))
     for warning in report["warnings"]:
         print("  warning: %s" % warning, file=sys.stderr)
 
@@ -991,7 +1226,7 @@ def run(args):
     out_w, out_h = args.width, args.height
     pose, depth, rect = render_scene(figures, camera, out_w, out_h,
                                      thickness=args.thickness,
-                                     with_depth=not args.no_depth)
+                                     with_depth=not args.no_depth, props=props)
     written = []
     pose_path = os.path.join(args.out, "pose.png")
     pose.save(pose_path)
@@ -1004,7 +1239,7 @@ def run(args):
     scene = scene_to_dict(figures, camera,
                           [pts for pts, _vis in
                            project_people(figures, camera, rect, out_w, out_h)],
-                          out_w, out_h)
+                          out_w, out_h, props)
     scene["prompt"] = args.prompt
     scene["plan"] = report["plan"]
     scene_path = os.path.join(args.out, "scene.json")
@@ -1188,8 +1423,108 @@ def _selftest():
     check("a reply with no JSON at all parses to nothing",
           parse_json_object("I am afraid I cannot do that") is None)
 
+    # objects
+    every = [{"op": "place", "shape": shape, "at": at}
+             for shape in SHAPE_NAMES for at in ANCHORS]
+    skeleton = Skeleton(preset_params(DEFAULT_PRESET))
+    before = lengths(skeleton)
+    trouble = [w for command in every
+               for w in apply_commands(skeleton, [command], [])]
+    check("every shape can be placed at every anchor", not trouble,
+          "%d shapes x %d anchors; %s"
+          % (len(SHAPE_NAMES), len(ANCHORS), trouble[:2]))
+    check("and placing objects never touches the skeleton",
+          max(abs(a - b) for a, b in zip(before, lengths(skeleton))) < 1e-9)
+    scene = []
+    warnings = apply_commands(skeleton, every[:30], scene)
+    check("the scene fills up to a limit rather than without bound",
+          len(scene) == 24 and len(warnings) == 6
+          and "too many" in warnings[-1], "%d placed" % len(scene))
+
+    # a seat has to reach from the floor to the hips, whatever the figure did
+    for stance, preset in (("sitting", DEFAULT_PRESET),
+                           ("sitting", "Child, about 7"),
+                           ("sitting_on_floor", "Female, average")):
+        skeleton = Skeleton(preset_params(preset))
+        seat = []
+        apply_commands(skeleton, [{"op": "stance", "name": stance},
+                                  {"op": "place", "shape": "chair",
+                                   "at": "under_hips"}], seat)
+        low, high = props_module.bounds(seat[0])
+        hips = 0.5 * (skeleton.points[INDEX["l_hip"]][1]
+                      + skeleton.points[INDEX["r_hip"]][1])
+        floor = ground_level(skeleton)
+        check("a chair under %s in %s reaches floor to hip"
+              % (stance, preset.split(",")[0].lower()),
+              abs(low[1] - floor) < 1e-6 and hips - 14.0 < high[1] <= hips,
+              "floor %.0f seat %.0f hip %.0f" % (floor, high[1], hips))
+
+    # anchors are read in the figure's frame, like every other command
+    for turn in (0.0, 90.0, 180.0):
+        skeleton = Skeleton(preset_params(DEFAULT_PRESET))
+        scene = []
+        apply_commands(skeleton, [{"op": "turn", "direction": "left",
+                                   "degrees": turn},
+                                  {"op": "place", "shape": "crate",
+                                   "at": "in_front", "distance": 90.0}], scene)
+        _side, _up, facing = body_frame(skeleton)
+        hips = vmul(vadd(skeleton.points[INDEX["r_hip"]],
+                         skeleton.points[INDEX["l_hip"]]), 0.5)
+        to_crate = vsub(scene[0]["position"], (hips[0], scene[0]["position"][1],
+                                               hips[2]))
+        check("an object in front of a figure turned %.0f deg is in front of it"
+              % turn, vdot(vnorm(to_crate), facing) > 0.999,
+              "cos %.4f" % vdot(vnorm(to_crate), facing))
+
+    skeleton = Skeleton(preset_params(DEFAULT_PRESET))
+    scene = []
+    bad = [{"op": "place", "shape": "spaceship"},
+           {"op": "place", "shape": "chair", "at": "in_orbit"},
+           {"op": "place", "shape": "chair", "distance": "far"},
+           {"op": "place", "shape": "chair", "size": 900.0},
+           {"op": "place", "shape": "chair", "at": "ground"}]
+    warnings = apply_commands(skeleton, bad, scene)
+    check("four bad placements are reported and the good one still lands",
+          len(warnings) == 4 and len(scene) == 1, str(warnings)[:80])
+    check("and `place` with nowhere to put it says so rather than vanishing",
+          apply_command(Skeleton(preset_params(DEFAULT_PRESET)),
+                        {"op": "place", "shape": "chair"}) is not None)
+
+    # objects belong to the depth map only
+    figures, scene, camera, _r = build_scene(
+        {"figures": [{"commands": [{"op": "place", "shape": "wall",
+                                    "at": "behind"}]}]})
+    rect = frame_rect(900, 700, 512.0 / 768.0)
+    bare = pose_image(figures, camera, rect, 128, 192)
+    with_wall = render_scene(figures, camera, 128, 192, props=scene)[0]
+    check("an object never reaches the pose map",
+          bare.tobytes() == with_wall.tobytes())
+    lit = render_scene(figures, camera, 128, 192, props=scene)[1]
+    empty = render_scene(figures, camera, 128, 192, props=[])[1]
+    covered = (sum(1 for v in lit.tobytes() if v),
+               sum(1 for v in empty.tobytes() if v))
+    check("but does reach the depth map", covered[0] > covered[1] * 1.5,
+          "%d px vs %d" % covered)
+
+    # a backdrop must not shrink the subject out of the frame
+    tall = build_scene({"figures": [{"commands": []}]})[2].zoom
+    walled = build_scene({"figures": [{"commands": [
+        {"op": "place", "shape": "floor", "at": "ground"},
+        {"op": "place", "shape": "wall", "at": "behind"}]}]})[2].zoom
+    check("a wall and a floor do not shrink the figure away",
+          walled > tall * 0.45, "zoom %.2f -> %.2f" % (tall, walled))
+
+    # and the camera must not end up behind the furniture
+    figures, scene, camera, _r = build_scene({"figures": [{"commands": [
+        {"op": "stance", "name": "sitting"},
+        {"op": "place", "shape": "chair", "at": "under_hips"},
+        {"op": "place", "shape": "desk", "at": "in_front", "distance": 55.0}]}]})
+    check("a view is not chosen that buries the figure behind an object",
+          not buried(figures, camera, scene),
+          "yaw %.0f" % math.degrees(camera.yaw))
+
     # a plan end to end, with no model anywhere
-    figures, camera, report = pose_from_prompt(
+    figures, scene, camera, report = pose_from_prompt(
         "a woman sitting on a chair, seen from three quarters")
     check("keyword route reads the prompt", report["source"] == "keywords")
     check("and picks the figure out of it",
@@ -1203,9 +1538,11 @@ def _selftest():
           "yaw %.0f deg" % math.degrees(camera.yaw))
     check("no warnings on a clean run", not report["warnings"],
           str(report["warnings"]))
+    check("and the chair she was told to sit on is in the scene",
+          [o["shape"] for o in scene] == ["chair"], str(scene))
 
     # a plan a model might hand back, wrong parts included
-    figures, camera, report = build_scene({
+    figures, _scene, camera, report = build_scene({
         "figures": [{"preset": "Nonexistent", "commands": [
             {"op": "stance", "name": "t_pose"}]}],
         "camera": "from the moon"})
@@ -1215,7 +1552,7 @@ def _selftest():
     # the view has to show the pose, not a foreshortened guess at it
     worst_view, worst_bone, worst_change = None, 1.0, (None, 1.0)
     for name in sorted(STANCES):
-        figures, camera, _r = build_scene(
+        figures, _scene, camera, _r = build_scene(
             {"figures": [{"commands": [{"op": "stance", "name": name}]}]})
         right, up, _fwd = camera.basis()
         fresh = Skeleton(figures[0].body)
@@ -1238,17 +1575,17 @@ def _selftest():
           "worst: %s shows %.0f%% of its change"
           % (worst_change[0], 100.0 * worst_change[1]))
     check("a standing figure is still shown from the front",
-          build_scene({"figures": [{"commands": []}]})[1].yaw == 0.0)
+          build_scene({"figures": [{"commands": []}]})[2].yaw == 0.0)
     check("and an explicit camera is never overruled",
           abs(math.degrees(build_scene(
               {"figures": [{"commands": [{"op": "stance", "name": "sitting"}]}],
-               "camera": "front"})[1].yaw)) < 1e-9)
+               "camera": "front"})[2].yaw)) < 1e-9)
 
     # framing has to hold the pose, not the rest figure
     from PIL import Image as _Image                      # noqa: F401 - optional
     for prompt in ("a person cheering with both arms up",
                    "someone lying down", "a runner mid stride"):
-        figures, camera, _r = pose_from_prompt(prompt)
+        figures, _scene, camera, _r = pose_from_prompt(prompt)
         rect = frame_rect(900, 700, 512 / 768)
         people = project_people(figures, camera, rect, 512, 768)
         xs = [p[0] for p in people[0][0]]

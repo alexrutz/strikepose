@@ -91,6 +91,19 @@ often. Losing the whole pose to a misspelled joint would make the CLI useless
 exactly where a small local model is the point. `apply_commands` returns the
 warnings and carries on.
 
+**Objects reach the depth map, never the pose map.** A chair drawn into an
+OpenPose image is read as a limb. `render_scene` and the editor's exports keep
+them apart, and both suites assert the pose PNG is byte-identical with and
+without objects in the scene.
+
+**An object is placed against the figure, and stored in world centimetres.**
+`pose_agent`'s anchors - `under_hips`, `in_front`, `at_hands` - are resolved
+once, at placement, in the figure's own frame; what a scene file holds is the
+result. The anchor stops being true the moment anything is dragged, so keeping
+it would be keeping a lie. `under_hips` is the one anchor that sets a height
+rather than a position: the object's top meets the hip and its base still
+reaches the floor, which is what makes a chair fit a child and an adult.
+
 **Assets ride the body's pose solution.** `solve_pose` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
 solve an asset separately or it will drift from the body.
@@ -104,6 +117,21 @@ solve an asset separately or it will drift from the body.
   unconstrained JSON rather than failing, and `parse_json_object` digs the
   object out of a fence, because a small model wraps its answer more often
   than not. `tests/test_pose_agent.py` serves all of that from a stub.
+- Objects need a box primitive of their own. Swept as an elliptical cylinder
+  a crate has rounded sides, and a depth map of a room built from those reads
+  as a room full of cushions. `_box_z` is the same slab clip `_slab_z` does
+  against its end planes, three times over.
+- `_screen_extent` must be exact per kind, because it sets the pixel window a
+  primitive is solved in and anything outside it is not drawn. The ellipsoid
+  formula under-measures a cylinder by its end caps and a box by most of a
+  corner - invisible on a limb station a quarter of a centimetre thick, a
+  shaved edge on a table.
+- Framing and the view choice both have to know about objects. A 6 m floor or
+  a 4 m wall is a backdrop: framing to hold all of one shrinks the figure the
+  image is about to nothing, so objects may widen the frame only so far past
+  the people. And a desk in front of a seated figure is in front of it from
+  the figure's side of the room, so a view is rejected when objects cover more
+  than a third of the keypoints from nearer than they are.
 - A view is chosen by how much of the pose's *departure from rest* survives
   projection, not by how much of each bone does. A crouch seen head-on still
   shows 71% of the thigh and reads as a figure standing up straight, because

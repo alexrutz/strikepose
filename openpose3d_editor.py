@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.21.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.22.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -38,6 +38,8 @@ import math
 import os
 import sys
 from copy import deepcopy
+
+import props as props_module
 
 try:
     import tkinter as tk
@@ -86,6 +88,10 @@ LIMB_SEQ = [
 # Signature colour per figure, applied to the body preview. The bones span the
 # whole hue circle whatever you do to them, so recolouring them alone never
 # reads at a glance; the body is a large flat area where a tint is obvious.
+# Objects are one flat neutral, a little cooler than any figure tint, so a
+# prop never reads as another person in the viewport.
+PROP_TINT = (196, 202, 214)
+
 FIGURE_BODY_TINTS = ((235, 235, 240),     # 1: neutral
                      (255, 165, 80),      # 2: orange
                      (105, 205, 255),     # 3: cyan
@@ -1358,6 +1364,86 @@ def silhouette_quads(parts, camera):
     return quads
 
 
+def _hull(points):
+    """2D convex hull, monotone chain. Small inputs, so the sort dominates."""
+    points = sorted(set(points))
+    if len(points) < 3:
+        return list(points)
+
+    def half(seq):
+        out = []
+        for p in seq:
+            while len(out) >= 2:
+                (ax, ay), (bx, by) = out[-2], out[-1]
+                if (bx - ax) * (p[1] - ay) - (by - ay) * (p[0] - ax) > 0:
+                    break
+                out.pop()
+            out.append(p)
+        return out[:-1]
+
+    return half(points) + half(reversed(points))
+
+
+def inside_polygon(poly, x, y):
+    """Crossing-number point-in-polygon, for picking an object in the viewport."""
+    inside = False
+    for i in range(len(poly)):
+        (x0, y0), (x1, y1) = poly[i - 1], poly[i]
+        if (y0 > y) != (y1 > y):
+            cut = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+            if x < cut:
+                inside = not inside
+    return inside
+
+
+def solid_quads(props, camera, selected=None):
+    """Screen outlines of the scene's objects, depth sorted, for the viewport.
+
+    One polygon per primitive rather than the swept quads the body uses: an
+    object is a handful of standalone solids, not a chain of stations. A box
+    is the hull of its eight projected corners, a cylinder the hull of its two
+    end rings, an ellipsoid its projected ellipse - which is exact under an
+    orthographic camera. Returns (polygon, depth, prop index, selected).
+    """
+    out = []
+    for index, prop in enumerate(props):
+        for kind, centre, axes, radii in props_module.parts(prop):
+            sx, sy, depth = camera.project(centre)
+            if kind == "ball":
+                right, up, _fwd = camera.basis()
+                ex = math.sqrt(sum((r * vdot(u, right)) ** 2
+                                   for u, r in zip(axes, radii))) * camera.zoom
+                ey = math.sqrt(sum((r * vdot(u, up)) ** 2
+                                   for u, r in zip(axes, radii))) * camera.zoom
+                poly = [(sx + ex * math.cos(t), sy - ey * math.sin(t))
+                        for t in (i * math.pi / 8.0 for i in range(16))]
+                out.append((poly, depth, index, index == selected))
+                continue
+            corners = []
+            if kind == "box":
+                for a in (-1.0, 1.0):
+                    for b in (-1.0, 1.0):
+                        for c in (-1.0, 1.0):
+                            corners.append(vadd(centre, vadd(
+                                vmul(axes[0], a * radii[0]),
+                                vadd(vmul(axes[1], b * radii[1]),
+                                     vmul(axes[2], c * radii[2])))))
+            else:                          # elliptical cylinder about axes[2]
+                for end in (-1.0, 1.0):
+                    base = vadd(centre, vmul(axes[2], end * radii[2]))
+                    for i in range(12):
+                        t = 2.0 * math.pi * i / 12.0
+                        corners.append(vadd(base, vadd(
+                            vmul(axes[0], radii[0] * math.cos(t)),
+                            vmul(axes[1], radii[1] * math.sin(t)))))
+            flat = [camera.project(c)[:2] for c in corners]
+            poly = _hull([(round(x, 3), round(y, 3)) for x, y in flat])
+            if len(poly) >= 3:
+                out.append((poly, depth, index, index == selected))
+    out.sort(key=lambda q: -q[1])
+    return out
+
+
 def _ellipsoid_z(X, Y, centre, axes, radii):
     """Nearest surface z for rays along +Z through (x, y, 0). Exact: the ray
     becomes a quadratic once the ellipsoid is mapped to a unit sphere."""
@@ -1413,22 +1499,66 @@ def _slab_z(X, Y, centre, axes, radii):
     return np.where(lo <= hi, lo, np.inf)
 
 
+def _box_z(X, Y, centre, axes, radii):
+    """Nearest surface z for an oriented rectangular block.
+
+    The same slab clip `_slab_z` does against its end planes, three times over
+    - once per axis - which is all a box is. Square corners are why objects
+    need it: a crate or a table top swept as an elliptical cylinder has
+    rounded sides, and a depth map of a room full of those reads as a room
+    full of cushions.
+    """
+    ox, oy, oz = X - centre[0], Y - centre[1], -centre[2]
+    lo = np.full(np.shape(ox), -1e18, dtype=float)
+    hi = np.full(np.shape(ox), 1e18, dtype=float)
+    for axis, r in zip(axes, radii):
+        along = axis[2]
+        offset = ox * axis[0] + oy * axis[1] + oz * axis[2]
+        if abs(along) > 1e-12:
+            a, b = (-r - offset) / along, (r - offset) / along
+            lo = np.maximum(lo, np.minimum(a, b))
+            hi = np.minimum(hi, np.maximum(a, b))
+        else:                              # ray parallel to this pair of faces
+            inside = np.abs(offset) <= r
+            lo = np.where(inside, lo, np.inf)
+            hi = np.where(inside, hi, -np.inf)
+    return np.where(lo <= hi, lo, np.inf)
+
+
 def _primitive_z(kind, X, Y, centre, axes, radii):
     if kind == "slab":
         return _slab_z(X, Y, centre, axes, radii)
+    if kind == "box":
+        return _box_z(X, Y, centre, axes, radii)
     return _ellipsoid_z(X, Y, centre, axes, radii)
 
 
-def _screen_extent(axes, radii):
-    return (math.sqrt(sum((r * u[0]) ** 2 for u, r in zip(axes, radii))),
-            math.sqrt(sum((r * u[1]) ** 2 for u, r in zip(axes, radii))))
+def _screen_extent(kind, axes, radii):
+    """How far a primitive reaches from its centre on screen, exactly.
+
+    Exactly, per kind, because this sets the pixel window the primitive is
+    solved in and anything outside it is simply not drawn. The ellipsoid
+    formula used for all three under-measures a cylinder by its end caps and a
+    box by most of a corner, which trimmed the ends off anything but a thin
+    slab - invisible on a limb station a quarter of a centimetre thick, a
+    shaved edge on a table.
+    """
+    def reach(i):
+        if kind == "box":
+            return sum(abs(r * u[i]) for u, r in zip(axes, radii))
+        if kind == "slab":                 # elliptical cylinder about axes[2]
+            return (abs(radii[2] * axes[2][i])
+                    + math.sqrt((radii[0] * axes[0][i]) ** 2
+                                + (radii[1] * axes[1][i]) ** 2))
+        return math.sqrt(sum((r * u[i]) ** 2 for u, r in zip(axes, radii)))
+    return reach(0), reach(1)
 
 
 def _part_bounds(part, width, height):
     x0 = y0 = 1e18
     x1 = y1 = -1e18
-    for _kind, centre, axes, radii in part:
-        ex, ey = _screen_extent(axes, radii)
+    for kind, centre, axes, radii in part:
+        ex, ey = _screen_extent(kind, axes, radii)
         x0 = min(x0, centre[0] - ex)
         x1 = max(x1, centre[0] + ex)
         y0 = min(y0, centre[1] - ey)
@@ -1489,7 +1619,7 @@ def render_depth(groups, width, height, blend=0.0, near=255, far=45,
         xs = xs + 0.5
         ys = ys + 0.5
         for kind, centre, axes, radii in part:
-            ex, ey = _screen_extent(axes, radii)
+            ex, ey = _screen_extent(kind, axes, radii)
             a0 = max(x0, int(math.floor(centre[0] - ex))) - x0
             a1 = min(x1, int(math.ceil(centre[0] + ex)) + 1) - x0
             b0 = max(y0, int(math.floor(centre[1] - ey))) - y0
@@ -1554,31 +1684,38 @@ def pose_image(figures, camera, rect, out_w, out_h, thick_lines=True):
                            out_w, out_h, stickwidth=stick, dot_radius=stick)
 
 
-def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0):
+def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
+                        props=()):
     """Depth map from the built-in anatomy, framed to match `pose_image`.
 
     The always-available depth source: no model files, no torch, numpy and
     Pillow only. The rigged-mesh and SMPL-X sources live on the editor because
     they need files the user has to supply.
+
+    Objects go in as one group each. Groups meet with a hard minimum, so a
+    chair occludes the figure on it with an edge instead of melting into it,
+    while the parts inside one figure still blend.
     """
     x0, y0, _x1, _y1 = rect
     s = out_w / (rect[2] - rect[0])
     k = camera.zoom * s                   # world units -> pixels, same for z
     right, up, fwd = camera.basis()
-    groups = []
-    for figure in figures:
-        parts = []
-        for part in body_parts(figure, thickness):
-            out = []
-            for kind, centre, axes, radii in part:
-                pc = camera.project(centre)
-                cam_axes = tuple((vdot(u, right), -vdot(u, up), vdot(u, fwd))
-                                 for u in axes)
-                out.append((kind,
-                            ((pc[0] - x0) * s, (pc[1] - y0) * s, pc[2] * k),
-                            cam_axes, tuple(r * k for r in radii)))
-            parts.append(out)
-        groups.append(parts)
+    def to_camera(part):
+        out = []
+        for kind, centre, axes, radii in part:
+            pc = camera.project(centre)
+            cam_axes = tuple((vdot(u, right), -vdot(u, up), vdot(u, fwd))
+                             for u in axes)
+            out.append((kind,
+                        ((pc[0] - x0) * s, (pc[1] - y0) * s, pc[2] * k),
+                        cam_axes, tuple(r * k for r in radii)))
+        return out
+
+    groups = [[to_camera(part) for part in body_parts(figure, thickness)]
+              for figure in figures]
+    groups += [[to_camera(props_module.parts(prop))] for prop in props]
+    if not groups:
+        groups = [[]]
     return render_depth(groups, out_w, out_h, blend=2.0 * k)
 
 
@@ -1586,9 +1723,10 @@ def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0):
 # Scene serialisation
 # ---------------------------------------------------------------------------
 
-def scene_to_dict(figures, camera, points_list, out_w, out_h):
+def scene_to_dict(figures, camera, points_list, out_w, out_h, props=()):
     """Scene with any number of people. people[] is OpenPose's own format;
-    figures[] carries what the editor needs to reload the scene."""
+    figures[] carries what the editor needs to reload the scene, and objects[]
+    the props standing in it."""
     if isinstance(figures, Skeleton):
         figures, points_list = [figures], [points_list]
 
@@ -1628,6 +1766,7 @@ def scene_to_dict(figures, camera, points_list, out_w, out_h):
                          for c, v in skeleton.lengths.items()},
         "body": {k: v for k, v in skeleton.body.items()},
         "body_scale": skeleton.body_scale,
+        "objects": [dict(prop) for prop in props],
         "camera": {"yaw": camera.yaw, "pitch": camera.pitch,
                    "zoom": camera.zoom, "target": list(camera.target)},
     }
@@ -1655,6 +1794,24 @@ def scene_load(data, camera):
         skeleton.assets = list(entry.get("assets", []))
         figures.append(skeleton)
     return figures or [Skeleton()]
+
+
+def scene_objects(data):
+    """The props in a scene file, rebuilt through `props.make`.
+
+    Separate from `scene_load` rather than returned alongside the figures: a
+    scene written before objects existed simply has none, and every caller
+    that only wants the people keeps working unchanged.
+    """
+    out = []
+    for entry in data.get("objects") or ():
+        if not isinstance(entry, dict):
+            continue
+        out.append(props_module.make(entry.get("shape", "box"),
+                                     entry.get("size"),
+                                     entry.get("position", (0.0, 0.0, 0.0)),
+                                     entry.get("yaw", 0.0)))
+    return out
 
 
 def scene_from_dict(data, skeleton, camera):
@@ -1773,6 +1930,12 @@ class EditorApp:
         self.root.configure(bg=BG)
 
         self.preset_name = tk.StringVar(value=DEFAULT_PRESET)
+        self.props = []                 # objects standing in the scene
+        self.active_prop = None
+        self.prop_shape = tk.StringVar(value="chair")
+        self.prop_label = tk.StringVar(value="No objects. Objects show in the "
+                                              "depth map, not the pose map.")
+        self.drag_prop = None
         self.prompt_text = tk.StringVar(value="")
         self.prompt_host = tk.StringVar(
             value=os.environ.get("POSE_AGENT_HOST", ""))
@@ -2078,6 +2241,28 @@ class EditorApp:
                        ("Next \u21e5", self.next_figure)])
         buttons(body, [("Frame all (0)", self.frame_all)], cols=1)
 
+        # ---- objects ------------------------------------------------------
+        body = section("Objects", opened=False)
+        shapes = tk.OptionMenu(body, self.prop_shape, *props_module.SHAPE_NAMES)
+        shapes.configure(bg=CONTROL, fg=FG, relief="flat", bd=0, anchor="w",
+                         highlightthickness=0, activebackground=HOVER,
+                         activeforeground=FG, padx=10, pady=4, cursor="hand2",
+                         font=("TkDefaultFont", 9))
+        shapes["menu"].configure(bg=PANEL, fg=FG, relief="flat", bd=0,
+                                 activebackground=HOVER, activeforeground=FG)
+        shapes.pack(fill="x", padx=12, pady=1)
+        buttons(body, [("Place", self.add_prop),
+                       ("Remove", self.delete_prop),
+                       ("Select next", self.next_prop),
+                       ("Drop to floor", self.drop_prop)])
+        buttons(body, [("Smaller", lambda: self.scale_prop(0.9)),
+                       ("Larger", lambda: self.scale_prop(1.1)),
+                       ("Turn \u2212", lambda: self.turn_prop(-15.0)),
+                       ("Turn +", lambda: self.turn_prop(15.0))], small=True)
+        tk.Label(body, textvariable=self.prop_label, bg=PANEL, fg=MUTED,
+                 anchor="w", font=("TkDefaultFont", 8)).pack(fill="x", padx=13,
+                                                             pady=(1, 2))
+
         # ---- body ---------------------------------------------------------
         body = section("Body")
         menu = tk.OptionMenu(body, self.preset_name, *BODY_PRESETS,
@@ -2314,10 +2499,14 @@ class EditorApp:
 
     # -- helpers -----------------------------------------------------------
     def scene_snapshot(self):
-        return ([f.snapshot() for f in self.figures], self.active)
+        return ([f.snapshot() for f in self.figures], self.active,
+                deepcopy(self.props), self.active_prop)
 
     def restore_scene(self, snap):
-        states, active = snap
+        states, active = snap[0], snap[1]
+        if len(snap) > 2:               # snapshots taken before objects existed
+            self.props = deepcopy(snap[2])
+            self.active_prop = snap[3]
         while len(self.figures) < len(states):
             self.figures.append(Skeleton())
         del self.figures[len(states):]
@@ -2345,10 +2534,13 @@ class EditorApp:
         llm = pose_agent.discover(host=self.prompt_host.get().strip() or None,
                                   model=self.prompt_model.get().strip() or None)
         width, height = self._sizes()
-        figures, camera, report = pose_agent.pose_from_prompt(
+        figures, props, camera, report = pose_agent.pose_from_prompt(
             prompt, llm, self.camera.width, self.camera.height, width / height)
         self.push_undo()
         self.figures = figures
+        self.props = props
+        self.active_prop = None
+        self.refresh_props()
         self.camera.yaw, self.camera.pitch = camera.yaw, camera.pitch
         self.camera.target, self.camera.zoom = camera.target, camera.zoom
         self.set_active(0, announce=False)
@@ -2358,6 +2550,113 @@ class EditorApp:
             note += "; %d command(s) skipped" % len(report["warnings"])
         self.prompt_status.set(note)
         self.status.set("Posed from prompt (%s). Ctrl+Z puts it back." % note)
+
+    # -- objects -----------------------------------------------------------
+    def ground_level(self):
+        """The y the scene stands on: the lowest point of the lowest figure.
+
+        Read off the figures rather than kept as a number, so a shorter preset
+        or a figure that has been dragged downwards still has objects land on
+        the floor it is actually standing on.
+        """
+        lows = []
+        for figure in self.figures:
+            ankles = [figure.points[i] for i in (10, 13) if figure.visible[i]]
+            lows.extend(p[1] for p in (ankles or figure.points))
+        return (min(lows) - 8.0) if lows else -150.0
+
+    def add_prop(self, shape=None, announce=True):
+        shape = shape or self.prop_shape.get()
+        self.push_undo()
+        size = props_module.default_size(shape)
+        centre = self.skeleton.points[1]
+        prop = props_module.make(
+            shape, size,
+            (centre[0], self.ground_level(), centre[2] + size[2] / 2.0 + 55.0))
+        self.props.append(prop)
+        self.active_prop = len(self.props) - 1
+        self.refresh_props()
+        self.redraw()
+        if announce:
+            self.status.set("Added a %s. Drag it in the viewport; Delete "
+                            "removes it." % shape)
+        return prop
+
+    def delete_prop(self):
+        if self.active_prop is None:
+            self.status.set("No object selected.")
+            return
+        self.push_undo()
+        shape = self.props.pop(self.active_prop)["shape"]
+        self.active_prop = (len(self.props) - 1) if self.props else None
+        self.refresh_props()
+        self.redraw()
+        self.status.set("Removed the %s." % shape)
+
+    def next_prop(self):
+        if not self.props:
+            self.status.set("No objects in the scene yet.")
+            return
+        self.active_prop = 0 if self.active_prop is None \
+            else (self.active_prop + 1) % len(self.props)
+        self.prop_shape.set(self.props[self.active_prop]["shape"])
+        self.refresh_props()
+        self.redraw()
+        self.status.set("Selected object %d of %d (%s)."
+                        % (self.active_prop + 1, len(self.props),
+                           self.props[self.active_prop]["shape"]))
+
+    def refresh_props(self):
+        if not self.props:
+            self.prop_label.set("No objects. Objects show in the depth map, "
+                                "not the pose map.")
+        elif self.active_prop is None:
+            self.prop_label.set("%d object(s); none selected."
+                                % len(self.props))
+        else:
+            prop = self.props[self.active_prop]
+            self.prop_label.set("%d of %d: %s, %.0f x %.0f x %.0f cm, %.0f deg"
+                                % ((self.active_prop + 1, len(self.props),
+                                    prop["shape"]) + tuple(prop["size"])
+                                   + (prop["yaw"],)))
+
+    def _with_prop(self, change):
+        if self.active_prop is None:
+            self.status.set("No object selected.")
+            return
+        self.push_undo()
+        change(self.props[self.active_prop])
+        self.refresh_props()
+        self.redraw()
+
+    def scale_prop(self, factor):
+        def apply(prop):
+            prop["size"] = [max(2.0, v * factor) for v in prop["size"]]
+            self.status.set("%s is now %.0f x %.0f x %.0f cm."
+                            % ((prop["shape"],) + tuple(prop["size"])))
+        self._with_prop(apply)
+
+    def turn_prop(self, degrees):
+        def apply(prop):
+            prop["yaw"] = (prop["yaw"] + degrees) % 360.0
+            self.status.set("%s turned to %.0f degrees."
+                            % (prop["shape"], prop["yaw"]))
+        self._with_prop(apply)
+
+    def drop_prop(self):
+        """Put the selected object back on the floor, keeping where it stands."""
+        def apply(prop):
+            prop["position"][1] = self.ground_level()
+            self.status.set("%s dropped to the floor." % prop["shape"])
+        self._with_prop(apply)
+
+    def pick_prop(self, x, y, camera):
+        """Which object is under the cursor, nearest to the camera first."""
+        hits = []
+        for poly, depth, index, _picked in solid_quads(self.props, camera):
+            if inside_polygon(poly, x, y):
+                hits.append((depth, index))
+        return min(hits)[1] if hits else None
 
     def push_undo(self):
         self.undo_stack.append(self.scene_snapshot())
@@ -2433,24 +2732,37 @@ class EditorApp:
                 canvas.create_line(*run, fill=colour, dash=(5, 4))
 
     def draw_body(self, camera=None, canvas=None, coarse=False):
+        """Figures and objects, one depth sort across the lot.
+
+        Sorted together rather than one after the other: a crate in front of a
+        knee has to cover the knee, and drawing all the people and then all the
+        objects puts every object in front of every person.
+        """
         camera = camera or self.camera
         canvas = canvas or self.canvas
-        quads = self.body_quads(camera, coarse)
+        quads = [(poly, depth, index, None)
+                 for poly, depth, index in self.body_quads(camera, coarse)]
+        quads += [(poly, depth, None, picked)
+                  for poly, depth, _i, picked
+                  in solid_quads(self.props, camera, self.active_prop)]
         if not quads:
             return
-        depths = [z for _poly, z, _f in quads]
+        quads.sort(key=lambda q: -q[1])
+        depths = [z for _poly, z, _f, _s in quads]
         lo, hi = min(depths), max(depths)
         span = max(1e-6, hi - lo)
-        for poly, depth, index in quads:           # already sorted far to near
+        for poly, depth, index, picked in quads:   # already sorted far to near
             t = (hi - depth) / span
             g = 44.0 + 150.0 * t
-            tint = FIGURE_BODY_TINTS[index % len(FIGURE_BODY_TINTS)]
+            tint = (PROP_TINT if index is None
+                    else FIGURE_BODY_TINTS[index % len(FIGURE_BODY_TINTS)])
             shade = "#%02x%02x%02x" % tuple(
                 max(0, min(255, int(g * c / 255.0))) for c in tint)
             flat = [v for point in poly for v in point]
             # outline in the fill colour closes the hairline cracks tkinter
             # leaves between adjacent unantialiased polygons
-            canvas.create_polygon(*flat, fill=shade, outline=shade)
+            canvas.create_polygon(*flat, fill=shade,
+                                  outline=ACCENT if picked else shade)
 
     def projected(self, figure=None, camera=None):
         skeleton = self.figures[figure] if figure is not None else self.skeleton
@@ -2511,9 +2823,23 @@ class EditorApp:
         view.canvas.focus_set()
         hit = self.pick(event.x, event.y, view.camera)
         if hit is None:
+            # joints win over objects: a keypoint inside a crate must stay
+            # reachable, and an object is far easier to hit by accident
+            prop = self.pick_prop(event.x, event.y, view.camera)
+            if prop is not None:
+                self.push_undo()
+                self.active_prop = prop
+                self.prop_shape.set(self.props[prop]["shape"])
+                self.drag_prop = prop
+                self.drag_last = (event.x, event.y)
+                self.selected = None
+                self.refresh_props()
+                self.redraw()
+                return
             # the locked views must not orbit, or they stop being front/top/left
             self.orbit_last = None if view.locked else (event.x, event.y)
             self.selected = None
+            self.active_prop = None
             self.redraw()
             return
         figure, idx = hit
@@ -2540,6 +2866,18 @@ class EditorApp:
 
     def on_drag(self, event, view=None):
         view = view or self.main_view
+        if self.drag_prop is not None:
+            # objects slide in the view plane: an orthographic camera gives no
+            # depth from a cursor, and orbiting to push something back is both
+            # obvious and exact
+            dx = event.x - self.drag_last[0]
+            dy = event.y - self.drag_last[1]
+            self.drag_last = (event.x, event.y)
+            move = view.camera.screen_delta_to_world(dx, dy)
+            prop = self.props[self.drag_prop]
+            prop["position"] = [a + b for a, b in zip(prop["position"], move)]
+            self.redraw()
+            return
         if self.orbit_last is not None:
             dx, dy = event.x - self.orbit_last[0], event.y - self.orbit_last[1]
             self.camera.orbit(dx, dy)
@@ -2639,8 +2977,9 @@ class EditorApp:
                                        vmul(vnorm(mirrored), length)))
 
     def on_release(self, _event, view=None):
-        was_dragging = self.drag_joint is not None
+        was_dragging = self.drag_joint is not None or self.drag_prop is not None
         self.check_lengths()
+        self.drag_prop = None
         self.drag_joint = None
         self.drag_view = None
         self.pending_undo = None
@@ -3168,7 +3507,8 @@ class EditorApp:
                 return image
             self.use_smplx.set(False)
         return anatomy_depth_image(self.figures, self.camera, self.frame_rect(),
-                                   width, height, self._thickness())
+                                   width, height, self._thickness(),
+                                   self.props)
 
     def preview_depth(self):
         if np is None or Image is None:
@@ -3232,7 +3572,8 @@ class EditorApp:
             return
         data = scene_to_dict(self.figures, self.camera,
                              [self.export_points(w, h, f)
-                              for f in range(len(self.figures))], w, h)
+                              for f in range(len(self.figures))], w, h,
+                             self.props)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)
         self.status.set(f"Saved {os.path.basename(path)}.")
@@ -3245,6 +3586,9 @@ class EditorApp:
             data = json.load(fh)
         self.push_undo()
         self.figures = scene_load(data, self.camera)
+        self.props = scene_objects(data)
+        self.active_prop = None
+        self.refresh_props()
         self.set_active(0, announce=False)
         self.status.set("Loaded %s, %d %s." % (
             os.path.basename(path), len(self.figures),
