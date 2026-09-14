@@ -509,7 +509,7 @@ def validate_roles(mesh, roles):
 # ---------------------------------------------------------------------------
 
 def pose_globals(rest_position, parents, roles, points, stretch=True,
-                 rest_orient=None, rest_points=None):
+                 rest_orient=None, rest_points=None, slide=True):
     """Global rotation and position per bone, from the editor's keypoints.
 
     Same closed-form aim used for SMPL-X, but expressed purely in global terms
@@ -573,7 +573,11 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
         p = parents[j]
         above = Q[p] if p >= 0 else np.eye(3)
         # express the wanted global change as a change of this joint's local
-        # rotation, so everything below inherits it
+        # rotation, so everything below inherits it. Once segments have been
+        # scaled, Q carries a uniform scale and its transpose is no longer its
+        # inverse - so take the rotation out first, or every re-aim multiplies
+        # the limb's scale by the square of it.
+        above = _rotation_of(above)
         local[j] = above.T @ delta @ above @ local[j]
         propagate()
         recentre()
@@ -734,11 +738,140 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
         recentre()
 
     if stretch:
-        # Aiming only transfers directions, so a rig whose thigh is 45 cm keeps
-        # its own length against a 43 cm preset and the error accumulates down
-        # the chain. The depth map has to line up with the pose PNG or the two
-        # conditioning images disagree, so slide each mapped joint onto its
-        # keypoint and carry its subtree along.
+        # Scale each limb segment to the keypoints before moving anything.
+        #
+        # The rig is fitted to the figure by one number - the ratio of the two
+        # shoulder-to-hip spans - and one number cannot match a torso and the
+        # limbs hanging off it unless the two bodies have the same
+        # proportions. They do not: against the editor's presets the same rig
+        # comes out with a forearm 30% long on an average man and 54% on the
+        # child, whose thigh and shin are 58% and 61% over.
+        #
+        # Sliding the joint onto its keypoint, which is all this used to do,
+        # puts the *joint* in the right place and leaves the geometry between
+        # at the rig's own length - so a 42 cm shin pulled onto a 26 cm gap
+        # overshoots the ankle, and the lower legs come out as wedges with the
+        # feet hanging off them. Scale is what was missing. `skin_mesh` builds
+        # a general 4x4 out of Q, so a uniform scale folded into the rotation
+        # shortens the segment's geometry along with its length - a shorter
+        # shin is a thinner shin, which is what a child's is.
+        #
+        # Folded in *after* the aiming and the roll reset, both of which need
+        # Q to be a rotation, and only between a segment's own ends: a hand
+        # and a foot keep the body's scale rather than their forearm's
+        # correction.
+        # Every chain whose two ends are keypoints, root first: the spine and
+        # the pelvis and the collar place the limb roots, and a shoulder left
+        # 3 cm out puts the whole arm 3 cm out however well its own segments
+        # are scaled. `hips` has no keypoint of its own - OpenPose has none -
+        # so the hip midpoint stands in, which is what `recentre` anchors on.
+        kids = {}
+        for j in range(n):
+            if parents[j] >= 0:
+                kids.setdefault(int(parents[j]), []).append(j)
+        here_hips = 0.5 * (kp("r_hip") + kp("l_hip"))
+        segments = [
+            ("hips", "neck", here_hips, kp("neck")),
+            ("hips", "l_hip", here_hips, kp("l_hip")),
+            ("hips", "r_hip", here_hips, kp("r_hip")),
+            # from the collar, not the neck: the collar is what aiming
+            # pointed at the shoulder, and scaling the chain above the collar
+            # moves the collar too, so the shoulder never settles
+            ("l_collar", "l_shoulder", kp("neck"), kp("l_shoulder")),
+            ("r_collar", "r_shoulder", kp("neck"), kp("r_shoulder")),
+            ("l_shoulder", "l_elbow", kp("l_shoulder"), kp("l_elbow")),
+            ("l_elbow", "l_wrist", kp("l_elbow"), kp("l_wrist")),
+            ("r_shoulder", "r_elbow", kp("r_shoulder"), kp("r_elbow")),
+            ("r_elbow", "r_wrist", kp("r_elbow"), kp("r_wrist")),
+            ("l_hip", "l_knee", kp("l_hip"), kp("l_knee")),
+            ("l_knee", "l_ankle", kp("l_knee"), kp("l_ankle")),
+            ("r_hip", "r_knee", kp("r_hip"), kp("r_knee")),
+            ("r_knee", "r_ankle", kp("r_knee"), kp("r_ankle")),
+        ]
+        def ancestors(j):
+            out, walk = [], j
+            while walk >= 0:
+                out.append(walk)
+                walk = int(parents[walk])
+            return out
+
+        # Root first, re-propagating between each: scaling the spine moves the
+        # shoulder, so a ratio worked out for the upper arm before the spine
+        # was scaled is a ratio for a segment that has since moved. And round
+        # again, because a chain whose two ends sit on different branches -
+        # the neck and the collar both hang off the chest, neither is above
+        # the other - moves its end without moving its start, so one pass
+        # only gets part of the way. Four is past the point where anything
+        # measurable is still moving.
+        for _pass in range(6):
+          # Scaling moves joints, which leaves every aimed direction stale: a
+          # pelvis pulled in carries the thigh with it, so the knee ends up
+          # inboard of the keypoint the thigh was pointed at. Aim again each
+          # time round, and the two converge on each other.
+          for role, child, target in AIM_CHAIN:
+              aim(role, child, kp(target))
+          for top, end, from_here, to_there in segments:
+            if top not in roles or end not in roles:
+                continue
+            b = roles[end]
+            above = set(ancestors(b))
+            # the deepest bone that is above the far end *and* above the near
+            # one, so scaling its chain is what moves the two apart
+            a = next((k for k in ancestors(roles[top]) if k in above), -1)
+            if a < 0 or a == b:
+                continue
+            # Measure from the same place the target is measured from. "hips"
+            # is the hip *midpoint* - OpenPose has no pelvis keypoint - and
+            # the rig's pelvis bone is not at that midpoint, so measuring one
+            # against the other made the spine ratio wrong by the offset
+            # between them and left the neck 6 cm high.
+            anchor = (0.5 * (q[roles["l_hip"]] + q[roles["r_hip"]])
+                      if top == "hips" and "l_hip" in roles and "r_hip" in roles
+                      else q[roles[top]])
+            here = float(np.linalg.norm(q[b] - anchor))
+            # Measure the target from the *rig's* parent joint, not from the
+            # keypoint that stands in for it. Aiming has already put the child
+            # on the ray from that joint towards the keypoint, so scaling the
+            # chain by this ratio lands it exactly on the keypoint - whereas
+            # aiming a shoulder from the collar and then scaling it from the
+            # neck are two constraints that do not place it anywhere in
+            # particular, which is what left an elbow 8 cm out.
+            want = float(np.linalg.norm(to_there - anchor))
+            if here < 1e-6 or want < 1e-6:
+                continue
+            chain, walk = [], b
+            while walk >= 0 and walk != a:
+                walk = int(parents[walk])
+                if walk >= 0 and walk != a:
+                    chain.append(walk)
+            chain.append(a)
+            # clamp: a rig that disagrees by more than this is the wrong rig,
+            # and halving or doubling a limb's girth would look worse than the
+            # mismatch does
+            ratio = float(np.clip(want / here, 0.4, 2.5))
+            if abs(ratio - 1.0) < 1e-4:
+                continue
+            # The scale has to go into `local`, because `propagate` rebuilds
+            # every Q from it and would wipe a scale written to Q directly.
+            # `local` composes down the tree, so scaling the top of the chain
+            # scales everything hanging below it - the whole leg for a thigh,
+            # the whole body for the spine - and the way to confine it to the
+            # chain's own geometry is to divide it back out at every branch
+            # off the chain, `end` included. A hand then keeps the body's
+            # scale rather than its forearm's correction.
+            inside = set(chain)
+            local[a] = local[a] * ratio
+            for k in chain:
+                for c in kids.get(k, ()):
+                    if c not in inside:
+                        local[c] = local[c] / ratio
+            propagate()
+            recentre()
+
+        # Whatever the scaling could not close - a chain whose ends are not
+        # both keypoints, a ratio that hit the clamp - is closed by sliding
+        # the joint and carrying its subtree, because the depth map has to
+        # line up with the pose PNG or the two conditioning images disagree.
         children = {}
         for j in range(n):
             if parents[j] >= 0:
@@ -752,7 +885,8 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
                 stack.extend(children.get(k, ()))
             return out
 
-        placed = {"l_shoulder": "l_shoulder", "r_shoulder": "r_shoulder",
+        placed = {} if not slide else {
+                  "l_shoulder": "l_shoulder", "r_shoulder": "r_shoulder",
                   "l_elbow": "l_elbow", "r_elbow": "r_elbow",
                   "l_wrist": "l_wrist", "r_wrist": "r_wrist",
                   "l_hip": "l_hip", "r_hip": "r_hip",
@@ -769,6 +903,12 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
             for k in subtree(j):
                 q[k] = q[k] + delta
     return np.array(Q), q
+
+
+def _rotation_of(M):
+    """The rotation part of a rotation-times-uniform-scale."""
+    scale = float(abs(np.linalg.det(M))) ** (1.0 / 3.0)
+    return M / scale if scale > 1e-9 else M
 
 
 def _depth(parents, j):
@@ -806,7 +946,8 @@ def skin_mesh(mesh, Q, q):
     return out
 
 
-def solve_pose(mesh, points_cm, roles=None, stretch=True, rest_points=None):
+def solve_pose(mesh, points_cm, roles=None, stretch=True, rest_points=None,
+               slide=True):
     """Solve the rig once and hand back the result keyed by bone name.
 
     Assets - hair, clothing, shoes - are separate skinned meshes built on the
@@ -829,7 +970,7 @@ def solve_pose(mesh, points_cm, roles=None, stretch=True, rest_points=None):
     Q, q = pose_globals(rest * scale, mesh["parents"], roles, points_cm,
                         stretch=stretch,
                         rest_orient=mesh["rest_global"][:, :3, :3],
-                        rest_points=rest_points)
+                        rest_points=rest_points, slide=slide)
     return {"scale": scale,
             "bones": {name: (Q[i], q[i])
                       for i, name in enumerate(mesh["joint_names"])}}
@@ -1244,11 +1385,29 @@ def _selftest():
           "%.2f cm from the joint" % float(np.linalg.norm(centre - q[j])))
     check("no vertex left at the origin", np.abs(verts).sum(axis=1).min() > 1e-6)
 
-    # rigid check: distances inside one bone's vertex set are preserved
-    d_rest = np.linalg.norm(mesh["vertices"][bound[0]] - mesh["vertices"][bound[1]])
-    d_posed = np.linalg.norm(verts[bound[0]] - verts[bound[1]]) / scale
-    check("skinning is rigid within a bone", abs(d_rest - d_posed) < 1e-6,
-          "%.6f vs %.6f" % (d_rest, d_posed))
+    # A bone's own geometry keeps its *shape*.
+    #
+    # It used to keep its size as well, and that check had to go: a rig is
+    # fitted to the figure segment by segment now, so a bone whose segment is
+    # 62% of the keypoints' is 62% of its own length - and 62% as thick, which
+    # is the point. What must not change is the shape. A uniform scale leaves
+    # every ratio of distances alone; shear, a torn joint, or a limb dragged
+    # onto its keypoint do not, which is what this is watching for.
+    trio = bound[:3]
+    def sides(points):
+        return np.array([np.linalg.norm(points[a] - points[b])
+                         for a, b in ((0, 1), (1, 2), (2, 0))])
+    rest_sides = sides(mesh["vertices"][trio])
+    posed_sides = sides(verts[trio])
+    shape_rest = rest_sides / rest_sides.sum()
+    shape_posed = posed_sides / posed_sides.sum()
+    check("a bone's geometry keeps its shape under skinning",
+          float(np.abs(shape_rest - shape_posed).max()) < 1e-6,
+          "worst side ratio off by %.2e"
+          % float(np.abs(shape_rest - shape_posed).max()))
+    grew = float(posed_sides.sum() / max(1e-12, rest_sides.sum()) / scale)
+    check("and its size follows the segment it belongs to",
+          0.3 < grew < 3.0, "scaled %.3f against the rig's own" % grew)
 
     try:
         from smplx_backend import rasterize_depth

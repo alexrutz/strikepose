@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.32.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.33.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys

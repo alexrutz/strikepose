@@ -16,7 +16,7 @@ import numpy as np
 
 import bodies_lib
 import pose_agent
-from openpose3d_editor import BODY_PRESETS
+from openpose3d_editor import BODY_PRESETS, KEYPOINT_NAMES
 
 ok = True
 
@@ -136,6 +136,94 @@ check("and the body does not come through it",
       behind < 0.02 * int(both.sum()),
       "%d of %d pixels, %.1f%%" % (behind, int(both.sum()),
                                    100.0 * behind / max(1, int(both.sum()))))
+
+# -- a rig is fitted segment by segment, not dragged -----------------------
+#
+# The rig used to be fitted to the figure by one number, the ratio of the two
+# shoulder-to-hip spans, and one number cannot match a torso and the limbs
+# hanging off it unless the bodies have the same proportions. Against these
+# presets the same rig came out with a forearm 30% long on an average man and
+# 54% on the child, whose thigh and shin were 58% and 61% over - and the fix
+# for that was to slide each joint onto its keypoint and carry its subtree,
+# which puts the *joint* right and leaves the geometry between at the rig's
+# own length. A 42 cm shin pulled onto a 26 cm gap overshoots the ankle. The
+# child came out with bowed shins and its feet hanging off them.
+import mesh_backend
+from openpose3d_editor import Skeleton, preset_params, build_rest_points
+
+SEGMENTS = [("l_shoulder", "l_elbow"), ("l_elbow", "l_wrist"),
+            ("l_hip", "l_knee"), ("l_knee", "l_ankle"),
+            ("r_shoulder", "r_elbow"), ("r_hip", "r_knee")]
+index = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
+worst_segment, worst_joint = ("none measured", 0.0), ("none measured", 0.0)
+for preset in BODY_PRESETS:
+    mesh = bank[preset]
+    skeleton = Skeleton(preset_params(preset))
+    points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
+    solved = mesh_backend.solve_pose(
+        mesh, points, mesh["roles"],
+        rest_points=build_rest_points(skeleton.body))
+    names, roles = mesh["joint_names"], mesh["roles"]
+    at = lambda role: solved["bones"][names[roles[role]]][1]
+    for top, end in SEGMENTS:
+        if top not in roles or end not in roles:
+            continue
+        got = float(np.linalg.norm(at(end) - at(top)))
+        want = float(np.linalg.norm(
+            np.asarray(points[end], float) - np.asarray(points[top], float)))
+        gap = abs(got - want) / max(1e-9, want)
+        if gap > worst_segment[1]:
+            worst_segment = ("%s %s->%s (%.1f vs %.1f cm)"
+                             % (preset, top, end, got, want), gap)
+    for role in ("l_shoulder", "l_elbow", "l_wrist", "l_hip", "l_knee",
+                 "l_ankle"):
+        if role not in roles:
+            continue
+        off = float(np.linalg.norm(at(role) - np.asarray(points[role], float)))
+        if off > worst_joint[1]:
+            worst_joint = ("%s %s" % (preset, role), off)
+
+check("every limb segment is scaled to the keypoints on every body",
+      worst_segment[1] < 0.02,
+      "worst %s off by %.1f%%" % (worst_segment[0], 100.0 * worst_segment[1]))
+check("and every mapped joint still lands on its keypoint",
+      worst_joint[1] < 0.5, "worst %s by %.2f cm" % worst_joint)
+
+# The mesh must not be torn doing it: a sliding subtree leaves a seam, so
+# check the limb is still one connected piece of surface by measuring the
+# gap between the shin's vertices and the foot's.
+child = bank["Child, about 7"]
+skeleton = Skeleton(preset_params("Child, about 7"))
+points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
+solved = mesh_backend.solve_pose(child, points, child["roles"],
+                                 rest_points=build_rest_points(skeleton.body))
+posed = mesh_backend.skin_with(child, solved)
+seam = (None, 0.0)
+
+
+def closest(points, other):
+    return min(float(np.linalg.norm(other - point, axis=1).min())
+               for point in points[::7])
+
+
+for a, b in (("l_knee", "l_ankle"), ("l_shoulder", "l_elbow"),
+             ("l_hip", "l_knee"), ("l_elbow", "l_wrist")):
+    lower, upper = child["roles"][b], child["roles"][a]
+    mine = child["skin_joints"][:, 0] == lower
+    theirs = child["skin_joints"][:, 0] == upper
+    if mine.sum() < 3 or theirs.sum() < 3:
+        continue
+    # How far the two bones' own vertices sit from each other, against how far
+    # they sat at rest. On an intact limb the answer is "the same": posing is
+    # rotation and scale. A subtree slid onto its keypoint opens the gap by
+    # however far it slid, which is the seam that was showing.
+    was = closest(child["vertices"][mine] * solved["scale"],
+                  child["vertices"][theirs] * solved["scale"])
+    now = closest(posed[mine], posed[theirs])
+    if now - was > seam[1]:
+        seam = ("%s/%s" % (a, b), now - was)
+check("and the limb is not torn open at the joint doing it", seam[1] < 2.0,
+      "widest seam opened %.2f cm at %s" % (seam[1], seam[0]))
 
 print("\nALL PASS" if ok else "\nFAILURES PRESENT")
 sys.exit(0 if ok else 1)

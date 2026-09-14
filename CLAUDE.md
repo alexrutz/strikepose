@@ -245,6 +245,46 @@ two centimetres above where the format puts it and the shoulder line the same
 distance below measured acromial height - one constant, wrong against both the
 survey and the format.
 
+**A rig is fitted to the figure segment by segment, never dragged onto it.**
+One number - the ratio of the two shoulder-to-hip spans - cannot match a torso
+and the limbs hanging off it unless the two bodies have the same proportions.
+Against the editor's presets the same rig came out with a forearm 30% long on
+an average man and 54% on the child, whose thigh and shin were 58% and 61%
+over. Sliding each joint onto its keypoint and carrying its subtree, which is
+what closed that, puts the *joint* right and leaves the geometry between at
+the rig's own length: a 42 cm shin pulled onto a 26 cm gap overshoots the
+ankle, and the child came out with bowed shins and its feet hanging off them.
+Scale is what was missing. `skin_mesh` builds a general 4x4 out of Q, so a
+uniform scale per bone shortens a segment's geometry along with its length -
+a shorter shin is a thinner shin, which is what a child's is - and the mesh is
+never torn. Four things it took to work:
+
+- the scale goes into `local`, not `Q`: `propagate` rebuilds every Q from
+  local and wipes anything written to Q directly;
+- `local` composes down the tree, so scaling the top of a chain scales
+  everything hanging below it - the whole leg for a thigh, the whole body for
+  the spine. Divide it back out at every branch off the chain, so a hand keeps
+  the body's scale rather than its forearm's correction;
+- scaling moves joints, which leaves every aimed direction stale: a pelvis
+  pulled in carries the thigh with it and the knee ends up inboard of the
+  keypoint the thigh was pointed at. Aim again each pass and the two converge;
+- and measure the target from the *rig's own parent joint*, not from the
+  keypoint standing in for it. Aiming has already put the child on the ray
+  from that joint towards the keypoint, so scaling by that ratio lands it
+  exactly - whereas aiming a shoulder from the collar and then scaling it from
+  the neck are two constraints that place it nowhere in particular.
+
+Once Q can carry a scale, `aim` has to take the rotation out of it before
+using the transpose as an inverse, or every re-aim multiplies the limb by the
+square of its scale. Worst joint error across the nine bodies went from
+30 cm to 1.2 cm, and the worst limb pinch from 14% to 7%.
+
+**A bone keeps its shape, not its size.** The self-test used to assert that
+distances inside one bone's vertex set were preserved exactly, and that check
+had to go with the above - a scaled segment is a scaled segment. What must not
+change is the *shape*: a uniform scale leaves every ratio of distances alone,
+while shear, a torn joint, or a limb dragged onto its keypoint do not.
+
 **Assets ride the body's pose solution.** `solve_pose` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
 solve an asset separately or it will drift from the body.
