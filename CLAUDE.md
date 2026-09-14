@@ -189,11 +189,44 @@ the tests of the sweep itself do.
 clips and pads the body's own *swept* profile, and that profile is thinner
 than a rigged mesh wherever the two disagree - a chest, a shoulder - so a coat
 dropped straight into the rigged buffer comes out with the body through it.
-Where a garment covers the body it takes the body's own depth less a
-centimetre, so it follows the rigged shape rather than the approximation it
-was cut from; where it reaches past the body - a hem, a fall of hair - it
-keeps its own depth, because there is nothing under it. Padding harder instead
-would make a coat that fits the sweep and floats off the mesh.
+Where a garment covers the body it takes the body's own depth less the
+garment's own thickness, so it follows the rigged shape rather than the
+approximation it was cut from; where it reaches past the body - a hem, a fall
+of hair - it keeps its own depth, because there is nothing under it. Padding
+harder instead would make a coat that fits the sweep and floats off the mesh.
+
+**A garment clears the rigged body by its OWN thickness, and a piece with
+nothing under it clears nothing.** One figure for every garment was a flat
+centimetre, which is right for a t-shirt and flattens a five-centimetre afro
+onto the skull, a helmet into the head and a coat into the chest: every thick
+garment there is came out of a rigged export looking like bare skin, and since
+the silhouette still grew the PNG looked plausible, which is why nothing
+caught it for a release. So `wearables.layers` hands the rigged path one part
+per standoff rather than one per garment, and the standoff is the piece's own
+padding - `None` for a fall of hair, a hat brim, a bun or a rucksack, which
+are not over the body at all and are dragged round to the front of the face by
+any standoff whatsoever. The test is not coverage, which the clamp never
+touched: it is whether the thick version stands *proud* of what the thin one
+reaches.
+
+**The garment names are the vocabulary, the outfits are the catalogue.** The
+same split `everyday.POSES` makes against the command ops, for the same
+reason: a model picks a garment on every `wear`, so those forty-odd names stay
+lean, while `outfit` is picked at most once per figure and saves five guesses,
+so `wearables.OUTFITS` can name forty-six looks. An outfit sets only the slots
+it names - "outfit winter" leaves the haircut alone, and a `wear` either side
+of it still lands - which is why "bare" has to name every slot explicitly:
+taking it all off is the one thing that cannot be said by omission.
+
+**A panel of cloth is one slab, and a pair of tails has to splay.** An apron
+built as a stack of stations following the torso's own profile gives every
+station its own width and its own depth, and every step between them comes out
+as a band across the apron; it hangs in one plane, so build it as one. Two
+ponytails at the same fall hang in the same place and read as one, so a pair
+splays as it falls. And a rucksack swept as an ellipsoid is a beach ball on
+someone's back - `_box_z` exists, and the corners are most of what says
+"pack". A hat brim is round: giving the reach to the depth alone and 45% of it
+to the width put a diving board on a walking figure in a sun hat.
 
 **Objects reach the depth map, never the pose map.** A chair drawn into an
 OpenPose image is read as a limb. `render_scene` and the editor's exports keep

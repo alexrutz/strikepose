@@ -100,6 +100,11 @@ select,input{background:var(--control);border:1px solid var(--edge);color:var(--
 .pose small{color:var(--muted);font-size:11px;flex:1;text-align:right;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* ---- wardrobe ---- */
+#wardrobe select{margin:3px 0}
+#slots{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:2px}
+#slots label{display:block;color:var(--muted);font-size:11px;margin:2px 2px 1px}
+
 /* ---- prompt ---- */
 #askrow{display:flex;gap:6px;margin:6px 0}
 #askrow input{flex:1}
@@ -178,6 +183,11 @@ select,input{background:var(--control);border:1px solid var(--edge);color:var(--
       <button class="btn" id="v-front">Front</button>
       <button class="btn" id="v-left">Left</button>
       <button class="btn" id="v-top">Top</button>
+    </div>
+    <h4>Hair and clothes</h4>
+    <div id="wardrobe">
+      <select id="outfit"></select>
+      <div id="slots"></div>
     </div>
     <h4>Describe a pose</h4>
     <div id="askrow">

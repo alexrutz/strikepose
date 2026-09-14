@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.33.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.34.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -1941,26 +1941,34 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
     # mesh wherever the two disagree - a chest, a shoulder - so a coat dropped
     # straight into the buffer comes out with the body poking through it.
     #
-    # Cloth lies on the surface, so say that instead of padding harder: where
-    # a garment covers the body, it sits a centimetre in front of whatever the
-    # rig put there. It then follows the rigged shape rather than the
-    # approximation it was cut from. Where it reaches past the body - a hem, a
-    # fall of hair - it keeps its own depth, because there is nothing under it.
+    # Cloth lies on the surface, so say that instead of padding harder: where a
+    # garment covers the body it clears whatever the rig put there by its own
+    # thickness, and then follows the rigged shape rather than the
+    # approximation it was cut from. By its *own* thickness, per layer: one
+    # figure for all of them was a flat centimetre, which is right for a
+    # t-shirt and flattens a five-centimetre afro onto the skull, a helmet
+    # into the head and a coat into the chest. Every thick garment there is
+    # came out of a rigged export looking like bare skin.
+    #
+    # Where a layer reaches past the body - a hem, a fall of hair, a hat brim,
+    # a rucksack - it carries no standoff and keeps its own depth, because
+    # there is nothing under it. Pushing those forward instead drags a
+    # ponytail round to the front of the face.
     body = zbuf.copy()
-    cloth = 1.0 * k                    # a centimetre, in the buffer's units
     for figure, mesh, _assets in jobs:
         if mesh is None or not getattr(figure, "outfit", None):
             continue
         import wearables
         segments, frame = body_segments(figure)
-        worn = [to_camera_space(part, camera, rect, out_w)
-                for part in wearables.parts(figure, segments, frame, 1.0)]
-        if not worn:
-            continue
-        over = depth_buffer([worn], out_w, out_h)
-        on_body = np.isfinite(over) & np.isfinite(body)
-        over[on_body] = np.minimum(over[on_body], body[on_body] - cloth)
-        np.minimum(zbuf, over, out=zbuf)
+        for _slot, standoff, part in wearables.layers(figure, segments,
+                                                      frame, 1.0):
+            over = depth_buffer([[to_camera_space(part, camera, rect, out_w)]],
+                                out_w, out_h)
+            if standoff is not None:
+                on_body = np.isfinite(over) & np.isfinite(body)
+                over[on_body] = np.minimum(over[on_body],
+                                           body[on_body] - standoff * k)
+            np.minimum(zbuf, over, out=zbuf)
     if len(props):
         # the triangle rasteriser and the analytic one write the same units, so
         # the objects simply join the buffer and the nearer surface wins
@@ -2185,9 +2193,10 @@ class EditorApp:
         self.props = []                 # objects standing in the scene
         self.active_prop = None
         self.prop_shape = tk.StringVar(value="chair")
+        import wearables as _wearables
         self.outfit_vars = {slot: tk.StringVar(value="none")
-                            for slot in ("hair", "headgear", "top", "bottom",
-                                         "shoes")}
+                            for slot in _wearables.SLOT_ORDER}
+        self.outfit_name = tk.StringVar(value="bare")
         self.prop_label = tk.StringVar(value="No objects. Objects show in the "
                                               "depth map, not the pose map.")
         self.drag_prop = None
@@ -2500,9 +2509,23 @@ class EditorApp:
         # ---- worn ---------------------------------------------------------
         body = section("Hair and clothes", opened=False)
         import wearables
+        # A named look first: six dropdowns is the slow way to say "chef".
+        line = tk.Frame(body, bg=PANEL)
+        line.pack(fill="x", padx=12, pady=(2, 4))
+        tk.Label(line, text="Outfit", bg=PANEL, fg=MUTED, anchor="w", width=8,
+                 font=("TkDefaultFont", 9)).pack(side="left")
+        looks = tk.OptionMenu(line, self.outfit_name, *wearables.OUTFIT_NAMES,
+                              command=lambda _v: self.set_outfit())
+        looks.configure(bg=CONTROL, fg=FG, relief="flat", bd=0, anchor="w",
+                        highlightthickness=0, activebackground=HOVER,
+                        activeforeground=FG, padx=8, pady=2, cursor="hand2",
+                        font=("TkDefaultFont", 8))
+        looks["menu"].configure(bg=PANEL, fg=FG, relief="flat", bd=0,
+                                activebackground=HOVER, activeforeground=FG)
+        looks.pack(side="right", fill="x", expand=True)
         for slot, label in (("hair", "Hair"), ("headgear", "Headgear"),
-                            ("top", "Top"), ("bottom", "Bottom"),
-                            ("shoes", "Feet")):
+                            ("top", "Top"), ("over", "Over"),
+                            ("bottom", "Bottom"), ("shoes", "Feet")):
             line = tk.Frame(body, bg=PANEL)
             line.pack(fill="x", padx=12, pady=1)
             tk.Label(line, text=label, bg=PANEL, fg=MUTED, anchor="w", width=8,
@@ -2841,6 +2864,18 @@ class EditorApp:
         self.skeleton.outfit = outfit
         self.redraw()
         self.status.set("%s: %s." % (slot.title(), outfit[slot]))
+
+    def set_outfit(self):
+        """Put a named look on the figure and show it in the slot menus."""
+        import wearables
+        dressed = wearables.dress(self.skeleton.outfit, self.outfit_name.get())
+        if dressed is None:
+            return
+        self.push_undo()
+        self.skeleton.outfit = dressed
+        self.refresh_outfit()
+        self.redraw()
+        self.status.set("Outfit: %s." % self.outfit_name.get())
 
     def strip(self):
         self.push_undo()

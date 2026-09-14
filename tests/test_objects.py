@@ -235,6 +235,31 @@ check("an outfit survives a save and a reload",
       == [f.outfit for f in app.figures],
       str([e.get("outfit") for e in loaded["figures"]]))
 
+# A named look, which is the reason the panel is not six dropdowns and a
+# memory of what a chef wears.
+app.strip()
+app.outfit_vars["hair"].set("ponytail")
+app.set_worn("hair")
+app.outfit_name.set("chef")
+app.set_outfit()
+root.update()
+check("the panel puts a whole outfit on at once",
+      app.skeleton.outfit.get("over") == "apron"
+      and app.skeleton.outfit.get("top") == "long_sleeve",
+      str(app.skeleton.outfit))
+check("and leaves the slots the outfit does not name alone",
+      app.skeleton.outfit.get("hair") == "ponytail")
+check("and the slot menus follow it",
+      app.outfit_vars["over"].get() == "apron"
+      and app.outfit_vars["hair"].get() == "ponytail",
+      str({k: v.get() for k, v in app.outfit_vars.items()}))
+app.undo()
+root.update()
+check("and undo takes the whole outfit back off",
+      app.skeleton.outfit.get("over") in (None, "none")
+      and app.skeleton.outfit.get("hair") == "ponytail",
+      str(app.skeleton.outfit))
+
 app.strip()
 check("and it can all come off", not wearables.worn(app.skeleton.outfit))
 app.delete_figure()

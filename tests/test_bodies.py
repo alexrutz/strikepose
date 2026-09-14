@@ -137,6 +137,49 @@ check("and the body does not come through it",
       "%d of %d pixels, %.1f%%" % (behind, int(both.sum()),
                                    100.0 * behind / max(1, int(both.sum()))))
 
+# A garment clears the rigged body by its OWN thickness, not by a flat
+# centimetre. With one figure for all of them an afro came out the same image
+# as a crew cut, a helmet the same as a bare head and a coat the same as a
+# t-shirt: every thick garment there is rendered as bare skin, and the PNG
+# looked perfectly fine, which is why nothing caught it. So compare a thin
+# garment with a thick one in the same slot rather than either with bare.
+# A garment clears the rigged body by its OWN thickness, not by a flat
+# centimetre. With one figure for all of them an afro came out at the same
+# depth as a crew cut, a helmet as a bare head and a coat as a t-shirt: every
+# thick garment there is rendered as bare skin, and since the silhouette still
+# grew the PNG looked plausible, which is why nothing caught it.
+#
+# So the check is not how much of the frame the garment covers - the clamp
+# never touched coverage - but whether it stands PROUD of what a bare head
+# reaches. Brighter is nearer, so count the pixels the thick version pushes
+# past the thin version's nearest. Flattened to a centimetre that count is
+# exactly zero for every one of them.
+def head_band(outfit):
+    worn.outfit = dict(outfit)
+    grey = np.asarray(editor.rigged_depth_image(
+        [(worn, mesh, ())], camera, rect, 384, 576), float)
+    return grey[:int(0.22 * grey.shape[0])]
+
+for slot, thin, thick in (("hair", "shaved", "afro"),
+                          ("hair", "short", "curly"),
+                          ("headgear", "none", "helmet")):
+    lean = head_band({slot: thin})
+    bulky = head_band({slot: thick})
+    proud = int((bulky > lean[lean > 0].max()).sum())
+    check("a %s stands off the rigged head by its own thickness" % thick,
+          proud > 40, "%d pixels nearer than a bare %s" % (proud, thin))
+
+# and it still has to reach the frame at all
+worn.outfit = {"top": "coat"}
+coated = int((np.asarray(editor.rigged_depth_image(
+    [(worn, mesh, ())], camera, rect, 384, 576), float) > 0).sum())
+worn.outfit = {"top": "t_shirt"}
+teed = int((np.asarray(editor.rigged_depth_image(
+    [(worn, mesh, ())], camera, rect, 384, 576), float) > 0).sum())
+check("and a coat is bulkier in the frame than a t-shirt",
+      coated > teed * 1.05, "%d px against %d" % (coated, teed))
+worn.outfit = {}
+
 # -- a rig is fitted segment by segment, not dragged -----------------------
 #
 # The rig used to be fitted to the figure by one number, the ratio of the two

@@ -96,7 +96,27 @@ check("and the whole pose catalogue, grouped",
 check("and every pose says what it is",
       all(p["about"] for g in vocabulary["groups"] for p in g["poses"]))
 check("and the objects and clothing the editor has",
-      len(vocabulary["shapes"]) >= 20 and len(vocabulary["wearables"]) == 5)
+      len(vocabulary["shapes"]) >= 20
+      and len(vocabulary["wearables"]) == len(vocabulary["slots"]) == 6,
+      "%d shapes, %d slots" % (len(vocabulary["shapes"]),
+                               len(vocabulary["wearables"])))
+# The phone dresses a figure without a round trip, so it needs the looks
+# themselves and not only their names - and every slot and garment one names
+# has to be one the same vocabulary offers, or a tap sets a slot to something
+# the renderer will drop on the floor.
+check("and the named outfits, as the slots they set",
+      len(vocabulary["outfits"]) >= 40
+      and all(isinstance(v, dict) for v in vocabulary["outfits"].values()),
+      "%d outfits" % len(vocabulary["outfits"]))
+stray = sorted({"%s/%s" % (slot, name)
+                for look in vocabulary["outfits"].values()
+                for slot, name in look.items()
+                if name not in vocabulary["wearables"].get(slot, [])})
+check("every outfit names slots and garments the vocabulary has",
+      not stray, str(stray[:3]))
+check("and \"bare\" names every one of them",
+      set(vocabulary["outfits"]["bare"]) == set(vocabulary["slots"]),
+      str(sorted(vocabulary["outfits"]["bare"])))
 
 # -- a named pose ----------------------------------------------------------
 _, scene = post("/api/scene", {"plan": {"figures": [

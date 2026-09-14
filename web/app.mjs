@@ -471,7 +471,8 @@ $("b-del").onclick = () => {
   if (app.figures.length === 1) return say("A scene needs one person");
   pushUndo();
   app.figures.splice(app.active, 1);
-  app.active = Math.min(app.active, app.figures.length - 1); refresh();
+  app.active = Math.min(app.active, app.figures.length - 1);
+  showOutfit(); refresh();
 };
 $("b-reset").onclick = () => { pushUndo();
   app.figures[app.active] = new P.Skeleton(figure().preset); refresh(); };
@@ -493,8 +494,12 @@ $("b-local").onclick = exportPose;
 // degrades to what the page can do alone when nothing is listening.
 
 function plateOf(figure) {
+  // The outfit rides along. The phone draws a bare skeleton either way - the
+  // clothes are the body's own swept profile and only the server has that -
+  // so what it must not do is lose them between one render and the next.
   return {preset: figure.preset, points: figure.points.map(p => p.slice()),
-          visible: figure.visible.slice()};
+          visible: figure.visible.slice(),
+          outfit: Object.assign({}, figure.outfit || {})};
 }
 
 function adopt(reply) {
@@ -506,9 +511,11 @@ function adopt(reply) {
                                                : figure().preset);
     born.points = person.points.map(p => p.slice());
     born.visible = person.visible.slice();
+    born.outfit = Object.assign({}, person.outfit || {});
     return born;
   });
   app.active = Math.min(app.active, app.figures.length - 1);
+  showOutfit();
   // Take the server's camera too. It chose the view the export will use -
   // the one that shows what makes this pose that pose - and a phone showing
   // a seated figure head-on while the PNG comes out in profile is showing
@@ -609,6 +616,75 @@ tool("t-library", () => {
   sheet.classList.toggle("library");
 });
 
+// ---------------------------------------------------------------------- worn
+//
+// Six slots and a catalogue of named looks, straight off the server's
+// vocabulary. The phone cannot draw any of it - a garment is the body's own
+// swept profile and only the Python has that - so this panel is about what
+// the export will show, and `showOutfit` keeps it pointed at the figure the
+// user is actually editing.
+
+let wardrobe = null;
+
+function showOutfit() {
+  if (!wardrobe) return;
+  const worn = figure().outfit || {};
+  for (const [slot, menu] of Object.entries(wardrobe.menus))
+    menu.value = worn[slot] || "none";
+}
+
+function buildWardrobe(vocabulary) {
+  const looks = $("outfit");
+  const names = Object.keys(vocabulary.outfits);
+  looks.innerHTML = "";
+  for (const name of [""].concat(names)) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name ? name.replace(/_/g, " ") : "Outfit\u2026";
+    looks.appendChild(option);
+  }
+  const slots = $("slots");
+  slots.innerHTML = "";
+  const menus = {};
+  for (const slot of vocabulary.slots) {
+    const cell = document.createElement("div");
+    const label = document.createElement("label");
+    label.textContent = slot;
+    const menu = document.createElement("select");
+    for (const name of vocabulary.wearables[slot]) {
+      const option = document.createElement("option");
+      option.value = option.textContent = name;
+      menu.appendChild(option);
+    }
+    menu.onchange = () => {
+      pushUndo();
+      const f = figure();
+      f.outfit = Object.assign({}, f.outfit || {});
+      f.outfit[slot] = menu.value;
+      looks.value = "";
+      say(slot + ": " + menu.value);
+    };
+    menus[slot] = menu;
+    cell.append(label, menu);
+    slots.appendChild(cell);
+  }
+  wardrobe = {menus};
+  looks.onchange = () => {
+    const name = looks.value;
+    if (!name) return;
+    pushUndo();
+    const f = figure();
+    // Over what is already worn, not instead of it: an outfit names only the
+    // slots it sets, which is what lets a haircut picked either side of it
+    // survive. The same rule the Python `wearables.dress` follows.
+    f.outfit = Object.assign({}, f.outfit || {}, vocabulary.outfits[name]);
+    showOutfit();
+    say("Outfit: " + name.replace(/_/g, " "));
+  };
+  showOutfit();
+}
+
+
 function buildLibrary(vocabulary) {
   const groups = $("groups");
   const draw = filter => {
@@ -647,6 +723,7 @@ API.connect().then(() => {
     return;
   }
   buildLibrary(API.state.vocabulary);
+  buildWardrobe(API.state.vocabulary);
   say("Drag a joint, pick a pose, or describe one.");
 });
 
@@ -671,6 +748,7 @@ presets.onchange = () => {
     born.points[c] = P.add(born.points[p],
                            P.mul(P.norm(P.sub(old.points[c], old.points[p])),
                                  born.lengths[c]));
+  born.outfit = Object.assign({}, old.outfit || {});
   app.figures[app.active] = born;
   refresh();
 };

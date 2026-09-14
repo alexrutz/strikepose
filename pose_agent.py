@@ -253,7 +253,7 @@ ANCHORS = {
 }
 
 OPS = ("stance", "point", "bend", "turn", "lean", "look", "hide", "place",
-       "wear")
+       "wear", "outfit")
 
 # Every wearable, flattened: a model does far better picking one name out of a
 # list than picking a slot and then a name that has to belong to it. The slot
@@ -262,6 +262,12 @@ OPS = ("stance", "point", "bend", "turn", "lean", "look", "hide", "place",
 WEARABLES = {name: slot for slot in wearables.SLOTS
              for name in wearables.options(slot) if name != "none"}
 WEARABLE_NAMES = sorted(WEARABLES)
+
+# Named outfits get an op of their own rather than joining `wears`. The same
+# split `stance` makes against the pose commands: a garment name is picked on
+# every `wear`, so that enum stays short, while an outfit is picked at most
+# once per figure and saves five guesses, so the catalogue can be long.
+OUTFIT_NAMES = list(wearables.OUTFIT_NAMES)
 
 POINT_TARGETS = sorted(set(BONES) | set(LIMBS))
 SHAPE_NAMES = list(props_module.SHAPE_NAMES)
@@ -293,6 +299,7 @@ def command_schema():
             "distance": {"type": "number"},
             "size": {"type": "number"},
             "wears": {"type": "string", "enum": WEARABLE_NAMES},
+            "outfit": {"type": "string", "enum": OUTFIT_NAMES},
         },
         "required": ["op"],
     }
@@ -338,7 +345,8 @@ Commands, applied in order:
   {"op":"hide","target":JOINT_OR_LIMB}         mark it off-frame or occluded
   {"op":"place","shape":SHAPE,"at":ANCHOR,"distance":CM,"size":N,"degrees":N}
                                               put an object in the scene
-  {"op":"wear","wears":GARMENT}                dress the figure
+  {"op":"outfit","outfit":NAME}                dress the figure in a whole look
+  {"op":"wear","wears":GARMENT}                change one garment
 
 stance NAME, grouped - start from the closest one, then correct it:
 %(stances)s
@@ -351,9 +359,14 @@ direction:    %(directions)s
 camera:       %(cameras)s
 preset:       %(presets)s
 
+outfit NAME:  %(outfits)s
+  a whole look in one command - use it when one fits, then correct a slot with
+  `wear`. An outfit only sets the slots it names, so a haircut chosen before or
+  after it survives.
 wear:         %(wearables)s
-  one from each of hair, headgear, top, bottom and shoes at most; they stack,
-  so a coat does not remove the trousers. Leave a slot out to leave it bare.
+  one from each of hair, headgear, top, over, bottom and shoes at most; they
+  stack, so a coat does not remove the trousers. Leave a slot out to leave it
+  bare.
 
 place shape:  %(shapes)s
 place at:     %(anchors)s
@@ -391,6 +404,14 @@ def stance_listing(width=74):
     return "\n".join(lines)
 
 
+def outfit_listing(width=74):
+    """The outfit names, wrapped. Forty-odd on one line is a wall."""
+    import textwrap
+    return "\n".join(textwrap.wrap(", ".join(OUTFIT_NAMES), width,
+                                   initial_indent="    ",
+                                   subsequent_indent="    ")).lstrip()
+
+
 def system_prompt():
     return SYSTEM_PROMPT % {
         "stances": stance_listing(),
@@ -401,6 +422,7 @@ def system_prompt():
         "presets": ", ".join(sorted(BODY_PRESETS)),
         "shapes": ", ".join(SHAPE_NAMES),
         "wearables": ", ".join(WEARABLE_NAMES),
+        "outfits": outfit_listing(),
         "anchors": ", ".join(sorted(ANCHORS)),
     }
 
@@ -693,10 +715,24 @@ def apply_command(skeleton, command, props=None, depth=0, defer=None):
             skeleton.visible[INDEX[joint]] = False
         return None
 
+    if op == "outfit":
+        name = command.get("outfit") or command.get("name") or target
+        dressed = wearables.dress(getattr(skeleton, "outfit", None), name)
+        if dressed is None:
+            return "no outfit called %r" % (name,)
+        skeleton.outfit = dressed
+        return None
+
     if op == "wear":
         name = command.get("wears") or command.get("name") or target
         slot = WEARABLES.get(name)
         if slot is None:
+            # a model reaching for a whole look through the nearer op is
+            # asking for something that exists; give it rather than a warning
+            dressed = wearables.dress(getattr(skeleton, "outfit", None), name)
+            if dressed is not None:
+                skeleton.outfit = dressed
+                return None
             return "nothing called %r to wear" % (name,)
         outfit = dict(getattr(skeleton, "outfit", None) or {})
         outfit[slot] = name
@@ -1187,6 +1223,63 @@ KEYWORD_WEARABLES = [
 ]
 
 
+# A look the prompt names outright. Read before the single garments, so
+# "a chef in a beanie" is a chef who swapped the cap.
+KEYWORD_OUTFITS = [
+    (r"\b(chef|cook)\b", "chef"),
+    (r"\b(barista)\b", "barista"),
+    (r"\b(waiter|waitress|server)\b", "waiter"),
+    (r"\b(nurse)\b", "nurse"),
+    (r"\b(doctor|surgeon|lab coat)\b", "doctor"),
+    (r"\b(builder|construction|site worker)\b", "builder"),
+    (r"\b(mechanic)\b", "mechanic"),
+    (r"\b(farmer)\b", "farmer"),
+    (r"\b(gardener|gardening)\b", "gardener"),
+    (r"\b(soldier|army|military)\b", "soldier"),
+    (r"\b(biker|motorcyclist)\b", "biker"),
+    (r"\b(knight|armou?red)\b", "knight"),
+    (r"\b(wizard|sorcerer|mage)\b", "wizard"),
+    (r"\b(monk)\b", "monk"),
+    (r"\b(priest|vicar)\b", "priest"),
+    (r"\b(superhero|super.?hero)\b", "superhero"),
+    (r"\b(queen|king|royal)\b", "royal"),
+    (r"\b(office|at work|desk job)\b", "office"),
+    (r"\b(business|meeting)\b", "business"),
+    (r"\b(suit|smart)\b", "suit"),
+    (r"\b(commuter|commuting)\b", "commuter"),
+    (r"\b(student|schoolboy|college)\b", "student"),
+    (r"\b(schoolgirl|school uniform)\b", "school"),
+    (r"\b(evening dress|ball|gala)\b", "evening"),
+    (r"\b(party)\b", "party"),
+    (r"\b(sun.?dress)\b", "sundress"),
+    (r"\b(beach)\b", "beach"),
+    (r"\b(swim\w*)\b", "swimming"),
+    (r"\b(gym|workout|weights)\b", "gym"),
+    (r"\b(jogging|running|runner)\b", "running"),
+    (r"\b(yoga|pilates)\b", "yoga"),
+    (r"\b(dancer|dancing|ballet)\b", "dancer"),
+    (r"\b(cycling|cyclist)\b", "cycling"),
+    (r"\b(hiking|hiker)\b", "hiking"),
+    (r"\b(tourist|sightseeing)\b", "tourist"),
+    (r"\b(explorer|expedition|safari)\b", "explorer"),
+    (r"\b(winter|snow|cold)\b", "winter"),
+    (r"\b(rain|raining|wet)\b", "rain"),
+    (r"\b(summer|hot day)\b", "summer"),
+    (r"\b(pyjamas|pajamas|bedtime)\b", "pyjamas"),
+    (r"\b(underwear|in their underwear)\b", "underwear"),
+    (r"\b(casual)\b", "casual"),
+]
+
+
+def keyword_outfits(text):
+    """A named look the prompt asked for. The first match wins: a sentence
+    that reads as two jobs at once is one figure, and it can only have one."""
+    for pattern, name in KEYWORD_OUTFITS:
+        if re.search(pattern, text):
+            return [{"op": "outfit", "outfit": name}]
+    return []
+
+
 def keyword_wearables(text):
     """Clothes and hair the prompt named. First match per slot wins, so
     "a long skirt" is a long skirt rather than a skirt and then a long one."""
@@ -1241,6 +1334,7 @@ def keyword_plan(prompt):
             break
     if re.search(r"\b(arms? (out|wide)|spread)\b", text) and not commands:
         commands.append({"op": "stance", "name": "t_pose"})
+    commands.extend(keyword_outfits(text))
     commands.extend(keyword_wearables(text))
     commands.extend(keyword_objects(text, commands))
     if re.search(r"\b(lean\w* forward|bent over|bowing|bow)\b", text):
@@ -1515,6 +1609,7 @@ def describe_vocabulary():
         "directions : " + ", ".join(sorted(DIRECTIONS)),
         "cameras    : " + ", ".join(sorted(CAMERA_VIEWS)),
         "wearables  : " + ", ".join(WEARABLE_NAMES),
+        "outfits    : " + ", ".join(OUTFIT_NAMES),
         "shapes     : " + ", ".join(SHAPE_NAMES),
         "anchors    : " + ", ".join(sorted(ANCHORS)),
         "presets    : " + ", ".join(sorted(BODY_PRESETS)),
@@ -1786,7 +1881,44 @@ def _selftest():
           str(skeleton.outfit))
     check("and a garment nobody has is reported, not worn",
           apply_command(Skeleton(preset_params(DEFAULT_PRESET)),
-                        {"op": "wear", "wears": "cape"}) is not None)
+                        {"op": "wear", "wears": "a sou'wester"}) is not None)
+
+    # named outfits
+    skeleton = Skeleton(preset_params(DEFAULT_PRESET))
+    before = lengths(skeleton)
+    trouble = [w for name in OUTFIT_NAMES
+               for w in apply_commands(skeleton,
+                                       [{"op": "outfit", "outfit": name}], [])]
+    check("every outfit can be put on", not trouble, str(trouble[:2]))
+    check("and putting them on changes no bone length",
+          max(abs(a - b) for a, b in zip(before, lengths(skeleton))) < 1e-9)
+    check("an outfit nobody has is reported, not worn",
+          apply_command(Skeleton(preset_params(DEFAULT_PRESET)),
+                        {"op": "outfit", "outfit": "black tie"}) is not None)
+
+    # An outfit sets the slots it names and leaves the rest alone, which is
+    # what lets a haircut chosen either side of it survive.
+    skeleton = Skeleton(preset_params(DEFAULT_PRESET))
+    apply_commands(skeleton, [{"op": "wear", "wears": "ponytail"},
+                              {"op": "outfit", "outfit": "winter"}], [])
+    check("an outfit leaves the slots it does not name alone",
+          skeleton.outfit.get("hair") == "ponytail"
+          and skeleton.outfit.get("top") == "coat", str(skeleton.outfit))
+    apply_commands(skeleton, [{"op": "wear", "wears": "cap"}], [])
+    check("and a garment after it still lands",
+          skeleton.outfit.get("headgear") == "cap", str(skeleton.outfit))
+    apply_commands(skeleton, [{"op": "outfit", "outfit": "bare"}], [])
+    check("\"bare\" is the one that names every slot",
+          not wearables.worn(skeleton.outfit), str(skeleton.outfit))
+    check("a whole look asked for through `wear` is still understood",
+          apply_command(skeleton, {"op": "wear", "wears": "chef"}) is None
+          and skeleton.outfit.get("over") == "apron", str(skeleton.outfit))
+    check("a prompt that names a job is dressed for it",
+          keyword_plan("a chef chopping onions")["figures"][0]["commands"]
+          [-1:] != []
+          and any(c.get("outfit") == "chef" for c in
+                  keyword_plan("a chef chopping onions")["figures"][0]
+                  ["commands"]))
 
     # clothes have to reach the depth map and stay out of the pose map
     dressed, _scene, camera, _r = build_scene({"figures": [{"commands": [

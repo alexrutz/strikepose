@@ -179,7 +179,14 @@ def api_vocabulary():
         "cameras": list(pose_agent.VIEW_ORDER),
         "shapes": list(props_module.SHAPE_NAMES),
         "anchors": sorted(pose_agent.ANCHORS),
-        "wearables": {slot: wearables.options(slot) for slot in wearables.SLOTS},
+        "wearables": {slot: wearables.options(slot)
+                      for slot in wearables.SLOT_ORDER},
+        "slots": list(wearables.SLOT_ORDER),
+        # the looks themselves, not just their names: a phone that has the
+        # table can dress a figure without a round trip, and there is still
+        # only one copy of it - this one, generated from the Python.
+        "outfits": {name: wearables.OUTFITS[name]
+                    for name in wearables.OUTFIT_NAMES},
         "bodies": sorted(BODIES),
         "rigged": bool(BODIES),
     }
