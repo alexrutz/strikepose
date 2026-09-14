@@ -157,6 +157,29 @@ Name a view in the prompt and you get it. Say nothing and the camera turns
 until the pose reads: a crouch seen head-on is a figure standing up straight,
 because the part that makes it a crouch is the part pointing at the lens.
 
+## A catalogue of everyday poses
+
+`everyday.py` names 84 specific poses - typing at a desk, tying a shoelace,
+carrying a box, hailing a taxi, curled up asleep - in ten groups, and renders
+any slice of them across all nine body types.
+
+    python3 everyday.py --list
+    python3 everyday.py --render out/set                 # 84 poses x 9 bodies
+    python3 everyday.py --render out/set --group "At a desk"
+    python3 everyday.py --render out/set --preset female --size 768x1024
+
+Each pose is written in exactly the command vocabulary the local model emits,
+and goes through the same `apply_commands`, so nothing in the table can write a
+coordinate and every bone-length invariant holds for free. That also means the
+model can name one: `{"op":"stance","name":"tying_shoelaces"}` is a valid
+command, and further commands refine it.
+
+The render writes a matched pair per pose per body - the OpenPose PNG and the
+depth map of the same figure in the same frame - plus `index.json` naming every
+one, and a contact sheet per group. A figure that sits gets a chair under it, a
+figure at a desk gets a desk, and both are sized against that body, so the
+child's chair is a child's chair.
+
 ## Tests
 
     ./tests/run_all.sh

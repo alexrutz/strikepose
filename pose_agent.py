@@ -50,6 +50,7 @@ import sys
 import urllib.error
 import urllib.request
 
+import everyday
 import props as props_module
 import wearables
 from openpose3d_editor import (
@@ -201,6 +202,21 @@ STANCES = {
                          {"op": "point", "target": "r_shin", "direction": "forward"}],
 }
 
+# The everyday catalogue is the same kind of thing: a name for a list of these
+# commands. It is kept in its own module because it is long and because it is
+# data, not vocabulary - the ops, directions, joints and limbs above are what
+# has to stay short, since a model picks from those on *every* command, while a
+# stance name is picked at most once and saves it ten guesses. Merged rather
+# than looked up separately so there is one table, one enum and one code path;
+# two tables where one is "also accepted" is a name the schema rejects at
+# decode time and the prompt promises, which is worse than either.
+for _name, _commands in everyday.POSES.items():
+    # setdefault, not update: a catalogue entry that repeats a basic name is
+    # an *alias* for it - "walking" there is one `stance walking` command - so
+    # letting it overwrite points the name at itself and the first figure to
+    # walk takes the process down with it.
+    STANCES.setdefault(_name, _commands)
+
 # Where an object goes, relative to the figure it is placed against.
 # (which point of the figure, how the object lines up with it). "seat" means
 # the object's *top* meets that height and its base still reaches the floor,
@@ -306,7 +322,8 @@ Commands, applied in order:
                                               put an object in the scene
   {"op":"wear","wears":GARMENT}                dress the figure
 
-stance NAME: %(stances)s
+stance NAME, grouped - start from the closest one, then correct it:
+%(stances)s
 point target: %(points)s
 bend target:  %(bends)s
   positive degrees flexes the joint the natural way: an elbow closes, a knee
@@ -336,9 +353,29 @@ Prefer six to twelve commands. Do not invent op, target or direction names.
 """
 
 
+def stance_listing(width=74):
+    """The stance names, grouped and wrapped.
+
+    Eighty-odd names on one line is a wall a small model reads badly; the same
+    names under the heading they belong to are a menu. The compositional
+    stances come first because they are the ones meant to be refined.
+    """
+    import textwrap
+    groups = [("basic", [n for n in sorted(STANCES)
+                         if n not in everyday.POSES])]
+    groups += [(g, everyday.names_in(g)) for g in everyday.GROUPS]
+    lines = []
+    for heading, names in groups:
+        body = textwrap.wrap(", ".join(names), width,
+                             initial_indent="    ", subsequent_indent="    ")
+        lines.append("  " + heading + ":")
+        lines.extend(body)
+    return "\n".join(lines)
+
+
 def system_prompt():
     return SYSTEM_PROMPT % {
-        "stances": ", ".join(sorted(STANCES)),
+        "stances": stance_listing(),
         "points": ", ".join(POINT_TARGETS),
         "bends": ", ".join(sorted(BEND_JOINTS)),
         "directions": ", ".join(sorted(DIRECTIONS)),
@@ -468,7 +505,7 @@ def place_object(skeleton, shape, at="ground", distance=70.0, size=1.0,
     return props_module.make(shape, (w, h, d), position, yaw)
 
 
-def apply_command(skeleton, command, props=None):
+def apply_command(skeleton, command, props=None, depth=0, defer=None):
     """Apply one command. Returns None, or a string saying why it was skipped.
 
     Every path here is a rotation, so no bone can change length - which is what
@@ -491,8 +528,21 @@ def apply_command(skeleton, command, props=None):
     if op == "stance":
         if name not in STANCES:
             return "unknown stance %r" % (name,)
-        for step in STANCES[name]:
-            apply_command(skeleton, step, props)
+        # A stance may start from another - that is what makes the catalogue
+        # worth having - so this recurses, and a stance that reaches itself
+        # would otherwise blow the stack rather than be skipped like any other
+        # bad command. Four is deeper than any real chain.
+        if depth >= 4:
+            return "stance %r nests too deep" % (name,)
+        # Report what went wrong inside it. Discarding these return values
+        # made a stance the one place a bad command *was* silent - including
+        # the depth guard above, which fired correctly and said so to nobody.
+        trouble = [problem for problem in
+                   (apply_command(skeleton, step, props, depth + 1, defer)
+                    for step in STANCES[name]) if problem]
+        if trouble:
+            return "%d of %d steps of stance %r skipped: %s" % (
+                len(trouble), len(STANCES[name]), name, trouble[0])
         return None
 
     if op == "point":
@@ -582,6 +632,16 @@ def apply_command(skeleton, command, props=None):
     if op == "place":
         if props is None:
             return "place needs a scene to put the object in"
+        # Hold it until the figure is finished. An anchor is resolved once, in
+        # the figure's own frame, and the figure it was resolved against has
+        # to be the posed one: "sit down AND put a chair under the hips" reads
+        # naturally in either order, but placing first anchors the chair to a
+        # standing hip, and since `ground_level` is the figure's own feet the
+        # chair comes out 86 cm tall with the desk in front of it ending up
+        # below the seat.
+        if defer is not None:
+            defer.append(command)
+            return None
         shape = command.get("shape") or target
         if shape not in props_module.SHAPES:
             return "unknown shape %r" % (shape,)
@@ -617,10 +677,15 @@ def apply_commands(skeleton, commands, props=None):
     warnings = []
     if not isinstance(commands, list):
         return ["commands is not a list"]
+    held = [] if props is not None else None
     for i, command in enumerate(commands):
-        problem = apply_command(skeleton, command, props)
+        problem = apply_command(skeleton, command, props, 0, held)
         if problem:
             warnings.append("command %d skipped: %s" % (i + 1, problem))
+    for command in held or ():
+        problem = apply_command(skeleton, command, props)
+        if problem:
+            warnings.append("object not placed: %s" % problem)
     return warnings
 
 
@@ -714,10 +779,19 @@ def legible_view(figures, order=None, readable=0.8, props=()):
     which have no opinion about the view. A standing figure constrains nothing
     and keeps the front; a seated one turns until the thighs read.
 
+    A bone that moved must also be readable *itself*, not only its change. The
+    two come apart: an arm brought up to carry a box swings from hanging to
+    pointing forward, and the change from one to the other is mostly vertical,
+    so a front view shows 82% of the departure while showing 25% of the arm.
+    The score is therefore the smaller of the two, per moved bone - which put
+    `carrying_box` on a profile that shows 99% of both instead of a front view
+    that hides the arms doing the carrying.
+
     A threshold rather than a maximum, walking VIEW_ORDER plainest first: only
     a flat profile foreshortens nothing, and a three-quarter that clears the
     bar is the better reference. If nothing clears it, the best is still
-    better than guessing.
+    better than guessing - some poses have no good view at all, a cross-legged
+    sit being the plain case: its shins point at the lens from everywhere.
     """
     rest = {}
     for name, (a, b) in BONES.items():
@@ -726,13 +800,13 @@ def legible_view(figures, order=None, readable=0.8, props=()):
             fresh = Skeleton(figure.body)
             rest[key] = vnorm(vsub(fresh.points[INDEX[b]], fresh.points[INDEX[a]]))
 
-    moved = []                       # (unit direction of the change, per bone)
+    moved = []                       # (change direction, bone direction) pairs
     for figure in figures:
         for name, (a, b) in BONES.items():
             posed = vnorm(vsub(figure.points[INDEX[b]], figure.points[INDEX[a]]))
             change = vsub(posed, rest[(id(figure), name)])
             if vlen(change) > 0.25:  # about 14 degrees; below that it is noise
-                moved.append(vnorm(change))
+                moved.append((vnorm(change), posed))
     if not moved:
         return (order or VIEW_ORDER)[0]
 
@@ -742,8 +816,9 @@ def legible_view(figures, order=None, readable=0.8, props=()):
         camera = Camera()
         camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
         right, up, _fwd = camera.basis()
-        scores[name] = min(math.hypot(vdot(d, right), vdot(d, up))
-                           for d in moved)
+        seen = lambda d: math.hypot(vdot(d, right), vdot(d, up))
+        scores[name] = min(min(seen(change), seen(bone))
+                           for change, bone in moved)
     def cameras():
         for name in (order or VIEW_ORDER):
             yaw, pitch = CAMERA_VIEWS[name]
@@ -1413,7 +1488,11 @@ def _selftest():
     for name in sorted(STANCES):
         skeleton = Skeleton(preset_params(DEFAULT_PRESET))
         before = lengths(skeleton)
-        warnings = apply_commands(skeleton, [{"op": "stance", "name": name}])
+        # with a scene to put things in: a stance may seat the figure on a
+        # chair, and "place needs a scene" is the right refusal when there is
+        # nowhere to put one, not a broken stance
+        warnings = apply_commands(skeleton, [{"op": "stance", "name": name}],
+                                  [])
         after = lengths(skeleton)
         worst = max(worst, max(abs(a - b) for a, b in zip(before, after)))
         if warnings:
@@ -1669,29 +1748,59 @@ def _selftest():
     check("an unknown preset and camera are reported, not fatal",
           len(report) == 2 and len(figures) == 1, str(report))
 
-    # the view has to show the pose, not a foreshortened guess at it
-    worst_view, worst_bone, worst_change = None, 1.0, (None, 1.0)
-    for name in sorted(STANCES):
-        figures, _scene, camera, _r = build_scene(
-            {"figures": [{"commands": [{"op": "stance", "name": name}]}]})
+    # The view has to show the pose, not a foreshortened guess at it.
+    #
+    # Absolute bars alone cannot say this, because some poses have no good
+    # view: a cross-legged sit points its shins at the lens from all nine, and
+    # a bar low enough to admit that one is too low to catch anything. So the
+    # real check is against the best view available for each pose - which is
+    # what caught `carrying_box` being shown from the front, 25% of the arms
+    # doing the carrying, with a profile showing 99% of them going unused.
+    def readability(figure, camera):
+        """(worst bone seen, worst departure seen) as fractions."""
         right, up, _fwd = camera.basis()
-        fresh = Skeleton(figures[0].body)
+        fresh = Skeleton(figure.body)
+        seen = lambda d: math.hypot(vdot(d, right), vdot(d, up))
+        bone_worst, change_worst = 1.0, 1.0
         for a, b in BONES.values():
-            bone = vsub(figures[0].points[INDEX[b]], figures[0].points[INDEX[a]])
-            seen = math.hypot(vdot(bone, right), vdot(bone, up)) / vlen(bone)
-            if seen < worst_bone:
-                worst_view, worst_bone = name, seen
+            bone = vsub(figure.points[INDEX[b]], figure.points[INDEX[a]])
+            bone_worst = min(bone_worst, seen(bone) / vlen(bone))
             change = vsub(vnorm(bone), vnorm(vsub(fresh.points[INDEX[b]],
                                                   fresh.points[INDEX[a]])))
             if vlen(change) > 0.25:
-                shown = math.hypot(vdot(vnorm(change), right),
-                                   vdot(vnorm(change), up))
-                if shown < worst_change[1]:
-                    worst_change = (name, shown)
-    check("no stance is shown from a view that hides a limb", worst_bone > 0.34,
-          "worst: %s at %.0f%% of its length" % (worst_view, 100.0 * worst_bone))
-    check("and every posed limb's departure from rest is visible in it",
-          worst_change[1] > 0.75,
+                change_worst = min(change_worst, seen(vnorm(change)))
+        return bone_worst, change_worst
+
+    worst_bone, worst_change = (None, 1.0), (None, 1.0)
+    worst_miss = (None, 0.0)
+    for name in sorted(STANCES):
+        figures, _scene, camera, _r = build_scene(
+            {"figures": [{"commands": [{"op": "stance", "name": name}]}]})
+        got = readability(figures[0], camera)
+        best = [0.0, 0.0]
+        for view, (yaw, pitch) in CAMERA_VIEWS.items():
+            other = Camera()
+            other.yaw, other.pitch = math.radians(yaw), math.radians(pitch)
+            here = readability(figures[0], other)
+            best = [max(best[i], here[i]) for i in (0, 1)]
+        if got[0] < worst_bone[1]:
+            worst_bone = (name, got[0])
+        if got[1] < worst_change[1]:
+            worst_change = (name, got[1])
+        miss = max(best[i] - got[i] for i in (0, 1))
+        if miss > worst_miss[1]:
+            worst_miss = (name, miss)
+
+    check("the view chosen is near the best of the nine available",
+          worst_miss[1] < 0.3,
+          "worst: %s falls %.0f points short" % (worst_miss[0],
+                                                 100.0 * worst_miss[1]))
+    check("no stance is shown from a view that hides a limb",
+          worst_bone[1] > 0.5,
+          "worst: %s at %.0f%% of its length" % (worst_bone[0],
+                                                 100.0 * worst_bone[1]))
+    check("and a posed limb's departure from rest survives the projection",
+          worst_change[1] > 0.5,
           "worst: %s shows %.0f%% of its change"
           % (worst_change[0], 100.0 * worst_change[1]))
     check("a standing figure is still shown from the front",

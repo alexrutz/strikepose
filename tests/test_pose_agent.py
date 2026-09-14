@@ -212,5 +212,63 @@ result = subprocess.run(
 check("--require-llm fails instead of falling back", result.returncode == 2,
       result.stderr.strip()[:80])
 
+# -- a stance that reaches itself is skipped, not fatal --------------------
+#
+# The everyday catalogue names a stance for a list of these same commands, and
+# a catalogue entry may start from another stance. Merging a catalogue entry
+# that repeats a basic name over the top of it pointed "walking" at itself and
+# took the process down with a RecursionError - not a skipped command, a dead
+# CLI. The merge uses setdefault so the name stays an alias, and the recursion
+# has a depth guard so a cycle introduced any other way is still just a
+# warning.
+from openpose3d_editor import KEYPOINT_NAMES, Skeleton
+INDEX = {n: i for i, n in enumerate(KEYPOINT_NAMES)}
+import everyday
+
+check("the catalogue never shadows a basic stance",
+      all(pose_agent.STANCES[n] is everyday.POSES[n]
+          or n in ("walking", "running", "sitting", "t_pose")
+          for n in everyday.POSES))
+walker = Skeleton()
+warnings = pose_agent.apply_commands(walker, [{"op": "stance",
+                                               "name": "walking"}])
+check("an aliased stance resolves to the real one", not warnings
+      and abs(walker.points[INDEX["l_knee"]][2]) > 5.0,
+      "knee moved %.1f cm forward" % walker.points[INDEX["l_knee"]][2])
+
+pose_agent.STANCES["ouroboros"] = [{"op": "stance", "name": "ouroboros"}]
+try:
+    victim = Skeleton()
+    warnings = pose_agent.apply_commands(victim, [{"op": "stance",
+                                                   "name": "ouroboros"}])
+    check("a stance that reaches itself is reported, not a stack overflow",
+          warnings and "too deep" in warnings[0], str(warnings))
+finally:
+    del pose_agent.STANCES["ouroboros"]
+
+# -- an object is anchored against the FINISHED figure ---------------------
+#
+# "sit down AND put a chair under the hips" reads naturally in either order.
+# Placed first, the chair anchors to a standing hip - and since a figure's
+# ground is its own lowest foot, it came out 86 cm tall with the desk in front
+# of it ending up below the seat.
+import props as props_module
+seat_first, objects_first = Skeleton(), []
+pose_agent.apply_commands(seat_first,
+                          [{"op": "place", "shape": "chair",
+                            "at": "under_hips"},
+                           {"op": "stance", "name": "sitting"}], objects_first)
+seat_last, objects_last = Skeleton(), []
+pose_agent.apply_commands(seat_last,
+                          [{"op": "stance", "name": "sitting"},
+                           {"op": "place", "shape": "chair",
+                            "at": "under_hips"}], objects_last)
+heights = [props_module.bounds(o[0])[1][1] - props_module.bounds(o[0])[0][1]
+           for o in (objects_first, objects_last)]
+check("a chair is the same chair whichever order it was asked for",
+      abs(heights[0] - heights[1]) < 0.5, "%.0f cm vs %.0f cm" % tuple(heights))
+check("and it is a chair-sized chair, not one stretched to a standing hip",
+      35.0 < heights[0] < 60.0, "%.0f cm tall" % heights[0])
+
 print("\nALL PASS" if ok else "\nFAILURES PRESENT")
 sys.exit(0 if ok else 1)

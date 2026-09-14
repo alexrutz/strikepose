@@ -76,6 +76,18 @@ read 176 degrees of jump between neighbouring poses as success. Both suites
 now sweep a limb right round and assert the frame never steps further than the
 pose did.
 
+**The pose catalogue is data, the command vocabulary is not.**
+`everyday.py` names 84 specific everyday poses - typing at a desk, tying a
+shoelace, carrying a box - and every one of them is a list of the same
+commands a model emits, applied through the same `apply_commands`. That is
+what makes a conditioning set repeatable: a 7B model asked for "tying a
+shoelace" a hundred times gives a hundred slightly different answers and
+several wrong ones. What stays short is the vocabulary the enums carry - ops,
+directions, joints, limbs - because a model picks from those on *every*
+command; a stance name is picked at most once and saves it ten guesses, so the
+catalogue can be long. The system prompt lists them grouped rather than as one
+line of 84.
+
 **A model never writes coordinates.** `pose_agent` hands a local LLM a command
 vocabulary - point a bone, bend a joint, turn the figure - and applies it
 through `move_joint` and `rotate_about_axis`, the same rotations a drag uses.
@@ -89,7 +101,23 @@ rather than tabulating one per side.
 **A bad command is skipped, not fatal.** A local model gets one wrong every so
 often. Losing the whole pose to a misspelled joint would make the CLI useless
 exactly where a small local model is the point. `apply_commands` returns the
-warnings and carries on.
+warnings and carries on. A stance recurses into its own steps, so it has a
+depth guard - and it must *report* what failed inside it, which is the one
+place a bad command used to be silent, the depth guard's own message included.
+
+**A stance may start from another, and a name may only mean one thing.**
+`everyday.POSES` is merged into `STANCES` with `setdefault`, never `update`: a
+catalogue entry that repeats a basic name - "walking", "running" - is an
+*alias* for it, one `stance walking` command, so letting it overwrite points
+the name at itself and the first figure to walk takes the process down with a
+RecursionError.
+
+**An object is anchored against the finished figure.** `apply_commands` holds
+every `place` until the rest of the list has run. "Sit down AND put a chair
+under the hips" reads naturally in either order, and placed first the chair
+anchors to a *standing* hip - and since a figure's ground is its own lowest
+foot, that chair comes out 86 cm tall with the desk in front of it ending up
+below the seat.
 
 **A garment is the body's own sweep, clipped and padded.** `wearables` does
 not carry meshes: it reads `body_segments` - the same table `body_parts`
@@ -201,6 +229,14 @@ solve an asset separately or it will drift from the body.
   shows 71% of the thigh and reads as a figure standing up straight, because
   what makes it a crouch is the part aimed at the lens. Bones that did not
   move get no say. A camera the prompt or the model names is never overruled.
+  But a bone that *did* move has to be readable itself as well, because the
+  two come apart: an arm brought up to carry a box swings from hanging to
+  pointing forward, and the change between them is mostly vertical, so the
+  front shows 82% of the departure and 25% of the arm. `legible_view` scores
+  the smaller of the two. The test that guards it compares the chosen view
+  with the best of the nine rather than against a fixed bar, because some
+  poses have no good view - a cross-legged sit points its shins at the lens
+  from everywhere - and a bar low enough to admit that one catches nothing.
 - Framing has to fit the *export rectangle*, not the window. A figure lying
   down is twice as wide as the standing one and was cropped by framing on the
   view, and framing on the keypoints alone cuts the hands off, which reach
@@ -230,6 +266,13 @@ solve an asset separately or it will drift from the body.
 - MakeHuman's base mesh carries helper geometry (skirt, tights, hair helper,
   joint cubes) as loose shells. It reads as clothing in a depth map. Delete
   helpers in MPFB2, or let the loader drop small shells.
+- Nothing moves the pelvis - posing is rotation - so how deep a squat reads is
+  the gap between the hip and the feet, and a figure's floor is its own lowest
+  foot rather than a plane in the scene. Dropping the thigh 45 degrees opens
+  that gap to 80 cm, which is a figure dipping its knees, not a squat; the
+  thigh has to rise *forward* from the hip. The same fact is why a lying
+  figure has nothing to anchor a bed to: its ankles come up to hip height, so
+  anything placed under it lands at the height of a hip.
 - Anthropometric segment measurements do not chain. Adding published
   acromion-radiale, radiale-stylion and hand lengths gives a 194 cm arm span on
   a 175 cm figure. Close the arm on the span invariant instead.
