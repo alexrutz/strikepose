@@ -79,17 +79,26 @@ def place(shape, at="ground", distance=70.0, size=1.0):
 # lists, spliced in, not a second kind of thing to resolve.
 SEATED = [point("l_thigh", "forward"), point("r_thigh", "forward"),
           point("l_shin", "down"), point("r_shin", "down")]
-# A deep squat, heels under the hips. The thigh rises forward from the hip
-# rather than dropping: nothing moves the pelvis - posing is rotation - so how
-# deep a squat reads is the gap between the hip and the feet, and dropping the
-# thigh 45 degrees opens that gap to 80 cm, which is a figure dipping its knees.
-SQUAT = [point("l_thigh", "forward_up"), point("r_thigh", "forward_up"),
+# A squat: thighs level, shins down, hips half a metre off the floor.
+#
+# Nothing moves the pelvis - posing is rotation - so how deep a squat reads is
+# the gap between the hip and the feet, and it is tempting to close that gap
+# as far as it will go. Both ends of that are wrong. Dropping the thigh 45
+# degrees leaves 80 cm, a figure dipping its knees; raising it 45 leaves 20,
+# and puts the knees a foot above the hips, which reads as kneeling rather
+# than squatting - the shape a body makes sitting on the floor hugging its
+# knees. Level is the one that looks like a squat, and it is the same
+# arrangement as sitting on a chair, which is no coincidence.
+SQUAT = [point("l_thigh", "forward"), point("r_thigh", "forward"),
          point("l_shin", "down"), point("r_shin", "down")]
-# Sit-depth: thighs level, the depth a gym squat and a chair share.
-HALF_SQUAT = [point("l_thigh", "forward"), point("r_thigh", "forward"),
-              point("l_shin", "down"), point("r_shin", "down")]
-CROSS_LEGGED = [point("l_thigh", "forward_left"), point("l_shin", "forward_right"),
-                point("r_thigh", "forward_right"), point("r_shin", "forward_left")]
+HALF_SQUAT = SQUAT
+# Knees out to the sides, shins folded in across the front. Aiming the thighs
+# diagonally forward instead points both shins at the lens from every one of
+# the nine views, and `legible_view` has nothing to choose between them: the
+# pose comes out as a blob of crossed limbs seen from overhead. Out to the
+# side, the knees make the wide triangle a cross-legged sit reads as.
+CROSS_LEGGED = [point("l_thigh", "left"), point("l_shin", "forward_right"),
+                point("r_thigh", "right"), point("r_shin", "forward_left")]
 # Hands meeting in front of the chest. The upper arm goes forward and down so
 # the elbow leads, then each forearm is aimed across the midline; aiming the
 # whole arm instead puts the wrists where the elbows should be.
@@ -203,17 +212,21 @@ CATALOGUE = [
   ("sitting_cross_legged", "on the floor, shins crossed",
    CROSS_LEGGED),
   ("meditating", "cross-legged, hands resting on the knees",
-   CROSS_LEGGED + [point("l_upper_arm", "left_down"),
-                   point("l_forearm", "forward_down"),
-                   point("r_upper_arm", "right_down"),
-                   point("r_forearm", "forward_down")]),
+   # the upper arms stay where they hang: a bone that did not move gets no
+   # vote in the view, and moving these put the pose on an overhead camera
+   # that renders a cross-legged sit as a blob of limbs
+   CROSS_LEGGED + [point("l_forearm", "forward_left"),
+                   point("r_forearm", "forward_right")]),
   ("sitting_on_floor_hands_back", "legs out, leaning on the hands behind",
    [stance("sitting_on_floor"), lean("back", 24),
     point("l_arm", "back_down"), point("r_arm", "back_down")]),
-  ("sitting_knees_up", "knees drawn up, arms around them",
+  ("sitting_knees_up", "on the floor, knees drawn up, arms around them",
+   # shins forward and down, so the feet finish level with the seat: with
+   # them straight down the feet stop a foot below the hips and the figure
+   # reads as crouching, because nothing moves the pelvis
    [point("l_thigh", "forward_up"), point("r_thigh", "forward_up"),
-    point("l_shin", "down"), point("r_shin", "down"),
-    lean("forward", 16), point("l_arm", "forward_down"),
+    point("l_shin", "forward_down"), point("r_shin", "forward_down"),
+    lean("forward", 12), point("l_arm", "forward_down"),
     point("r_arm", "forward_down")]),
   ("sitting_on_steps", "seated on a step, elbows on the thighs",
    [place("steps", "under_hips")] + SEATED
@@ -235,7 +248,7 @@ CATALOGUE = [
    [bend("l_shoulder", 6), bend("r_shoulder", 14), bend("r_elbow", 10),
     lean("back", 5)]),
   ("lifting_from_the_floor", "a squat lift, back straight, arms down",
-   HALF_SQUAT + [lean("forward", 26), point("l_arm", "forward_down"),
+   SQUAT + [lean("forward", 20), point("l_arm", "forward_down"),
                  point("r_arm", "forward_down"), look("forward_down")]),
   ("stooping_to_pick_up", "legs straight, folded at the hips",
    [lean("forward", 62), bend("l_knee", 14), bend("r_knee", 10),
@@ -327,7 +340,7 @@ CATALOGUE = [
    [bend("l_shoulder", 22), bend("r_shoulder", 22),
     bend("l_elbow", 96), bend("r_elbow", 96), look("forward_down")]),
   ("tying_shoelaces", "down on the heels, both hands at one foot",
-   SQUAT + [lean("forward", 50), point("l_arm", "forward_down"),
+   SQUAT + [lean("forward", 38), point("l_arm", "forward_down"),
             point("r_arm", "forward_down"), look("forward_down")]),
   ("putting_on_a_coat", "one arm back and out behind the shoulder",
    [point("r_upper_arm", "back_down"), point("r_forearm", "back_up"),
@@ -372,12 +385,12 @@ CATALOGUE = [
   ("touching_toes", "legs straight, folded right over",
    [lean("forward", 78), point("l_arm", "forward_down"),
     point("r_arm", "forward_down")]),
-  ("squatting", "a gym squat, thighs level, arms forward",
-   HALF_SQUAT + [lean("forward", 16), point("l_arm", "forward"),
-                 point("r_arm", "forward")]),
-  ("deep_squat", "down on the heels, hips low",
-   SQUAT + [lean("forward", 12), point("l_arm", "forward_down"),
-            point("r_arm", "forward_down")]),
+  ("squatting", "a squat, thighs level, arms forward for balance",
+   SQUAT + [lean("forward", 16), point("l_arm", "forward"),
+            point("r_arm", "forward")]),
+  ("squatting_arms_down", "the same squat, hands down between the knees",
+   SQUAT + [lean("forward", 24), point("l_arm", "forward_down"),
+            point("r_arm", "forward_down"), look("forward_down")]),
   ("kneeling_upright", "both knees down, back straight",
    [stance("kneeling")]),
   ("kneeling_on_one_knee", "one knee down, the other foot planted",
