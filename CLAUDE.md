@@ -306,6 +306,21 @@ solve an asset separately or it will drift from the body.
   and a 19 cm chest half-width is a fifth of that - a head and two hands over
   the edge. It only showed once a rigged body put real girth in the frame.
 
+- A `<canvas>` has intrinsic dimensions, so `position:fixed; inset:0` with an
+  auto width does *not* stretch it: it stays 300x150, and since the resize
+  handler sets the backing store from `getBoundingClientRect()`, the element
+  then doubles on every resize event. The figure is drawn at the wrong scale
+  in the corner and nothing says so. Give it `width:100%; height:100%` as
+  well.
+- The phone frames on the same silhouette the Python does - the crown, the
+  hands and the soles reach past the last keypoint on their chain - and then
+  needs a wider margin still, because what it draws is capsules *around* the
+  skeleton and at a phone's zoom a head capsule alone is a hundred pixels past
+  its keypoint.
+- Taking the server's keypoints without its camera shows a seated figure
+  head-on while the export comes out in profile. `legible_view` chose that
+  view for a reason; adopt it too, or the phone is previewing a different
+  picture from the one it will produce.
 - A tk `Canvas` defaults to 378 px wide. Five in a row overflow their strip and
   the last ones collapse to 1 px. Ask for `width=10` and let `expand` share.
 - `pack_forget` drops a widget from the packing order; re-packing appends it,
@@ -377,8 +392,13 @@ a build.
    levelled, not aimed - a foot taking weight goes flat, but nothing turns it
    in or out.
 5. The web prototype duplicates the maths in JavaScript. It is tested
-   independently (`node web/test.mjs`) and will drift from the Python. Its
-   preset table no longer can: it is generated from `preset_params` and
-   `tests/test_proportions.py` reads it back and compares. It had drifted by a
-   third of the child's torso, 33 cm against 44, before anything checked. The
-   rest of the file is still unguarded.
+   independently (`node web/test.mjs`) and will drift from the Python. Two
+   things no longer can: the preset table is generated from `preset_params`
+   and `tests/test_proportions.py` reads it back and compares - it had drifted
+   by a third of the child's torso, 33 cm against 44, before anything checked
+   - and the *export* is no longer duplicated at all. `server.py` renders it
+   with the same code the desktop build and the suite use, and
+   `tests/test_server.py` asserts that a scene sent back as keypoints comes
+   out byte-identical to the plan it came from. What is left in JavaScript is
+   the projection and the drag, which have to be local; the capsule depth map
+   it used to write is now only the offline preview.

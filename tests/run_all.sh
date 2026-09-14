@@ -23,6 +23,7 @@ run "wearables selftest"    "python3 wearables.py --selftest"
 run "pose agent selftest"   "python3 pose_agent.py --selftest"
 run "everyday poses"        "python3 everyday.py --selftest"
 run "pose agent wire"       "python3 tests/test_pose_agent.py"
+run "mobile server"         "python3 tests/test_server.py"
 for t in tests/test_editor_basics.py tests/test_depth_export.py \
          tests/test_body_presets.py tests/test_legacy_scenes.py \
          tests/test_smplx_fallback.py tests/test_multi_person.py \

@@ -221,6 +221,30 @@ side moving a pixel.
 Read `CLAUDE.md` first if you are changing anything. It lists the invariants and
 the bugs that produced them.
 
+## On a phone
+
+    python3 server.py                 # http://127.0.0.1:8765
+    python3 server.py --host 0.0.0.0  # and from the phone on the same wifi
+    python3 server.py --bodies bodies/    # depth from the rigged .glb bodies
+
+`server.py` serves `web/` and the engine behind it. The phone keeps only what
+has to be local - projecting and dragging at sixty frames a second, which
+cannot survive a round trip - and asks Python for everything that decides what
+comes *out*: the 84-pose library with its search, the prompt, the body
+presets, the objects and clothing, and the export. Tap a pose and the phone
+takes the server's keypoints *and its camera*, so what is on screen is the
+view the PNG will come out in. "Render pair" returns the real OpenPose and
+depth images, full screen, to press-and-hold and save.
+
+It installs to a home screen: there is a manifest and an icon, and it runs
+without browser chrome. With nothing listening it still poses a figure - the
+library, the prompt and the real export go grey and the local preview stays.
+
+The binding is loopback unless you ask otherwise. `--host 0.0.0.0` is what
+puts it on the phone, and it puts it on everything else on that network too:
+there is no authentication and a request costs CPU. Use it on a network you
+trust.
+
 ## Mobile prototype
 
 `web/` is a touch-first version sharing the same maths in JavaScript. Serve the

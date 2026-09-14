@@ -2,6 +2,7 @@
 // from the desktop build: no hover, no modifier keys, no right button, and a
 // fingertip covers the joint it is dragging.
 import * as P from "./pose3d.mjs";
+import * as API from "./api.mjs";
 
 const $ = id => document.getElementById(id);
 const stage = $("stage"), ctx = stage.getContext("2d");
@@ -38,9 +39,25 @@ function popUndo() {
   app.selected = null; refresh();
 }
 
-function fitAll(camera, margin = 1.25) {
+// The crown, the hands and the feet all reach past the last keypoint on their
+// chain - a hand is another 17 cm past the wrist - so fitting on the keypoints
+// alone crops exactly those. The same list the Python fits on.
+function silhouette(f) {
+  const out = f.points.slice();
+  const at = i => f.points[i];
+  const step = (from, towards, cm) =>
+    P.add(at(from), P.mul(P.norm(P.sub(at(from), at(towards))), cm));
+  out.push(step(0, 1, 14));                       // crown, past the nose
+  for (const [wrist, elbow, ankle, knee] of [[7, 6, 13, 12], [4, 3, 10, 9]]) {
+    out.push(step(wrist, elbow, 19));
+    out.push(step(ankle, knee, 8));
+  }
+  return out;
+}
+
+function fitAll(camera, margin = 1.45) {
   const [right, up] = camera.basis();
-  const pts = app.figures.flatMap(f => f.points);
+  const pts = app.figures.flatMap(silhouette);
   const xs = pts.map(p => P.dot(p, right)), ys = pts.map(p => P.dot(p, up));
   const cx = (Math.min(...xs) + Math.max(...xs))/2;
   const cy = (Math.min(...ys) + Math.max(...ys))/2;
@@ -467,8 +484,173 @@ $("b-mirror").onclick = () => {
   }
   refresh();
 };
-$("b-pose").onclick = exportPose;
-$("b-depth").onclick = exportDepth;
+$("b-local").onclick = exportPose;
+
+// ------------------------------------------------------------------ server
+//
+// The phone poses; the Python renders. Everything below asks the server for
+// the things it owns - the catalogue, the prompt, and the export - and
+// degrades to what the page can do alone when nothing is listening.
+
+function plateOf(figure) {
+  return {preset: figure.preset, points: figure.points.map(p => p.slice()),
+          visible: figure.visible.slice()};
+}
+
+function adopt(reply) {
+  // Take the server's keypoints into the local figures, so the very next drag
+  // continues from the pose it just sent.
+  pushUndo();
+  app.figures = reply.people.map((person, i) => {
+    const born = new P.Skeleton(app.figures[i] ? app.figures[i].preset
+                                               : figure().preset);
+    born.points = person.points.map(p => p.slice());
+    born.visible = person.visible.slice();
+    return born;
+  });
+  app.active = Math.min(app.active, app.figures.length - 1);
+  // Take the server's camera too. It chose the view the export will use -
+  // the one that shows what makes this pose that pose - and a phone showing
+  // a seated figure head-on while the PNG comes out in profile is showing
+  // the wrong thing.
+  if (reply.camera) {
+    app.camera.yaw = reply.camera.yaw;
+    app.camera.pitch = reply.camera.pitch;
+  }
+  fitAll(app.camera);
+  refresh();
+}
+
+let busy = false;
+async function working(label, job) {
+  if (busy) return;
+  busy = true;
+  say(label + "…");
+  try {
+    await job();
+  } catch (problem) {
+    say(String(problem.message || problem));
+  } finally {
+    busy = false;
+  }
+}
+
+async function applyPose(name) {
+  await working("Posing " + name.replace(/_/g, " "), async () => {
+    const reply = await API.scene({figures: [{preset: figure().preset,
+                                              commands: [{op: "stance",
+                                                          name}]}]});
+    adopt(reply);
+    // Get out of the way: the sheet covers three quarters of a phone, and the
+    // whole point of tapping a pose is to look at it.
+    sheet.classList.remove("library", "open");
+    say(name.replace(/_/g, " ") + (reply.props.length
+        ? " · " + reply.props.length + " object(s)" : ""));
+  });
+}
+
+async function askForPose() {
+  const text = $("ask").value.trim();
+  if (!text) return say("Say what the figure should be doing");
+  await working("Reading the prompt", async () => {
+    const answer = await API.prompt(text);
+    const reply = await API.scene(answer.plan);
+    adopt(reply);
+    sheet.classList.remove("open");
+    $("ask").blur();
+    say("Read by " + answer.source);
+  });
+}
+
+function show(pose, depth) {
+  const shots = $("shots");
+  shots.innerHTML = "";
+  for (const [src, caption] of [[pose, "OPENPOSE"], [depth, "DEPTH"]]) {
+    const figureEl = document.createElement("figure");
+    const img = document.createElement("img");
+    img.src = src; img.alt = caption;
+    const cap = document.createElement("figcaption");
+    cap.textContent = caption;
+    figureEl.append(img, cap);
+    shots.appendChild(figureEl);
+  }
+  $("viewer").classList.add("on");
+}
+
+async function renderPair() {
+  await working("Rendering", async () => {
+    const reply = await API.render({
+      people: app.figures.map(plateOf),
+      width: Math.max(64, Math.min(1536, parseInt($("outw").value, 10) || 512)),
+      height: Math.max(64, Math.min(1536, parseInt($("outh").value, 10) || 768)),
+      camera: {view: null},
+    });
+    show(reply.pose, reply.depth);
+    say(reply.rigged ? "Rendered from the rigged bodies"
+                     : "Rendered from the swept anatomy");
+  });
+}
+
+function saveBoth() {
+  // A phone will not honour a scripted download, so this opens each image in
+  // its own tab where press-and-hold can save it. The hint says so too.
+  for (const img of $("shots").querySelectorAll("img")) {
+    const tab = window.open();
+    if (tab) tab.document.write('<img src="' + img.src + '" style="width:100%">');
+  }
+}
+
+$("b-render").onclick = renderPair;
+$("b-ask").onclick = askForPose;
+$("ask").addEventListener("keydown", e => { if (e.key === "Enter") askForPose(); });
+$("v-close").onclick = () => $("viewer").classList.remove("on");
+$("v-save").onclick = saveBoth;
+tool("t-library", () => {
+  sheet.classList.add("open");
+  sheet.classList.toggle("library");
+});
+
+function buildLibrary(vocabulary) {
+  const groups = $("groups");
+  const draw = filter => {
+    groups.innerHTML = "";
+    const needle = filter.trim().toLowerCase();
+    let shown = 0;
+    for (const group of vocabulary.groups) {
+      const hits = group.poses.filter(p => !needle
+        || p.name.includes(needle) || p.about.toLowerCase().includes(needle));
+      if (!hits.length) continue;
+      const head = document.createElement("h4");
+      head.textContent = group.name;
+      groups.appendChild(head);
+      for (const pose of hits) {
+        const button = document.createElement("button");
+        button.className = "pose";
+        button.innerHTML = "<span>" + pose.name.replace(/_/g, " ")
+                         + "</span><small></small>";
+        button.querySelector("small").textContent = pose.about;
+        button.onclick = () => applyPose(pose.name);
+        groups.appendChild(button);
+        shown += 1;
+      }
+    }
+    $("search").placeholder = "Search " + shown + " poses";
+  };
+  draw("");
+  $("search").addEventListener("input", () => draw($("search").value));
+}
+
+API.connect().then(() => {
+  if (!API.state.online) {
+    for (const id of ["t-library", "b-render", "b-ask"])
+      $(id).classList.add("off");
+    say("Offline: posing works, exports are the quick preview.");
+    return;
+  }
+  buildLibrary(API.state.vocabulary);
+  say("Drag a joint, pick a pose, or describe one.");
+});
+
 const presets = $("preset");
 for (const name of Object.keys(P.PRESETS)) {
   const option = document.createElement("option");

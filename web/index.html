@@ -6,6 +6,9 @@
 <meta name="theme-color" content="#0d0d11">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Pose</title>
+<link rel="icon" href="./icon.svg">
+<link rel="apple-touch-icon" href="./icon.svg">
+<link rel="manifest" href="./app.webmanifest">
 <style>
 :root{
   --bg:#0d0d11; --panel:#16161c; --control:#22222b; --hover:#2f2f3b;
@@ -17,7 +20,11 @@
 html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
   font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;
   overscroll-behavior:none;touch-action:none;user-select:none}
-#stage{position:fixed;inset:0;display:block;touch-action:none}
+/* width/height, not just inset: a canvas has intrinsic dimensions, so
+   `inset:0` with an auto width leaves it at its own 300x150 and the
+   backing store then doubles on every resize event. */
+#stage{position:fixed;inset:0;display:block;touch-action:none;
+  width:100%;height:100%}
 
 /* ---- floating top bar ---- */
 #top{position:fixed;top:0;left:0;right:0;display:flex;gap:8px;align-items:center;
@@ -77,6 +84,43 @@ select,input{background:var(--control);border:1px solid var(--edge);color:var(--
 .row label{flex:1;color:var(--muted);font-size:12px}
 .row input{width:74px;text-align:center}
 #status{padding:6px 6px 0;color:var(--muted);font-size:12px;min-height:18px}
+
+/* ---- pose library ---- */
+#library{display:none}
+#sheet.library #panel{display:none}
+#sheet.library #library{display:flex;flex-direction:column;flex:1 1 auto;
+  min-height:0;padding:0 10px 14px}
+#search{margin:2px 0 6px;flex:0 0 auto}
+#groups{overflow-y:auto;flex:1 1 auto;-webkit-overflow-scrolling:touch}
+.pose{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;
+  background:var(--control);border:1px solid var(--edge);color:var(--fg);
+  border-radius:11px;padding:10px 12px;margin:4px 0;font-family:inherit;
+  font-size:14px}
+.pose:active{background:var(--hover)}
+.pose small{color:var(--muted);font-size:11px;flex:1;text-align:right;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---- prompt ---- */
+#askrow{display:flex;gap:6px;margin:6px 0}
+#askrow input{flex:1}
+#askrow button{flex:0 0 auto;width:64px}
+
+/* ---- the exported pair, full screen ---- */
+#viewer{position:fixed;inset:0;z-index:9;background:#07070a;display:none;
+  flex-direction:column}
+#viewer.on{display:flex}
+#shots{flex:1 1 auto;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;
+  align-items:center}
+#shots figure{flex:0 0 100%;scroll-snap-align:center;margin:0;padding:12px;
+  display:flex;flex-direction:column;align-items:center;gap:8px}
+#shots img{max-width:100%;max-height:74vh;border-radius:10px;
+  border:1px solid var(--edge);background:#000}
+#shots figcaption{color:var(--muted);font-size:12px;letter-spacing:.06em}
+#viewer .bar{display:flex;gap:8px;padding:10px;
+  padding-bottom:calc(10px + var(--safe-b));border-top:1px solid var(--edge)}
+#viewer .bar button{flex:1}
+#hint{color:var(--muted);font-size:11px;text-align:center;padding:0 16px 6px}
+.off{opacity:.45}
 </style>
 </head>
 <body>
@@ -101,6 +145,7 @@ select,input{background:var(--control);border:1px solid var(--edge);color:var(--
 <div id="sheet">
   <div id="grip"><div></div></div>
   <div id="tools">
+    <div class="tool" id="t-library">☰ Poses</div>
     <div class="tool" id="t-add">＋ Person</div>
     <div class="tool" id="t-sym">Mirror</div>
     <div class="tool" id="t-anchor">Anchor</div>
@@ -134,14 +179,35 @@ select,input{background:var(--control);border:1px solid var(--edge);color:var(--
       <button class="btn" id="v-left">Left</button>
       <button class="btn" id="v-top">Top</button>
     </div>
+    <h4>Describe a pose</h4>
+    <div id="askrow">
+      <input id="ask" placeholder="someone kneeling, looking up"
+             enterkeyhint="go" autocapitalize="off">
+      <button class="btn" id="b-ask">Pose</button>
+    </div>
     <h4>Export</h4>
     <div class="row"><label>Output size</label>
       <input id="outw" value="512" inputmode="numeric">
       <input id="outh" value="768" inputmode="numeric"></div>
     <div class="grid">
-      <button class="btn" id="b-pose">Pose PNG</button>
-      <button class="btn" id="b-depth">Depth PNG</button>
+      <button class="btn" id="b-render">Render pair</button>
+      <button class="btn" id="b-local">Quick preview</button>
     </div>
+  </div>
+
+  <div id="library">
+    <input id="search" placeholder="Search 84 poses" autocapitalize="off"
+           autocomplete="off">
+    <div id="groups"></div>
+  </div>
+</div>
+
+<div id="viewer">
+  <div id="shots"></div>
+  <div id="hint">Press and hold an image to save it.</div>
+  <div class="bar">
+    <button class="btn" id="v-close">Close</button>
+    <button class="btn" id="v-save">Save both</button>
   </div>
 </div>
 
