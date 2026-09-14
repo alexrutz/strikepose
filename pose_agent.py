@@ -56,6 +56,7 @@ import wearables
 from openpose3d_editor import (
     BODY_PRESETS, DEFAULT_PRESET, KEYPOINT_NAMES, VERSION, Camera, Skeleton,
     anatomy_depth_image, carry_chain, frame_rect, inside_polygon, pose_image,
+    rigged_depth_image,
     preset_params, project_people, scene_to_dict, solid_quads, vadd, vcross,
     vdot, vlen, vmul, vnorm, vsub,
 )
@@ -735,11 +736,12 @@ def build_scene(plan, view_w=900, view_h=700, aspect=512.0 / 768.0):
         warnings.append("unknown camera view %r; choosing one that reads"
                         % (view,))
         view = None
+    export = frame_rect(view_w, view_h, aspect)
     if view is None:
-        view = legible_view(figures, props=props)
+        view = legible_view(figures, props=props, rect=export)
     yaw, pitch = CAMERA_VIEWS[view]
     camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
-    frame_scene(figures, camera, frame_rect(view_w, view_h, aspect), props=props)
+    frame_scene(figures, camera, export, props=props)
     return figures, props, camera, warnings
 
 
@@ -768,7 +770,7 @@ def buried(figures, camera, props, limit=0.3):
     return total > 0 and hidden > limit * total
 
 
-def legible_view(figures, order=None, readable=0.8, props=()):
+def legible_view(figures, order=None, readable=0.8, props=(), rect=None):
     """The named view that shows most of what makes this pose that pose.
 
     Not "is every bone visible": a crouch seen head-on still shows 71% of the
@@ -792,6 +794,15 @@ def legible_view(figures, order=None, readable=0.8, props=()):
     bar is the better reference. If nothing clears it, the best is still
     better than guessing - some poses have no good view at all, a cross-legged
     sit being the plain case: its shins point at the lens from everywhere.
+
+    A view where the objects bury the figure is last in every case, not merely
+    demoted: a buried figure is not a conditioning image at all, because the
+    depth map is then a picture of the desk. A seated figure at a desk reads
+    99% from the side and 51% from three-quarters, and the side view puts a
+    140 cm desk between the lens and the person - so the three-quarter wins
+    even though it is the worse view of the pose. Burial is judged on the
+    framed camera, because framing is what decides whether the desk covers
+    the figure or sits below it.
     """
     rest = {}
     for name, (a, b) in BONES.items():
@@ -819,20 +830,22 @@ def legible_view(figures, order=None, readable=0.8, props=()):
         seen = lambda d: math.hypot(vdot(d, right), vdot(d, up))
         scores[name] = min(min(seen(change), seen(bone))
                            for change, bone in moved)
-    def cameras():
-        for name in (order or VIEW_ORDER):
-            yaw, pitch = CAMERA_VIEWS[name]
-            camera = Camera()
-            camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
-            yield name, camera
+    order = order or VIEW_ORDER
+    rect = rect if rect is not None else frame_rect(900, 700, 512.0 / 768.0)
+    clear = []
+    for name in order:
+        yaw, pitch = CAMERA_VIEWS[name]
+        camera = Camera(900, 700)
+        camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
+        frame_scene(figures, camera, rect, props=props)
+        if not buried(figures, camera, props):
+            clear.append(name)
 
-    for clear in (True, False):     # a buried view only if nothing else works
-        for name, camera in cameras():
-            if scores[name] >= readable and not (clear and buried(
-                    figures, camera, props)):
-                return name
-    return max(scores, key=lambda name: (scores[name],
-                                         -VIEW_ORDER.index(name)))
+    for name in order:
+        if name in clear and scores[name] >= readable:
+            return name
+    pool = clear or order
+    return max(pool, key=lambda name: (scores[name], -order.index(name)))
 
 
 def silhouette_points(figure):
@@ -903,16 +916,26 @@ def frame_scene(figures, camera, rect, margin=1.06, props=(), grow=1.9):
 
 
 def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
-                 thickness=1.0, with_depth=True, props=()):
+                 thickness=1.0, with_depth=True, props=(), meshes=None):
     """(pose image, depth image or None, export rect) for a built scene.
 
     Objects reach the depth map only. The pose map is the OpenPose skeleton and
     nothing else - a chair drawn into it would be read as a limb.
+
+    `meshes` is one loaded rigged mesh per figure, or None for a figure that
+    has none; pass it and the depth map comes from real skinned geometry
+    instead of the swept anatomy. The pose map is identical either way - it is
+    the same eighteen keypoints - which is the point: a conditioning pair can
+    have its depth upgraded without the OpenPose side moving a pixel.
     """
     rect = frame_rect(view_w, view_h, out_w / out_h)
     pose = pose_image(figures, camera, rect, out_w, out_h)
     depth = None
-    if with_depth:
+    if with_depth and meshes and any(m is not None for m in meshes):
+        jobs = [(figure, mesh, getattr(figure, "assets", ()) or ())
+                for figure, mesh in zip(figures, meshes) if mesh is not None]
+        depth = rigged_depth_image(jobs, camera, rect, out_w, out_h, props)
+    elif with_depth:
         depth = anatomy_depth_image(figures, camera, rect, out_w, out_h,
                                     thickness, props)
     return pose, depth, rect
@@ -1772,17 +1795,26 @@ def _selftest():
         return bone_worst, change_worst
 
     worst_bone, worst_change = (None, 1.0), (None, 1.0)
-    worst_miss = (None, 0.0)
+    worst_miss, gave_up = (None, 0.0), []
+    export = frame_rect(900, 700, 512.0 / 768.0)
     for name in sorted(STANCES):
-        figures, _scene, camera, _r = build_scene(
+        figures, scene, camera, _r = build_scene(
             {"figures": [{"commands": [{"op": "stance", "name": name}]}]})
         got = readability(figures[0], camera)
-        best = [0.0, 0.0]
+        # "Best available" means best among the views that do not bury the
+        # figure, which is the rule the chooser follows: a seated figure at a
+        # desk reads 99% from the side, and the side view is a picture of the
+        # desk. Comparing against the unfiltered best asserts the opposite of
+        # what the chooser should do.
+        best, best_of_all = [0.0, 0.0], [0.0, 0.0]
         for view, (yaw, pitch) in CAMERA_VIEWS.items():
-            other = Camera()
+            other = Camera(900, 700)
             other.yaw, other.pitch = math.radians(yaw), math.radians(pitch)
+            frame_scene(figures, other, export, props=scene)
             here = readability(figures[0], other)
-            best = [max(best[i], here[i]) for i in (0, 1)]
+            best_of_all = [max(best_of_all[i], here[i]) for i in (0, 1)]
+            if not buried(figures, other, scene):
+                best = [max(best[i], here[i]) for i in (0, 1)]
         if got[0] < worst_bone[1]:
             worst_bone = (name, got[0])
         if got[1] < worst_change[1]:
@@ -1790,11 +1822,16 @@ def _selftest():
         miss = max(best[i] - got[i] for i in (0, 1))
         if miss > worst_miss[1]:
             worst_miss = (name, miss)
+        if scene and max(best_of_all[i] - best[i] for i in (0, 1)) > 0.2:
+            gave_up.append(name)
 
     check("the view chosen is near the best of the nine available",
           worst_miss[1] < 0.3,
           "worst: %s falls %.0f points short" % (worst_miss[0],
                                                  100.0 * worst_miss[1]))
+    check("and a view that buries the figure behind its own furniture is "
+          "given up even when it reads best", gave_up,
+          "%d stance(s), e.g. %s" % (len(gave_up), gave_up[:3]))
     check("no stance is shown from a view that hides a limb",
           worst_bone[1] > 0.5,
           "worst: %s at %.0f%% of its length" % (worst_bone[0],

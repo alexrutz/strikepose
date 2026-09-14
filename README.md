@@ -180,6 +180,19 @@ one, and a contact sheet per group. A figure that sits gets a chair under it, a
 figure at a desk gets a desk, and both are sized against that body, so the
 child's chair is a child's chair.
 
+Point `--bodies` at a folder of rigged `.glb` bodies and the depth map comes
+from real geometry instead of the swept anatomy - hands with fingers, a face,
+a chest that belongs to the body it is on:
+
+    python3 everyday.py --render out/set --bodies bodies/
+
+One file per preset, named after it with spaces and commas turned into
+underscores - `female_curvy.glb`, `child_about_7.glb`, an `mpfb_` prefix
+accepted - and any preset without a file falls back to the swept anatomy. The
+pose PNG is identical either way, because it is the same eighteen keypoints:
+the depth side of a conditioning pair can be upgraded without the OpenPose
+side moving a pixel.
+
 ## Tests
 
     ./tests/run_all.sh

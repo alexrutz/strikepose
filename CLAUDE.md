@@ -237,6 +237,19 @@ solve an asset separately or it will drift from the body.
   with the best of the nine rather than against a fixed bar, because some
   poses have no good view - a cross-legged sit points its shins at the lens
   from everywhere - and a bar low enough to admit that one catches nothing.
+- A view that buries the figure is last in every case, never merely demoted:
+  a buried figure is not a conditioning image at all, because the depth map is
+  then a picture of the desk. A seated figure at a desk reads 99% from the
+  side and 51% from three-quarters, and the side puts a 140 cm desk between
+  the lens and the person, so the three-quarter has to win despite being the
+  worse view of the pose. `legible_view` used to take the best-reading view
+  whenever no *clear* view cleared its threshold, which is the opposite. The
+  same applies to the test: "best available" has to mean best among the views
+  that do not bury the figure, or it asserts the behaviour being fixed.
+- Burial must be judged on the *framed* camera. `legible_view` was testing it
+  on an unframed one, which is a different projection from the one the export
+  uses, and framing is exactly what decides whether the desk covers the figure
+  or sits below it.
 - Framing has to fit the *export rectangle*, not the window. A figure lying
   down is twice as wide as the standing one and was cropped by framing on the
   view, and framing on the keypoints alone cuts the hands off, which reach

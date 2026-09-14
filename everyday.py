@@ -444,6 +444,51 @@ def describe():
 # Rendering a set
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Rigged bodies
+#
+# The swept-anatomy depth source is a stack of tapering cross-sections; it is
+# right about where every limb is and approximate about what a body looks like.
+# A folder of .glb bodies exported from MPFB2 replaces it with real skinned
+# geometry - hands with fingers, a face, a chest that belongs to the body it
+# is on - driven by the same eighteen keypoints. The file for a preset is its
+# name, lowercased, spaces and commas turned into underscores, so
+# "Female, curvy" is `female_curvy.glb`, with an `mpfb_` prefix accepted too.
+# ---------------------------------------------------------------------------
+
+def body_slug(preset):
+    return preset.lower().replace(",", "").replace(" ", "_")
+
+
+def find_bodies(folder, presets):
+    """{preset: loaded mesh} for every preset the folder has a file for."""
+    import mesh_backend
+    found = {}
+    missing = []
+    for preset in presets:
+        slug = body_slug(preset)
+        for candidate in (slug, "mpfb_" + slug):
+            for suffix in (".glb", ".gltf"):
+                path = os.path.join(folder, candidate + suffix)
+                if os.path.exists(path):
+                    mesh = mesh_backend.load_rigged_mesh(path)
+                    mesh["roles"] = mesh_backend.resolve_bones(
+                        mesh["joint_names"])
+                    problems = mesh_backend.validate_roles(mesh, mesh["roles"])
+                    if problems:
+                        raise RuntimeError(
+                            "%s does not map onto the editor's roles: %s\n"
+                            "Run: python3 mesh_backend.py --inspect %s"
+                            % (os.path.basename(path), problems[0], path))
+                    found[preset] = mesh
+                    break
+            if preset in found:
+                break
+        else:
+            missing.append(preset)
+    return found, missing
+
+
 def build(name, preset, view=None, out_w=512, out_h=768):
     """One pose on one body -> (figures, props, camera, warnings).
 
@@ -457,12 +502,17 @@ def build(name, preset, view=None, out_w=512, out_h=768):
     return pose_agent.build_scene(plan, aspect=out_w / float(out_h))
 
 
-def render(name, preset, out_w=512, out_h=768, view=None):
-    """(pose image, depth image) for one pose on one body."""
+def render(name, preset, out_w=512, out_h=768, view=None, mesh=None):
+    """(pose image, depth image, warnings) for one pose on one body.
+
+    With `mesh` the depth comes from that rigged body; without it, from the
+    swept anatomy. The pose PNG is the same either way.
+    """
     import pose_agent
     figures, objects, camera, warnings = build(name, preset, view, out_w, out_h)
-    pose, depth, _rect = pose_agent.render_scene(figures, camera, out_w, out_h,
-                                                 props=objects)
+    pose, depth, _rect = pose_agent.render_scene(
+        figures, camera, out_w, out_h, props=objects,
+        meshes=[mesh] if mesh is not None else None)
     return pose, depth, warnings
 
 
@@ -495,7 +545,7 @@ def contact_sheet(rows, cell_w, cell_h, labels=(), heading=""):
 
 
 def render_set(out_dir, poses=None, presets=None, out_w=512, out_h=768,
-               sheets=True, cell=(190, 285), quiet=False):
+               sheets=True, cell=(190, 285), quiet=False, bodies=None):
     """Write the matched pose/depth pair for every pose on every body.
 
     The pair is the deliverable: ControlNet wants the OpenPose PNG and the
@@ -507,12 +557,23 @@ def render_set(out_dir, poses=None, presets=None, out_w=512, out_h=768,
 
     poses = list(poses or NAMES)
     presets = list(presets or BODY_PRESETS)
+    meshes, without = ({}, presets)
+    if bodies:
+        meshes, without = find_bodies(bodies, presets)
+        if not meshes:
+            raise SystemExit("no body file in %s matched any preset; expected "
+                             "names like %s.glb"
+                             % (bodies, body_slug(presets[0])))
+        if without and not quiet:
+            print("no rigged body for %s - swept anatomy instead"
+                  % ", ".join(without))
     os.makedirs(out_dir, exist_ok=True)
     index, trouble = [], []
     cells = {}
     for name in poses:
         for preset in presets:
-            pose, depth, warnings = render(name, preset, out_w, out_h)
+            pose, depth, warnings = render(name, preset, out_w, out_h,
+                                           mesh=meshes.get(preset))
             slug = "%s__%s" % (name, preset.lower().replace(", ", "_")
                                .replace(" ", "_"))
             pose.save(os.path.join(out_dir, slug + "_pose.png"))
@@ -671,6 +732,10 @@ def main(argv=None):
                         help="only bodies whose name contains this")
     parser.add_argument("--size", default="512x768",
                         help="export size, default 512x768")
+    parser.add_argument("--bodies", metavar="DIR",
+                        help="folder of rigged .glb bodies, one per preset, "
+                             "named after it (female_curvy.glb). The depth "
+                             "map then comes from real geometry")
     parser.add_argument("--no-sheets", action="store_true")
     args = parser.parse_args(argv)
 
@@ -697,7 +762,8 @@ def main(argv=None):
         return 2
     out_w, out_h = (int(v) for v in args.size.lower().split("x"))
     index, trouble = render_set(args.render, poses or None, presets,
-                                out_w, out_h, sheets=not args.no_sheets)
+                                out_w, out_h, sheets=not args.no_sheets,
+                                bodies=args.bodies)
     print("\n%d images in %s" % (2 * len(index), args.render))
     for name, preset, warnings in trouble:
         print("  %s on %s: %s" % (name, preset, warnings))
