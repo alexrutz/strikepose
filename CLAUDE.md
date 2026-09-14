@@ -285,6 +285,22 @@ solve an asset separately or it will drift from the body.
   the people. And a desk in front of a seated figure is in front of it from
   the figure's side of the room, so a view is rejected when objects cover more
   than a third of the keypoints from nearer than they are.
+- Six of the nine original named views sat at pitch zero, which is why a set
+  rendered from them came out looking like a catalogue rather than
+  photographs. The six added - `high_three_quarter`, `low_three_quarter`,
+  `worm`, `over_shoulder`, `bird`, `profile_high` - combine a yaw with a
+  pitch, which is what a camera someone is holding does. They go at the *end*
+  of `VIEW_ORDER` on purpose: a figure that constrains nothing should still
+  come out on a plain view, and these are there to be asked for.
+- Figures are set out along world +X, 70 cm apart, so a near-profile camera
+  stacks a group one behind another. A scene with more than one person wants
+  a yaw well away from +-90.
+- `legible_view` offers one contract - the plainest view that clears the bar,
+  and if nothing clears it the best there is - and the test has to assert
+  *that*, through `view_scores`, rather than something adjacent. Checking it
+  was "near the best available" on a bone-and-departure measure the chooser
+  does not optimise passed by luck, and turned into a failure the moment more
+  views existed to be better than the one chosen.
 - A view is chosen by how much of the pose's *departure from rest* survives
   projection, not by how much of each bone does. A crouch seen head-on still
   shows 71% of the thigh and reads as a figure standing up straight, because
