@@ -253,7 +253,12 @@ solve an asset separately or it will drift from the body.
 - Framing has to fit the *export rectangle*, not the window. A figure lying
   down is twice as wide as the standing one and was cropped by framing on the
   view, and framing on the keypoints alone cuts the hands off, which reach
-  another 17 cm past the wrist.
+  another 17 cm past the wrist. A skeleton also has no thickness and a body
+  does, so the fit is padded by the widest cross-section the figure carries: a
+  6% margin is ample on a standing figure, where 175 cm of height dwarfs it,
+  and nowhere near enough on a deep crouch, where the figure is 90 cm across
+  and a 19 cm chest half-width is a fifth of that - a head and two hands over
+  the edge. It only showed once a rigged body put real girth in the frame.
 
 - A tk `Canvas` defaults to 378 px wide. Five in a row overflow their strip and
   the last ones collapse to 1 px. Ask for `width=10` and let `expand` share.

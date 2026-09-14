@@ -879,16 +879,28 @@ def frame_scene(figures, camera, rect, margin=1.06, props=(), grow=1.9):
     crops exactly the poses a prompt is most likely to ask for. The fit is to
     the export rectangle rather than the whole view, because that is the part
     that becomes the PNG.
+
+    A skeleton has no thickness and a body does, so the fit is padded by the
+    widest cross-section the figure carries. A 6% margin is ample on a
+    standing figure, where the 175 cm of height dwarfs it, and not nearly
+    enough on a deep crouch: folded up, the figure is 90 cm across and a 19 cm
+    chest half-width is a fifth of that, which is a head and two hands over
+    the edge of the frame.
     """
     points = [p for figure in figures for p in silhouette_points(figure)]
     if not points:
         return
+    girth = max([0.0] + [max(figure.body[part][i] for part in
+                             ("chest", "waist", "pelvis") for i in (0, 1))
+                         for figure in figures])
     right, up, _fwd = camera.basis()
     xs = [vdot(p, right) for p in points]
     ys = [vdot(p, up) for p in points]
     # The people set the scale; objects may widen the frame but only so far.
     # A 6 m floor or a 4 m wall is a backdrop, and framing to hold all of one
     # shrinks the figure the whole image is about to a few dozen pixels.
+    xs = [x - girth for x in xs] + [x + girth for x in xs]
+    ys = [y - girth for y in ys] + [y + girth for y in ys]
     lo_x, hi_x, lo_y, hi_y = min(xs), max(xs), min(ys), max(ys)
     room_x = (hi_x - lo_x) * (grow - 1.0) / 2.0
     room_y = (hi_y - lo_y) * (grow - 1.0) / 2.0
