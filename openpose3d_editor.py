@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.30.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.31.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -1897,7 +1897,12 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
     three depth sources line up with the pose PNG and with each other.
 
     Objects come along, rasterised the analytic way while the mesh goes through
-    the triangle z-buffer, into the same buffer.
+    the triangle z-buffer, into the same buffer. So does anything the figure is
+    wearing: `wearables` carries no meshes, it clips and pads the body's own
+    swept profile, and that profile is built from the same eighteen keypoints
+    the rig is - so a coat cut for the sweep lands on the rigged body too.
+    Without this the clothes were simply absent from a rigged export, which is
+    the sort of thing nobody notices until they look for a coat.
     """
     import mesh_backend
     from smplx_backend import rasterize_depth
@@ -1931,6 +1936,31 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
                  + camera.height / 2.0 - y0) * s,
                 rel @ np.asarray(fwd) * k])
             np.minimum(zbuf, rasterize_depth(px, faces, out_w, out_h), out=zbuf)
+    # Clothes and hair. `wearables` carries no meshes: it clips and pads the
+    # body's own *swept* profile, and that profile is thinner than the rigged
+    # mesh wherever the two disagree - a chest, a shoulder - so a coat dropped
+    # straight into the buffer comes out with the body poking through it.
+    #
+    # Cloth lies on the surface, so say that instead of padding harder: where
+    # a garment covers the body, it sits a centimetre in front of whatever the
+    # rig put there. It then follows the rigged shape rather than the
+    # approximation it was cut from. Where it reaches past the body - a hem, a
+    # fall of hair - it keeps its own depth, because there is nothing under it.
+    body = zbuf.copy()
+    cloth = 1.0 * k                    # a centimetre, in the buffer's units
+    for figure, mesh, _assets in jobs:
+        if mesh is None or not getattr(figure, "outfit", None):
+            continue
+        import wearables
+        segments, frame = body_segments(figure)
+        worn = [to_camera_space(part, camera, rect, out_w)
+                for part in wearables.parts(figure, segments, frame, 1.0)]
+        if not worn:
+            continue
+        over = depth_buffer([worn], out_w, out_h)
+        on_body = np.isfinite(over) & np.isfinite(body)
+        over[on_body] = np.minimum(over[on_body], body[on_body] - cloth)
+        np.minimum(zbuf, over, out=zbuf)
     if len(props):
         # the triangle rasteriser and the analytic one write the same units, so
         # the objects simply join the buffer and the nearer surface wins
@@ -3735,29 +3765,54 @@ class EditorApp:
                                                            height), out=zbuf)
         return smplx_backend.depth_to_image(zbuf)
 
-    def depth_image(self, width, height):
+    def depth_image(self, width, height, anatomy=False):
         """Depth map framed identically to the pose export, so the two line up
         pixel for pixel.
 
-        Three interchangeable sources, tried in order: a loaded rigged mesh,
-        SMPL-X, then the built-in anatomy. Each falls through to the next if it
-        is off or unavailable, so the editor always produces a depth map.
+        Rigged geometry, from a mesh loaded by hand, from SMPL-X, or from the
+        body set on disk - in that order, because each is a deliberate choice
+        over the one after it. What it will *not* do is fall through to the
+        built-in anatomy: that sweep is a stack of tapering cross-sections, it
+        is there to draw the viewport and to cut garments out of, and an export
+        of it is a picture of a mannequin. Falling back silently is the trap,
+        because the file still appears.
+
+        `anatomy=True` asks for the sweep deliberately; the low-resolution
+        viewport preview does.
         """
+        if anatomy:
+            return anatomy_depth_image(self.figures, self.camera,
+                                       self.frame_rect(), width, height,
+                                       self._thickness(), self.props)
         if self.use_mesh.get() and (self._rigged_mesh is not None
                                     or self.mesh_library):
-            try:
-                return self.mesh_depth_image(width, height)
-            except Exception as exc:
-                messagebox.showerror("Rigged mesh failed", str(exc))
-                self.use_mesh.set(False)
+            return self.mesh_depth_image(width, height)
         if self.use_smplx.get():
             image = self.smplx_depth_image(width, height)
             if image is not None:
                 return image
-            self.use_smplx.set(False)
-        return anatomy_depth_image(self.figures, self.camera, self.frame_rect(),
-                                   width, height, self._thickness(),
-                                   self.props)
+        import bodies_lib
+        jobs = [(figure, mesh, self.asset_meshes(figure))
+                for figure, mesh in zip(self.figures,
+                                        bodies_lib.for_figures(self.figures))]
+        return rigged_depth_image(jobs, self.camera, self.frame_rect(),
+                                  width, height, self.props)
+
+    def _depth_or_complain(self, width, height):
+        """The depth map, or a dialog saying what is missing and None.
+
+        There is no cheaper thing to return. An export that quietly drops to
+        the built-in sweep is worse than no export, because the file is there
+        and it is a picture of a mannequin.
+        """
+        import bodies_lib
+        try:
+            return self.depth_image(width, height)
+        except bodies_lib.MissingBodies as missing:
+            messagebox.showerror("No rigged body", str(missing))
+        except Exception as problem:
+            messagebox.showerror("Depth map failed", str(problem))
+        return None
 
     def preview_depth(self):
         if np is None or Image is None:
@@ -3767,7 +3822,11 @@ class EditorApp:
             return
         w, h = self._sizes()
         f = min(1.0, 560.0 / max(w, h))
-        img = self.depth_image(max(16, int(w * f)), max(16, int(h * f)))
+        # The preview shows what the export will be, rigged geometry included,
+        # rather than a cheaper stand-in that flatters it.
+        img = self._depth_or_complain(max(16, int(w * f)), max(16, int(h * f)))
+        if img is None:
+            return
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         win = tk.Toplevel(self.root)
@@ -3792,7 +3851,10 @@ class EditorApp:
                                             initialfile="depth.png")
         if not path:
             return
-        self.depth_image(w, h).save(path)
+        image = self._depth_or_complain(w, h)
+        if image is None:
+            return
+        image.save(path)
         self.status.set(f"Saved depth map {os.path.basename(path)} ({w}x{h}).")
 
     def export_png(self):

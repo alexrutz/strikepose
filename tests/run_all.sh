@@ -22,6 +22,7 @@ run "props selftest"        "python3 props.py --selftest"
 run "wearables selftest"    "python3 wearables.py --selftest"
 run "pose agent selftest"   "python3 pose_agent.py --selftest"
 run "everyday poses"        "python3 everyday.py --selftest"
+run "rigged depth only"     "python3 tests/test_bodies.py"
 run "pose agent wire"       "python3 tests/test_pose_agent.py"
 run "mobile server"         "python3 tests/test_server.py"
 for t in tests/test_editor_basics.py tests/test_depth_export.py \

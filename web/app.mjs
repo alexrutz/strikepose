@@ -586,8 +586,7 @@ async function renderPair() {
       camera: {view: null},
     });
     show(reply.pose, reply.depth);
-    say(reply.rigged ? "Rendered from the rigged bodies"
-                     : "Rendered from the swept anatomy");
+    say("Rendered from the rigged bodies");
   });
 }
 

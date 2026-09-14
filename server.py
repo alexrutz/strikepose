@@ -42,6 +42,7 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import bodies_lib
 import everyday
 import pose_agent
 import props as props_module
@@ -143,7 +144,13 @@ def png(image):
 
 
 def render(figures, objects, camera, width, height):
-    meshes = [BODIES.get(f.body.get("preset")) for f in figures] if BODIES else None
+    """Rigged geometry, always. `render_scene` resolves the body set itself
+    when the server was not started with one, and refuses rather than dropping
+    to the built-in sweep."""
+    meshes = ([BODIES.get(f.body.get("preset")) for f in figures]
+              if BODIES else None)
+    if meshes is not None and any(m is None for m in meshes):
+        meshes = None                 # let the resolver find or refuse
     pose, depth, _rect = pose_agent.render_scene(
         figures, camera, width, height, VIEW_W, VIEW_H, props=objects,
         meshes=meshes)
@@ -174,6 +181,7 @@ def api_vocabulary():
         "anchors": sorted(pose_agent.ANCHORS),
         "wearables": {slot: wearables.options(slot) for slot in wearables.SLOTS},
         "bodies": sorted(BODIES),
+        "rigged": bool(BODIES),
     }
 
 
@@ -198,7 +206,9 @@ def api_render(payload):
     out = describe(figures, objects, camera, warnings)
     out["pose"] = png(pose)
     out["depth"] = png(depth)
-    out["rigged"] = bool(BODIES)
+    # Always true now: `render` refuses rather than returning the sweep, so
+    # reaching this line at all means the depth came from real geometry.
+    out["rigged"] = True
     return out
 
 
@@ -299,6 +309,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "not JSON: %s" % problem})
         try:
             self.reply(200, route(payload))
+        except bodies_lib.MissingBodies as missing:
+            # Not a server fault and not something to paper over: the phone
+            # says what is missing and how to build it.
+            self.reply(503, {"error": str(missing)})
         except Exception:                      # a bad scene is a 500, not a death
             traceback.print_exc()
             self.reply(500, {"error": "the scene could not be built"})
@@ -326,12 +340,14 @@ def main(argv=None):
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
-    if args.bodies:
-        found, missing = everyday.find_bodies(args.bodies, BODY_PRESETS)
-        BODIES.update(found)
-        print("rigged bodies: %d loaded%s"
-              % (len(found), "" if not missing
-                 else ", swept anatomy for " + ", ".join(missing)))
+    found = bodies_lib.load(args.bodies, BODY_PRESETS, required=False)
+    BODIES.update(found)
+    if found:
+        print("rigged bodies: %d loaded from %s"
+              % (len(found), args.bodies or ", ".join(bodies_lib.folders())))
+    else:
+        print("NO RIGGED BODIES - depth export will refuse until there are.")
+        print(bodies_lib.HOW)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.chatty = not args.quiet

@@ -173,6 +173,28 @@ Anchoring a fall on the head's own surface buries it in the shoulders;
 anchoring it behind the shoulders leaves a plank hovering with a gap above it.
 It starts touching the head and *leans* back over its length by the difference.
 
+**A depth export is rigged geometry, or it does not happen.** The built-in
+swept anatomy is a stack of tapering cross-sections: it knows where every limb
+is and only approximates what a person looks like. It is there to draw the
+viewport at sixty frames a second and to give `wearables` a profile to cut a
+garment out of. It must never become an export. Every path that writes a depth
+map resolves its bodies through `bodies_lib` and raises `MissingBodies` -
+which names the command that builds them - rather than quietly producing the
+basic version. The silent fallback is the whole problem: the PNG still
+appears, it is just a picture of a mannequin, and nothing says so. Asking for
+the sweep deliberately is `anatomy=True`, and only the viewport preview and
+the tests of the sweep itself do.
+
+**Cloth lies on the surface, it is not padded until it clears.** `wearables`
+clips and pads the body's own *swept* profile, and that profile is thinner
+than a rigged mesh wherever the two disagree - a chest, a shoulder - so a coat
+dropped straight into the rigged buffer comes out with the body through it.
+Where a garment covers the body it takes the body's own depth less a
+centimetre, so it follows the rigged shape rather than the approximation it
+was cut from; where it reaches past the body - a hem, a fall of hair - it
+keeps its own depth, because there is nothing under it. Padding harder instead
+would make a coat that fits the sweep and floats off the mesh.
+
 **Objects reach the depth map, never the pose map.** A chair drawn into an
 OpenPose image is read as a limb. `render_scene` and the editor's exports keep
 them apart, and both suites assert the pose PNG is byte-identical with and

@@ -26,6 +26,22 @@ width, which it takes at the iliac crests rather than the femoral heads, and
 the waist, which it takes at the navel while the body profile's waist station
 is the tenth rib. There is no child in ANSUR, so that preset is inherited.
 
+## The depth map is always a rigged body
+
+Every export renders real skinned geometry. The set lives in `bodies/`, one
+`.glb` per preset, and is found without being told where - `$STRIKEPOSE_BODIES`
+first, then `./bodies`, then `~/.strikepose/bodies`. Build it once:
+
+    pip install anny
+    python3 tools/make_bodies.py bodies/
+
+If a body is missing the export **refuses** and says which one and how to build
+it. It does not fall back to the built-in swept anatomy: that sweep is there to
+draw the viewport and to cut garments out of, and an export of it is a picture
+of a mannequin - the trap being that the file still appears and nothing says
+so. Any rigged `.glb` of the right names works: Anny, MPFB2, SMPL-X, a Mixamo
+character.
+
 ## Depth sources
 
 Three, tried in order, each falling back to the next:

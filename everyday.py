@@ -518,8 +518,8 @@ def build(name, preset, view=None, out_w=512, out_h=768):
 def render(name, preset, out_w=512, out_h=768, view=None, mesh=None):
     """(pose image, depth image, warnings) for one pose on one body.
 
-    With `mesh` the depth comes from that rigged body; without it, from the
-    swept anatomy. The pose PNG is the same either way.
+    The depth comes from rigged geometry: `mesh` if given, otherwise the body
+    set on disk. It never comes from the swept anatomy - see `bodies_lib`.
     """
     import pose_agent
     figures, objects, camera, warnings = build(name, preset, view, out_w, out_h)
@@ -570,16 +570,12 @@ def render_set(out_dir, poses=None, presets=None, out_w=512, out_h=768,
 
     poses = list(poses or NAMES)
     presets = list(presets or BODY_PRESETS)
-    meshes, without = ({}, presets)
-    if bodies:
-        meshes, without = find_bodies(bodies, presets)
-        if not meshes:
-            raise SystemExit("no body file in %s matched any preset; expected "
-                             "names like %s.glb"
-                             % (bodies, body_slug(presets[0])))
-        if without and not quiet:
-            print("no rigged body for %s - swept anatomy instead"
-                  % ", ".join(without))
+    # Bodies are not optional. `--bodies` only says *which* folder; with none
+    # given the set is resolved the way every other export resolves it, and a
+    # preset with no body stops the run rather than quietly coming out as the
+    # built-in sweep.
+    import bodies_lib
+    meshes = bodies_lib.load(bodies, presets)
     os.makedirs(out_dir, exist_ok=True)
     index, trouble = [], []
     cells = {}
@@ -747,8 +743,9 @@ def main(argv=None):
                         help="export size, default 512x768")
     parser.add_argument("--bodies", metavar="DIR",
                         help="folder of rigged .glb bodies, one per preset, "
-                             "named after it (female_curvy.glb). The depth "
-                             "map then comes from real geometry")
+                             "named after it (female_curvy.glb). Found "
+                             "automatically in ./bodies; this only overrides "
+                             "where to look")
     parser.add_argument("--no-sheets", action="store_true")
     args = parser.parse_args(argv)
 

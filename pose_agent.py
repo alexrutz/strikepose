@@ -1019,28 +1019,41 @@ def frame_scene(figures, camera, rect, margin=1.06, props=(), grow=1.9):
 
 
 def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
-                 thickness=1.0, with_depth=True, props=(), meshes=None):
+                 thickness=1.0, with_depth=True, props=(), meshes=None,
+                 anatomy=False):
     """(pose image, depth image or None, export rect) for a built scene.
 
     Objects reach the depth map only. The pose map is the OpenPose skeleton and
     nothing else - a chair drawn into it would be read as a limb.
 
-    `meshes` is one loaded rigged mesh per figure, or None for a figure that
-    has none; pass it and the depth map comes from real skinned geometry
-    instead of the swept anatomy. The pose map is identical either way - it is
-    the same eighteen keypoints - which is the point: a conditioning pair can
-    have its depth upgraded without the OpenPose side moving a pixel.
+    The depth map comes from rigged geometry. `meshes` is one loaded mesh per
+    figure; leave it out and they are resolved from the body set. There is no
+    quiet fallback to the swept anatomy: that is a stack of tapering
+    cross-sections, right about where every limb is and approximate about what
+    a person looks like, and an export of it is the wrong picture with nothing
+    to say so. `anatomy=True` asks for it deliberately - the viewport preview
+    does, and so do the tests that check the sweep itself.
+
+    The pose map is identical either way, because it is the same eighteen
+    keypoints: the depth side of a conditioning pair can be upgraded without
+    the OpenPose side moving a pixel.
     """
     rect = frame_rect(view_w, view_h, out_w / out_h)
     pose = pose_image(figures, camera, rect, out_w, out_h)
     depth = None
-    if with_depth and meshes and any(m is not None for m in meshes):
-        jobs = [(figure, mesh, getattr(figure, "assets", ()) or ())
-                for figure, mesh in zip(figures, meshes) if mesh is not None]
-        depth = rigged_depth_image(jobs, camera, rect, out_w, out_h, props)
-    elif with_depth:
+    if with_depth and anatomy:
         depth = anatomy_depth_image(figures, camera, rect, out_w, out_h,
                                     thickness, props)
+    elif with_depth:
+        import bodies_lib
+        if meshes is None:
+            meshes = bodies_lib.for_figures(figures)
+        jobs = [(figure, mesh, getattr(figure, "assets", ()) or ())
+                for figure, mesh in zip(figures, meshes) if mesh is not None]
+        if not jobs:
+            raise bodies_lib.MissingBodies(
+                "Nothing to render the depth map from.\n\n" + bodies_lib.HOW)
+        depth = rigged_depth_image(jobs, camera, rect, out_w, out_h, props)
     return pose, depth, rect
 
 
