@@ -161,11 +161,11 @@ CATALOGUE = [
 
  ("At a desk", [
   ("sitting_at_desk", "seated square to a desk",
-   [place("chair", "under_hips"), place("desk", "in_front", 20.0)]
+   [place("chair", "under_hips"), place("desk", "in_front", 4.0)]
    + SEATED + [bend("l_shoulder", 20), bend("r_shoulder", 20),
                bend("l_elbow", 80), bend("r_elbow", 80)]),
   ("typing_at_desk", "forearms level, head to the screen",
-   [place("chair", "under_hips"), place("desk", "in_front", 20.0)]
+   [place("chair", "under_hips"), place("desk", "in_front", 4.0)]
    + SEATED + [point("l_upper_arm", "forward_down"),
                point("r_upper_arm", "forward_down"),
                point("l_forearm", "forward"), point("r_forearm", "forward"),
@@ -175,7 +175,7 @@ CATALOGUE = [
              bend("l_elbow", 70), bend("r_elbow", 70),
              lean("forward", 14), look("forward_down")]),
   ("writing_at_desk", "one forearm on the desk, head down",
-   [place("chair", "under_hips"), place("desk", "in_front", 18.0)]
+   [place("chair", "under_hips"), place("desk", "in_front", 3.0)]
    + SEATED + [point("l_upper_arm", "forward_down"),
                point("l_forearm", "forward_right"), bend("r_shoulder", 30),
                bend("r_elbow", 95), lean("forward", 20),
@@ -258,11 +258,11 @@ CATALOGUE = [
   ("reaching_both_arms_up", "both arms overhead",
    [point("l_arm", "up"), point("r_arm", "up"), look("forward_up")]),
   ("reaching_across_a_table", "folded at the hips, one arm out",
-   [place("table", "in_front", 45.0), lean("forward", 30),
+   [place("table", "in_front", 8.0), lean("forward", 30),
     point("l_arm", "forward"), look("forward_down")]),
   ("opening_a_door", "one arm out at waist height, turning with it",
    [bend("r_shoulder", 50), bend("r_elbow", 30),
-    turn("right", 18), place("panel", "in_front", 55.0)]),
+    turn("right", 18), place("panel", "in_front", 18.0)]),
   ("pressing_a_button", "one arm up, forefinger out",
    [point("r_upper_arm", "forward_down"), point("r_forearm", "forward_up"),
     look("forward")]),
@@ -300,19 +300,19 @@ CATALOGUE = [
 
  ("Around the house", [
   ("leaning_on_a_wall", "shoulders back against it, one knee crossed",
-   [place("panel", "behind", 22.0), lean("back", 9),
+   [place("panel", "behind", 3.0), lean("back", 9),
     bend("l_knee", 18), bend("l_hip", -10), bend("l_shoulder", -12),
     bend("r_shoulder", -12)]),
   ("leaning_on_a_counter", "forearms down on the surface",
-   [place("table", "in_front", 42.0), lean("forward", 22),
+   [place("table", "in_front", 4.0), lean("forward", 22),
     point("l_upper_arm", "forward_down"), point("l_forearm", "forward"),
     point("r_upper_arm", "forward_down"), point("r_forearm", "forward")]),
   ("washing_hands", "folded slightly, both hands low in front",
-   [place("table", "in_front", 40.0), lean("forward", 18),
+   [place("table", "in_front", 4.0), lean("forward", 18),
     bend("l_shoulder", 26), bend("r_shoulder", 26),
     bend("l_elbow", 72), bend("r_elbow", 72), look("forward_down")]),
   ("stirring_a_pot", "one arm out and bent, watching it",
-   [place("table", "in_front", 45.0), bend("r_shoulder", 34),
+   [place("table", "in_front", 8.0), bend("r_shoulder", 34),
     bend("r_elbow", 68), lean("forward", 10), look("forward_down")]),
   ("sweeping", "both hands on a handle angled down",
    [bend("l_shoulder", 34), bend("l_elbow", 26), bend("r_shoulder", 12),
@@ -339,10 +339,10 @@ CATALOGUE = [
   ("walking", "a mid-stride walk", [stance("walking")]),
   ("running", "a full running stride", [stance("running")]),
   ("climbing_stairs", "the lead leg up on the next step",
-   [place("steps", "in_front", 30.0), bend("l_hip", 52), bend("l_knee", 74),
+   [place("steps", "in_front", 8.0), bend("l_hip", 52), bend("l_knee", 74),
     bend("r_shoulder", 22), bend("l_shoulder", -18), lean("forward", 14)]),
   ("stepping_up", "one foot high, the other still down",
-   [place("platform", "in_front", 35.0, 0.6), bend("l_hip", 44),
+   [place("platform", "in_front", 10.0, 0.6), bend("l_hip", 44),
     bend("l_knee", 60), lean("forward", 10)]),
   ("lunging", "front knee square, back leg long",
    [bend("l_hip", 46), bend("l_knee", 76), bend("r_hip", -28),

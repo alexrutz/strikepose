@@ -509,7 +509,7 @@ def validate_roles(mesh, roles):
 # ---------------------------------------------------------------------------
 
 def pose_globals(rest_position, parents, roles, points, stretch=True,
-                 rest_orient=None):
+                 rest_orient=None, rest_points=None):
     """Global rotation and position per bone, from the editor's keypoints.
 
     Same closed-form aim used for SMPL-X, but expressed purely in global terms
@@ -645,17 +645,91 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
             roll_align(role, child)
             aim(role, child, kp(target))         # restore the subtree below
 
-    # Head. Without this the skull keeps whatever orientation the rig was
-    # authored with, however the nose and ears are posed. The neck is aimed by
-    # direction rather than position, because a rig's head bone sits at the
-    # base of the skull, not at the ear midpoint.
-    if "neck" in roles and "head" in roles and "r_ear" in points:
-        ear_mid = 0.5 * (kp("r_ear") + kp("l_ear"))
-        aim("neck", "head", ear_mid - sh_mid, positional=False)
-        head = roles["head"]
-        above = Q[parents[head]] if parents[head] >= 0 else np.eye(3)
-        target_head = frame_from(kp("nose") - ear_mid, ear_mid - sh_mid)
-        local[head] = above.T @ (target_head @ rest_frame.T)
+    # Feet.
+    #
+    # There is no keypoint past the ankle, so a foot rides its shin rigidly
+    # and points wherever the shin does - which is right for a foot in the
+    # air and wrong for one standing on something. A lunge came out on
+    # pointed toes and a seated figure dangled its feet, because the shin is
+    # tilted and the foot went with it. So where the shin is near enough to
+    # upright that the foot must be taking weight, put the foot back to the
+    # pitch the rig authored it at - flat - while keeping the heading the leg
+    # gave it. Beyond 40 degrees the leg is not standing on anything: a
+    # kneeling figure's shins point backwards and a lying one's sideways, and
+    # both keep the rig's own relationship.
+    for role in ("l_ankle", "r_ankle"):
+        knee_role = role.replace("ankle", "knee")
+        j = roles.get(role)
+        if j is None or knee_role not in roles:
+            continue
+        # measured on the keypoints, not on `q`: the rig has not been slid
+        # onto them yet, so its own bone lengths put the knee somewhere else
+        # and its shin reads 11 degrees steeper than the pose asked for
+        shin = unit(kp(role) - kp(knee_role))
+        if np.linalg.norm(shin) < 1e-9 or -shin[1] < math.cos(math.radians(40.0)):
+            continue
+        toes = [i for i in range(n) if parents[i] == j]
+        if not toes:
+            continue
+        rest_dir = unit(np.mean([rest_position[t] for t in toes], axis=0)
+                        - rest_position[j])
+        posed = unit(Q[j] @ rest_dir)
+        heading = np.array([posed[0], 0.0, posed[2]])
+        if np.linalg.norm(rest_dir) < 1e-9 or np.linalg.norm(heading) < 1e-6:
+            continue
+        rise = float(np.clip(rest_dir[1], -1.0, 1.0))
+        want = unit(unit(heading) * math.sqrt(max(0.0, 1.0 - rise * rise))
+                    + np.array([0.0, rise, 0.0]))
+        p = parents[j]
+        above = Q[p] if p >= 0 else np.eye(3)
+        local[j] = above.T @ rotation_between(posed, want) @ above @ local[j]
+    propagate()
+    recentre()
+
+    # Head.
+    #
+    # Turn the neck by how far the head has moved *from the body's own rest
+    # pose*, rather than aiming the neck bone at an absolute direction. There
+    # is no keypoint on the skull to aim at: the nearest is the ear midpoint,
+    # and a neck bone does not point at the ears. MakeHuman's runs from C7
+    # forward and up to the base of the skull, 20 degrees off vertical, while
+    # the shoulder-to-ear line of the editor's figure leans 3 - so aiming the
+    # bone at the ears tipped every skull on every MPFB2 body 17 degrees back,
+    # in the rest pose as much as any other. Against a moved reference the
+    # rest pose is a rotation of zero and the rig keeps the neck it was
+    # authored with, which is the whole point of having a rig.
+    #
+    # Measured in the body's own frame on both sides, so that a figure which
+    # has also turned or leaned does not count the torso's rotation twice; and
+    # applied to the neck rather than to the skull, because it is a neck that
+    # bends when someone looks down.
+    if ("neck" in roles and "r_ear" in points and rest_points
+            and "r_ear" in rest_points):
+
+        def head_frame(at):
+            get = lambda name: np.asarray(at[name], float)
+            shoulders = 0.5 * (get("r_shoulder") + get("l_shoulder"))
+            ears = 0.5 * (get("r_ear") + get("l_ear"))
+            hips = 0.5 * (get("r_hip") + get("l_hip"))
+            body = frame_from(np.cross(get("l_hip") - get("r_hip"),
+                                       shoulders - hips), shoulders - hips)
+            head = frame_from(get("nose") - ears, ears - shoulders)
+            return body, head
+
+        body_now, head_now = head_frame(points)
+        body_rest, head_rest = head_frame(rest_points)
+        # How the head sits on the torso, then and now; the change between
+        # them, carried back into world by the torso's current orientation.
+        # The order matters: `now @ rest.T`, not `rest.T @ now` - rotations do
+        # not commute, and the reversed product is 4 degrees out on a head
+        # turned 40.
+        was = body_rest.T @ head_rest
+        is_ = body_now.T @ head_now
+        turned = body_now @ (is_ @ was.T) @ body_now.T
+        j = roles["neck"]
+        p = parents[j]
+        above = Q[p] if p >= 0 else np.eye(3)
+        local[j] = above.T @ turned @ above @ local[j]
         propagate()
         recentre()
 
@@ -732,7 +806,7 @@ def skin_mesh(mesh, Q, q):
     return out
 
 
-def solve_pose(mesh, points_cm, roles=None, stretch=True):
+def solve_pose(mesh, points_cm, roles=None, stretch=True, rest_points=None):
     """Solve the rig once and hand back the result keyed by bone name.
 
     Assets - hair, clothing, shoes - are separate skinned meshes built on the
@@ -754,7 +828,8 @@ def solve_pose(mesh, points_cm, roles=None, stretch=True):
     scale = float(np.linalg.norm(target)) / max(1e-9, span_rig)
     Q, q = pose_globals(rest * scale, mesh["parents"], roles, points_cm,
                         stretch=stretch,
-                        rest_orient=mesh["rest_global"][:, :3, :3])
+                        rest_orient=mesh["rest_global"][:, :3, :3],
+                        rest_points=rest_points)
     return {"scale": scale,
             "bones": {name: (Q[i], q[i])
                       for i, name in enumerate(mesh["joint_names"])}}
@@ -892,11 +967,13 @@ def _write_test_glb(path, lift=0.0, morph=False):
         ("lowerleg01.L", 18, (0.10, 0.50, 0.0)),
         ("lowerleg02.L", 19, (0.10, 0.29, 0.0)),
         ("foot.L", 20, (0.10, 0.08, 0.0)),
+        ("toe.L", 21, (0.10, 0.02, 0.14)),          # so a foot has a pitch
         ("upperleg01.R", 0, (-0.09, 0.92, 0.0)),
-        ("upperleg02.R", 22, (-0.10, 0.71, 0.0)),
-        ("lowerleg01.R", 23, (-0.10, 0.50, 0.0)),
-        ("lowerleg02.R", 24, (-0.10, 0.29, 0.0)),
-        ("foot.R", 25, (-0.10, 0.08, 0.0)),
+        ("upperleg02.R", 23, (-0.10, 0.71, 0.0)),
+        ("lowerleg01.R", 24, (-0.10, 0.50, 0.0)),
+        ("lowerleg02.R", 25, (-0.10, 0.29, 0.0)),
+        ("foot.R", 26, (-0.10, 0.08, 0.0)),
+        ("toe.R", 27, (-0.10, 0.02, 0.14)),
     ]
     verts, joints, weights, faces = [], [], [], []
     for b, (_name, parent, pos) in enumerate(bones):
@@ -1037,7 +1114,7 @@ def _selftest():
           "%d vertices left" % len(cleaned["vertices"]))
     check("GLB parsed", len(mesh["vertices"]) == len(mesh["faces"]),
           "%d verts, %d faces" % (len(mesh["vertices"]), len(mesh["faces"])))
-    check("bones read with hierarchy", len(mesh["joint_names"]) == 27
+    check("bones read with hierarchy", len(mesh["joint_names"]) == 29
           and mesh["parents"][0] == -1, "%d bones" % len(mesh["joint_names"]))
     check("rest positions rebuilt from the node tree",
           abs(mesh["rest_position"][4][1] - 1.52) < 1e-6,
@@ -1199,17 +1276,76 @@ def _selftest():
           len(skin_with(partial, solution)) == len(asset["vertices"]))
 
 
-    # head must follow the face keypoints
+    # Head.
+    #
+    # It must turn by as much as the face keypoints turned, and by nothing at
+    # all when they have not moved. The check this replaces asserted that the
+    # head bone's own +Z ends up along the gaze, which assumes the rig's head
+    # bone is authored square to the body - and then the code was written to
+    # satisfy it, by pointing the neck at the ear midpoint, the nearest
+    # keypoint to a skull that has none. MakeHuman's neck leans 20 degrees
+    # forward and the editor's shoulder-to-ear line leans 3, so every skull on
+    # every MPFB2 body sat 17 degrees back, in the rest pose as much as any
+    # other, and the test said nothing because the mock rig's neck is
+    # vertical. Comparing a moved head with a moved reference cannot be
+    # satisfied that way.
     turned = dict(pts)
     turned["nose"] = (14.0, 16.0, -2.0)      # look to the figure's left
     turned["r_ear"] = (-2.0, 19.0, -7.0)
     turned["l_ear"] = (7.0, 19.0, 6.0)
-    Q3, q3 = pose_globals(rest, mesh["parents"], roles, turned, stretch=False)
     head_i = mesh["joint_names"].index("head")
-    facing = Q3[head_i] @ np.array([0.0, 0.0, 1.0])
-    want = unit(np.asarray(turned["nose"], float)
-                - 0.5 * (np.asarray(turned["r_ear"], float)
-                         + np.asarray(turned["l_ear"], float)))
+
+    def face(at):
+        ears = 0.5 * (np.asarray(at["r_ear"], float)
+                      + np.asarray(at["l_ear"], float))
+        shoulders = 0.5 * (np.asarray(at["r_shoulder"], float)
+                           + np.asarray(at["l_shoulder"], float))
+        return frame_from(np.asarray(at["nose"], float) - ears,
+                          ears - shoulders)
+
+    Q_still, _ = pose_globals(rest, mesh["parents"], roles, pts,
+                              stretch=False, rest_points=pts)
+    Q3, q3 = pose_globals(rest, mesh["parents"], roles, turned,
+                          stretch=False, rest_points=pts)
+    unmoved = math.degrees(math.acos(max(-1.0, min(1.0,
+              (np.trace(Q_still[head_i]) - 1.0) / 2.0))))
+    check("a head whose keypoints have not moved does not turn",
+          unmoved < 0.5, "%.2f deg" % unmoved)
+    got = Q3[head_i] @ Q_still[head_i].T
+    wanted = face(turned) @ face(pts).T
+    gap = math.degrees(math.acos(max(-1.0, min(1.0,
+          (np.trace(got @ wanted.T) - 1.0) / 2.0))))
+    check("and one whose keypoints turned turns with them",
+          gap < 1.0, "%.2f deg apart" % gap)
+    # Feet. There is no keypoint past the ankle, so a foot rides its shin and
+    # points wherever the shin does - a lunge on pointed toes, a seated figure
+    # dangling. A foot whose shin is near upright is taking weight, so it goes
+    # back to the pitch the rig authored; one whose shin is not stays put,
+    # because a kneeling figure's shins point backwards and a lying one's
+    # sideways and neither is standing on anything.
+    foot_i = mesh["joint_names"].index("foot.L")
+    toe = mesh["rest_position"][mesh["joint_names"].index("toe.L")]
+    rest_toe = unit(toe - mesh["rest_position"][foot_i])
+
+    def foot_pitch(where):
+        Qf, _ = pose_globals(rest, mesh["parents"], roles, where,
+                             stretch=False, rest_points=pts)
+        return math.degrees(math.asin(float(unit(Qf[foot_i] @ rest_toe)[1])))
+
+    flat = foot_pitch(pts)
+    tilted = dict(pts)                       # knee forward: shin 30 deg back
+    tilted["l_knee"] = (11.0, -95.0, 21.0)
+    lifted = dict(pts)                       # shin out sideways, 75 deg over
+    lifted["l_ankle"] = (52.0, -85.0, 0.0)
+    check("a foot under a near-upright shin keeps its authored pitch",
+          abs(foot_pitch(tilted) - flat) < 1.0,
+          "%.1f deg vs %.1f at rest" % (foot_pitch(tilted), flat))
+    check("and one under a shin that is not standing on anything is left "
+          "alone", abs(foot_pitch(lifted) - flat) > 10.0,
+          "%.1f deg vs %.1f at rest" % (foot_pitch(lifted), flat))
+
+    facing = (Q3[head_i] @ Q_still[head_i].T) @ face(pts) @ np.array([0.0, 0.0, 1.0])
+    want = face(turned) @ np.array([0.0, 0.0, 1.0])
     # Twist.
     #
     # Aiming composes a *minimal* rotation per bone onto its parent's global,

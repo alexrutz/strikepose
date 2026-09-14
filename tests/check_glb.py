@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 import mesh_backend
-from openpose3d_editor import (KEYPOINT_NAMES, Camera, Skeleton, frame_rect,
+from openpose3d_editor import (KEYPOINT_NAMES, Camera, Skeleton,
+                               build_rest_points, frame_rect,
                                rigged_depth_image, vlen, vnorm, vsub)
 
 INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
@@ -119,7 +120,9 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
     for name in POSES:
         skeleton = posed(name)
         points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
-        solution = mesh_backend.solve_pose(mesh, points, roles)
+        solution = mesh_backend.solve_pose(
+            mesh, points, roles,
+            rest_points=build_rest_points(skeleton.body))
         bones = solution["bones"]
 
         # the rig must land on the keypoints, or the depth map and the pose

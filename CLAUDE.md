@@ -52,6 +52,38 @@ aimed joints are direct parent and child, and wrong on any rig with twist bones
 — which MakeHuman's default rig has throughout. The mock rig in the self-test
 has twist bones specifically to catch this.
 
+**`look` aims the gaze, not the neck-to-nose line.** The nose sits high on
+the head, so that line stands 74 degrees above horizontal at rest. Aiming *it*
+at "forward" swings the head 74 degrees - chin on the chest - while the gaze
+it was meant to set has barely moved; "forward_down" came out at 119 degrees
+and "down" at 164. That is what made half the pose catalogue look hunched. The
+gaze is the ear midpoint to the nose, which is level at rest, and the whole
+head turns about the neck so no bone changes length.
+
+**The head is turned by how far it moved, never aimed at a keypoint.** There
+is no keypoint on the skull. The nearest is the ear midpoint, and a neck bone
+does not point at the ears: MakeHuman's runs from C7 forward and up to the
+base of the skull, 20 degrees off vertical, where the editor's shoulder-to-ear
+line leans 3. Aiming the bone at the ears therefore tipped every skull on
+every MPFB2 body 17 degrees back, in the rest pose as much as in any other.
+`solve_pose` takes the body's own `rest_points` and turns the neck by the
+change in the head's orientation *relative to the torso* - measured in the
+body frame on both sides so a figure that has also turned does not count the
+torso twice, and composed `now @ rest.T`, which is four degrees away from
+`rest.T @ now` on a head turned forty. At rest the change is zero and the rig
+keeps the neck it was authored with, which is the point of having a rig.
+
+**A foot under a near-upright shin is flat.** There is no keypoint past the
+ankle either, so a foot rides its shin rigidly and points wherever the shin
+does - a lunge on pointed toes, a seated figure dangling. Where the shin is
+within 40 degrees of vertical the foot is taking weight, so it goes back to
+the pitch the rig authored while keeping the heading the leg gave it. Beyond
+that the leg is not standing on anything: a kneeling figure's shins point
+backwards and a lying one's sideways, and both keep the rig's own
+relationship. Gate it on the *keypoints*, not on `q`: the rig has not been
+slid onto them yet, so its own bone lengths put the knee elsewhere and its
+shin reads 11 degrees steeper than the pose asked for.
+
 **Twist is not observable from 18 keypoints.** Bone roll is tied to the body's
 rest orientation instead. Rolling a bone about its own axis must not move the
 joint it points at.
@@ -111,6 +143,13 @@ catalogue entry that repeats a basic name - "walking", "running" - is an
 *alias* for it, one `stance walking` command, so letting it overwrite points
 the name at itself and the first figure to walk takes the process down with a
 RecursionError.
+
+**`distance` is the gap to the object's near face.** A desk is 70 cm deep, so
+centring one 20 cm in front of a figure puts its top surface through the
+figure's thighs. The clearance is measured on the trunk - shoulders and hips
+plus the body's own depth - because the legs go *under* a table and the arms
+reach over it, and a silhouette that included a seated figure's knees would
+push every desk out of reach.
 
 **An object is anchored against the finished figure.** `apply_commands` holds
 every `place` until the rest of the list has run. "Sit down AND put a chair
@@ -237,6 +276,13 @@ solve an asset separately or it will drift from the body.
   with the best of the nine rather than against a fixed bar, because some
   poses have no good view - a cross-legged sit points its shins at the lens
   from everywhere - and a bar low enough to admit that one catches nothing.
+- Eighteen keypoints are a thin sample of a picture, so burial is also an
+  area test: a wall right in front covers most of the frame while leaving a
+  dozen keypoints technically unobscured, and a depth map of that is a slab.
+  A third of the *frame*, not a share of the figure's own area - scoring it
+  against the figure rejects a desk seen from the side, which is a fair
+  picture of someone at a desk with their legs behind it as in any photograph
+  from that angle, and the next view that reads is the back of their head.
 - A view that buries the figure is last in every case, never merely demoted:
   a buried figure is not a conditioning image at all, because the depth map is
   then a picture of the desk. A seated figure at a desk reads 99% from the
@@ -317,7 +363,9 @@ a build.
    the assertions but gains proper reporting and selection.
 3. Depth export is CPU rasterisation. Live depth would want the geometry on the
    GPU rather than the analytic rasteriser ported.
-4. Wrists and ankles are never rotated; there are no keypoints for them.
+4. Wrists are never rotated; there is no keypoint for them. Ankles are only
+   levelled, not aimed - a foot taking weight goes flat, but nothing turns it
+   in or out.
 5. The web prototype duplicates the maths in JavaScript. It is tested
    independently (`node web/test.mjs`) and will drift from the Python. Its
    preset table no longer can: it is generated from `preset_params` and

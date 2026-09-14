@@ -55,7 +55,8 @@ import props as props_module
 import wearables
 from openpose3d_editor import (
     BODY_PRESETS, DEFAULT_PRESET, KEYPOINT_NAMES, VERSION, Camera, Skeleton,
-    anatomy_depth_image, carry_chain, frame_rect, inside_polygon, pose_image,
+    anatomy_depth_image, carry_chain, frame_rect,
+    inside_polygon, pose_image,
     rigged_depth_image,
     preset_params, project_people, scene_to_dict, solid_quads, vadd, vcross,
     vdot, vlen, vmul, vnorm, vsub,
@@ -465,11 +466,11 @@ def anchor_point(skeleton, at, distance):
     hips = vmul(vadd(skeleton.points[INDEX["r_hip"]],
                      skeleton.points[INDEX["l_hip"]]), 0.5)
     flat = (hips[0], floor, hips[2])          # under the figure, on the floor
-    push = {"feet_forward": facing, "feet_back": vmul(facing, -1.0),
-            "feet_left": side, "feet_right": vmul(side, -1.0)}.get(where)
-    if push is not None:
-        offset = vmul(push, distance)
-        return (flat[0] + offset[0], floor, flat[2] + offset[2]), align, floor
+    # The push anchors return the spot under the figure; `_clear_of` slides
+    # the object out from there once its own size is known, because the gap
+    # that was asked for is to its near face, not to its centre.
+    if where in ("feet_forward", "feet_back", "feet_left", "feet_right"):
+        return flat, align, floor
     if where == "hips":
         return (hips[0], floor, hips[2]), align, floor
     if where == "hands":
@@ -481,6 +482,41 @@ def anchor_point(skeleton, at, distance):
         head = skeleton.points[INDEX["nose"]]
         return (head[0], head[1] + 16.0 + distance, head[2]), align, floor
     return flat, align, floor
+
+
+# Which way each pushed-away anchor sends the object, in the figure's frame.
+PUSH = {"in_front": (0.0, 0.0, 1.0), "behind": (0.0, 0.0, -1.0),
+        "left_of": (1.0, 0.0, 0.0), "right_of": (-1.0, 0.0, 0.0)}
+
+
+def _clear_of(skeleton, at, distance, position, box, yaw):
+    """Slide a pushed-away object out until it clears the figure's trunk.
+
+    `distance` has to mean the gap between the figure and the near face of the
+    object, not the offset of its centre: a desk is 70 cm deep, so centring one
+    20 cm in front of a figure puts its top surface through the figure's
+    thighs. The trunk is what must not be inside the furniture - the legs go
+    *under* a table and the arms reach over it - so the clearance is measured
+    on the shoulders and hips plus the body's own depth, and a silhouette that
+    includes a seated figure's knees would push every desk out of reach.
+    """
+    coefficients = PUSH.get(at)
+    if coefficients is None:
+        return position
+    side, _up, facing = body_frame(skeleton)
+    push = vnorm(vadd(vmul(side, coefficients[0]), vmul(facing, coefficients[2])))
+    trunk = max(vdot(vsub(skeleton.points[INDEX[name]], position), push)
+                for name in ("l_shoulder", "r_shoulder", "l_hip", "r_hip"))
+    body = skeleton.body
+    trunk += max(body[part][1] for part in ("chest", "waist", "pelvis"))
+    # the object's own half-extent along the same direction, turned as asked
+    half = vmul((box[0], 0.0, box[2]), 0.5)
+    turn = math.radians(yaw)
+    axes = ((math.cos(turn), 0.0, -math.sin(turn)),
+            (math.sin(turn), 0.0, math.cos(turn)))
+    reach = sum(abs(vdot(axis, push)) * h
+                for axis, h in zip(axes, (half[0], half[2])))
+    return vadd(position, vmul(push, trunk + distance + reach))
 
 
 def place_object(skeleton, shape, at="ground", distance=70.0, size=1.0,
@@ -496,6 +532,7 @@ def place_object(skeleton, shape, at="ground", distance=70.0, size=1.0,
     position, align, floor = anchor_point(skeleton, at, distance)
     w, h, d = props_module.default_size(shape)
     w, h, d = w * size, h * size, d * size
+    position = _clear_of(skeleton, at, distance, position, (w, h, d), yaw)
     if align == "seat":
         seat = INDEX["l_hip"] if at == "under_hips" else INDEX["l_ankle"]
         top = skeleton.points[seat][1] - (4.0 if at == "under_hips" else 0.0)
@@ -600,10 +637,30 @@ def apply_command(skeleton, command, props=None, depth=0, defer=None):
         direction = resolve_direction(skeleton, direction_name)
         if direction is None:
             return "unknown direction %r" % (direction_name,)
-        neck, nose = INDEX["neck"], INDEX["nose"]
-        length = vlen(vsub(skeleton.points[nose], skeleton.points[neck]))
-        skeleton.move_joint(nose, vadd(skeleton.points[neck],
-                                       vmul(direction, length)))
+        # Aim the GAZE, not the neck-to-nose line. The nose sits high on the
+        # head, so that line stands 74 degrees above horizontal at rest, and
+        # aiming *it* at "forward" swings the head 74 degrees - chin on the
+        # chest - while the gaze it was meant to set has barely moved.
+        # "forward_down" came out at 119 degrees and "down" at 164, which is
+        # what made half the catalogue look hunched. The gaze is the ear
+        # midpoint to the nose, which is level at rest, and the whole head
+        # turns about the neck, so no bone changes length.
+        neck = INDEX["neck"]
+        ear_mid = vmul(vadd(skeleton.points[INDEX["l_ear"]],
+                            skeleton.points[INDEX["r_ear"]]), 0.5)
+        gaze = vsub(skeleton.points[INDEX["nose"]], ear_mid)
+        if vlen(gaze) < 1e-6:
+            return "the head has no gaze to aim"
+        gaze = vnorm(gaze)
+        axis = vcross(gaze, direction)
+        angle = math.atan2(vlen(axis), vdot(gaze, direction))
+        if angle < 1e-9:
+            return None
+        if vlen(axis) < 1e-9:      # exactly behind: no minimal rotation
+            _side, up, _facing = body_frame(skeleton)
+            axis = up
+        skeleton.rotate_about_axis(skeleton.subtree(INDEX["nose"]),
+                                   skeleton.points[neck], vnorm(axis), angle)
         return None
 
     if op == "hide":
@@ -745,29 +802,63 @@ def build_scene(plan, view_w=900, view_h=700, aspect=512.0 / 768.0):
     return figures, props, camera, warnings
 
 
-def buried(figures, camera, props, limit=0.3):
-    """Is the figure hidden behind the objects from here?
+def buried(figures, camera, props, limit=0.3, rect=None, crowd=0.34):
+    """Is the figure lost behind the objects from here?
 
     A desk placed in front of a seated figure is in front of it from the
     figure's side of the room, and a camera that agrees renders a desk with a
     head over it. Counts the keypoints an object covers from nearer than they
     are; more than `limit` of them and the view is no good, however well it
     shows the pose.
+
+    Keypoints alone are not enough, because eighteen of them are a thin
+    sample of a picture: a wall placed right in front covers most of the frame
+    while leaving a dozen keypoints technically unobscured, and since a depth
+    map shows the nearest surface, the conditioning image is then a slab. So
+    `rect` also gets an area test - the share of the export rectangle taken by
+    objects standing in front of the figure. Sampled on a grid rather than
+    unioning the polygons, because the answer only has to be right to a
+    percent or two and the polygons overlap freely.
+
+    A third of the frame, not a share of the figure's own area. Scoring it
+    against the figure rejects a desk seen from the side - which is a fair
+    picture of someone at a desk, legs behind it as in any photograph from
+    that angle - and the next view that reads is the back of their head.
     """
     if not props:
         return False
     solids = solid_quads(props, camera)
     hidden = total = 0
+    depths = []
     for figure in figures:
         for i, point in enumerate(figure.points):
             if not figure.visible[i]:
                 continue
             total += 1
             sx, sy, depth = camera.project(point)
+            depths.append(depth)
             if any(near < depth and inside_polygon(poly, sx, sy)
                    for poly, near, _index, _picked in solids):
                 hidden += 1
-    return total > 0 and hidden > limit * total
+    if total > 0 and hidden > limit * total:
+        return True
+    if rect is None or not depths:
+        return False
+    depths.sort()
+    middle = depths[len(depths) // 2]
+    nearer = [poly for poly, near, _i, _p in solids if near < middle]
+    if not nearer:
+        return False
+    x0, y0, x1, y1 = rect
+    steps_x, steps_y = 40, 56
+    covered = 0
+    for row in range(steps_y):
+        py = y0 + (y1 - y0) * (row + 0.5) / steps_y
+        for col in range(steps_x):
+            px = x0 + (x1 - x0) * (col + 0.5) / steps_x
+            if any(inside_polygon(poly, px, py) for poly in nearer):
+                covered += 1
+    return covered > crowd * steps_x * steps_y
 
 
 def legible_view(figures, order=None, readable=0.8, props=(), rect=None):
@@ -838,7 +929,7 @@ def legible_view(figures, order=None, readable=0.8, props=(), rect=None):
         camera = Camera(900, 700)
         camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
         frame_scene(figures, camera, rect, props=props)
-        if not buried(figures, camera, props):
+        if not buried(figures, camera, props, rect=rect):
             clear.append(name)
 
     for name in order:
@@ -1836,14 +1927,31 @@ def _selftest():
             worst_miss = (name, miss)
         if scene and max(best_of_all[i] - best[i] for i in (0, 1)) > 0.2:
             gave_up.append(name)
+    del gave_up          # the catalogue no longer contains such a case
 
     check("the view chosen is near the best of the nine available",
           worst_miss[1] < 0.3,
           "worst: %s falls %.0f points short" % (worst_miss[0],
                                                  100.0 * worst_miss[1]))
-    check("and a view that buries the figure behind its own furniture is "
-          "given up even when it reads best", gave_up,
-          "%d stance(s), e.g. %s" % (len(gave_up), gave_up[:3]))
+    # A purpose-built case rather than one borrowed from the catalogue. It
+    # used to be a seated figure at a desk, which stopped burying itself the
+    # moment `place` started clearing the object of the trunk - so the check
+    # was passing on a bug rather than on the behaviour it names.
+    walled, wall = Skeleton(preset_params(DEFAULT_PRESET)), []
+    apply_commands(walled, [{"op": "stance", "name": "t_pose"},
+                            {"op": "place", "shape": "wall", "at": "in_front",
+                             "distance": 2.0}], wall)
+    front = Camera(900, 700)
+    frame_scene([walled], front, export, props=wall)
+    check("a wall right in front of the figure buries it from the front",
+          buried([walled], front, wall))
+    chosen = legible_view([walled], props=wall, rect=export)
+    picked = Camera(900, 700)
+    picked.yaw = math.radians(CAMERA_VIEWS[chosen][0])
+    picked.pitch = math.radians(CAMERA_VIEWS[chosen][1])
+    frame_scene([walled], picked, export, props=wall)
+    check("so the view chosen is not the front, however well it reads",
+          not buried([walled], picked, wall), "chose %s" % chosen)
     check("no stance is shown from a view that hides a limb",
           worst_bone[1] > 0.5,
           "worst: %s at %.0f%% of its length" % (worst_bone[0],
