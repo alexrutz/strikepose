@@ -59,6 +59,27 @@ maps them by hand:
 
 ### Where to get a body
 
+**Anny** (`naver/anny`) is the quickest, and `tools/make_bodies.py` drives it:
+
+    pip install anny
+    python3 tools/make_bodies.py bodies/
+    python3 everyday.py --render out/set --bodies bodies/
+
+It is the MakeHuman base mesh wrapped in a parametric shape space calibrated
+on WHO anthropometry, with MakeHuman's own bone names, so nothing here needs a
+roles file. Apache 2.0 code over CC0 assets. Three things it gives that
+building the same bodies in Blender does not: a pip install instead of Blender
+plus an add-on, so the set is reproducible anywhere; an `age` axis that is
+anthropometric rather than a slider - 0.0 is a 66 cm newborn, 0.3 a 130 cm
+nine-year-old - with `height` bisected onto an exact stature, so a preset that
+says 162 cm gets a body 162 cm tall; and nine skinning influences per vertex
+against four, which measures out as 8-9% of a limb's girth lost at a hard bend
+against 9-14%.
+
+What it does not give is a better-looking body: it is the same mesh, so the
+depth maps are the same depth maps. What improves is where the numbers come
+from and whether anyone can rebuild them.
+
 **MPFB2** (MakeHuman Plugin for Blender) is the one this is built around: the
 add-on is GPLv3, its bundled assets are CC0, and what you make with it is CC0,
 so it can be used commercially without conditions. The bone names its default

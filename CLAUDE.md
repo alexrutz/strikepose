@@ -327,6 +327,16 @@ solve an asset separately or it will drift from the body.
 - A model's joint array is longer than its parent array. SMPL-X returns 127
   joints and 55 parents; the rest are landmarks posed by skinning. Iterate over
   the parents.
+- Anny and MPFB2 build from the same MakeHuman assets and name the same
+  slider `gender`, and they run it the opposite way: Anny's 0.0 is male, MPFB2's
+  is female. Getting it backwards is silent - a complete, plausible body set
+  comes out with every sex inverted - so `tools/make_bodies.py` states the
+  convention as a measurement: at 0.0 the figure has 54 cm shoulders on a
+  190 cm frame, at 1.0 44.5 cm on 176.
+- Anny is Z-up and glTF is Y-up, and Anny's skinning carries nine influences
+  per vertex where glTF's first joint set carries four. Keep the four heaviest
+  and renormalise; the fifth weight on a vertex that has one is worth well
+  under a millimetre.
 - MakeHuman's base mesh carries helper geometry (skirt, tights, hair helper,
   joint cubes) as loose shells. It reads as clothing in a depth map. Delete
   helpers in MPFB2, or let the loader drop small shells.
