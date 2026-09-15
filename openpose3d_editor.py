@@ -73,12 +73,14 @@ from anatomy import (P_CALF, P_FOOT, P_FOREARM, P_HAND, P_HEAD, P_NECK,
                      sweep, torso_profile)
 from raster import (depth_buffer, depth_to_grey, inside_polygon, render_depth,
                     silhouette_quads, solid_quads)
-from exporting import (ASPECTS, ASPECT_NAMES, anatomy_depth_image,
-                       aspect_name, body_frame, frame_rect,
-                       frame_scene, parse_size, pose_body,
-                       pose_image, project_people, prop_groups,
-                       rigged_depth_image, rigged_keypoints,
-                       silhouette_points, size_for, to_camera_space)
+from exporting import (ASPECTS, ASPECT_NAMES, GROUND_EXTENT,
+                       anatomy_depth_image, aspect_name,
+                       body_frame, frame_rect, frame_scene,
+                       ground_level, ground_part, parse_size,
+                       pose_body, pose_image, project_people,
+                       prop_groups, rigged_depth_image,
+                       rigged_keypoints, silhouette_points,
+                       size_for, to_camera_space)
 from scenefile import (scene_from_dict, scene_load, scene_objects,
                        scene_to_dict)
 from randomize import (RANDOM_PARTS, randomize_figure, random_scene)

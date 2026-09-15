@@ -515,7 +515,8 @@ def build(name, preset, view=None, out_w=512, out_h=768):
     return pose_agent.build_scene(plan, aspect=out_w / float(out_h))
 
 
-def render(name, preset, out_w=512, out_h=768, view=None, mesh=None):
+def render(name, preset, out_w=512, out_h=768, view=None, mesh=None,
+           ground=True):
     """(pose image, depth image, warnings) for one pose on one body.
 
     The depth comes from rigged geometry: `mesh` if given, otherwise the body
@@ -525,7 +526,7 @@ def render(name, preset, out_w=512, out_h=768, view=None, mesh=None):
     figures, objects, camera, warnings = build(name, preset, view, out_w, out_h)
     pose, depth, _rect = pose_agent.render_scene(
         figures, camera, out_w, out_h, props=objects,
-        meshes=[mesh] if mesh is not None else None)
+        meshes=[mesh] if mesh is not None else None, ground=ground)
     return pose, depth, warnings
 
 
@@ -558,7 +559,8 @@ def contact_sheet(rows, cell_w, cell_h, labels=(), heading=""):
 
 
 def render_set(out_dir, poses=None, presets=None, out_w=512, out_h=768,
-               sheets=True, cell=(190, 285), quiet=False, bodies=None):
+               sheets=True, cell=(190, 285), quiet=False, bodies=None,
+               ground=True):
     """Write the matched pose/depth pair for every pose on every body.
 
     The pair is the deliverable: ControlNet wants the OpenPose PNG and the
@@ -582,7 +584,8 @@ def render_set(out_dir, poses=None, presets=None, out_w=512, out_h=768,
     for name in poses:
         for preset in presets:
             pose, depth, warnings = render(name, preset, out_w, out_h,
-                                           mesh=meshes.get(preset))
+                                           mesh=meshes.get(preset),
+                                           ground=ground)
             slug = "%s__%s" % (name, preset.lower().replace(", ", "_")
                                .replace(" ", "_"))
             pose.save(os.path.join(out_dir, slug + "_pose.png"))
@@ -713,11 +716,19 @@ def _selftest():
               "climbing_stairs", "carrying_box"]
     empty = []
     for name in sample:
-        pose, depth, warnings = render(name, "Female, average", 128, 192)
         import numpy as np
-        covered = float((np.asarray(depth) > 0).mean())
-        if not 0.02 < covered < 0.9 or warnings:
-            empty.append((name, round(covered, 3), warnings))
+        # Measured on the figure alone. With the ground in, a figure lying on
+        # the floor covers 93% of the frame and every one of those pixels is
+        # correct - so a ceiling on total coverage stopped asking "is there a
+        # person here" and started asking "is there a room here".
+        pose, bare, warnings = render(name, "Female, average", 128, 192,
+                                      ground=False)
+        _p, floored, _w = render(name, "Female, average", 128, 192)
+        covered = float((np.asarray(bare) > 0).mean())
+        with_floor = float((np.asarray(floored) > 0).mean())
+        if not 0.02 < covered < 0.9 or with_floor < covered or warnings:
+            empty.append((name, round(covered, 3), round(with_floor, 3),
+                          warnings))
     check("a sample renders to a depth map with a figure in it", not empty,
           "" if not empty else str(empty))
 
@@ -742,6 +753,8 @@ def main(argv=None):
     parser.add_argument("--size", default="512x768",
                         help="export size: 768x512, or a ratio like 16:9 "
                              "(default 512x768)")
+    parser.add_argument("--no-ground", action="store_true",
+                        help="leave the floor out of the depth maps")
     parser.add_argument("--bodies", metavar="DIR",
                         help="folder of rigged .glb bodies, one per preset, "
                              "named after it (female_curvy.glb). Found "
@@ -775,7 +788,7 @@ def main(argv=None):
     out_w, out_h = parse_size(args.size)
     index, trouble = render_set(args.render, poses or None, presets,
                                 out_w, out_h, sheets=not args.no_sheets,
-                                bodies=args.bodies)
+                                bodies=args.bodies, ground=not args.no_ground)
     print("\n%d images in %s" % (2 * len(index), args.render))
     for name, preset, warnings in trouble:
         print("  %s on %s: %s" % (name, preset, warnings))

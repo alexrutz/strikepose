@@ -144,7 +144,7 @@ def png(image):
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
 
 
-def render(figures, objects, camera, width, height):
+def render(figures, objects, camera, width, height, ground=True):
     """Rigged geometry, always. `render_scene` resolves the body set itself
     when the server was not started with one, and refuses rather than dropping
     to the built-in sweep."""
@@ -154,7 +154,7 @@ def render(figures, objects, camera, width, height):
         meshes = None                 # let the resolver find or refuse
     pose, depth, _rect = pose_agent.render_scene(
         figures, camera, width, height, VIEW_W, VIEW_H, props=objects,
-        meshes=meshes)
+        meshes=meshes, ground=ground)
     return pose, depth
 
 
@@ -214,7 +214,10 @@ def api_render(payload):
                                                              aspect)
     else:
         figures, objects, camera, warnings = scene_from_points(payload, aspect)
-    pose, depth = render(figures, objects, camera, width, height)
+    # The floor is on unless the client says otherwise: a depth map with
+    # nothing under the feet says the person is floating.
+    pose, depth = render(figures, objects, camera, width, height,
+                         ground=bool(payload.get("ground", True)))
     out = describe(figures, objects, camera, warnings)
     out["pose"] = png(pose)
     out["depth"] = png(depth)

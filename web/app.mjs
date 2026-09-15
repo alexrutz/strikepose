@@ -590,6 +590,8 @@ async function renderPair() {
       people: app.figures.map(plateOf),
       width: Math.max(64, Math.min(1536, parseInt($("outw").value, 10) || 512)),
       height: Math.max(64, Math.min(1536, parseInt($("outh").value, 10) || 768)),
+      // the room the figure stands in; off gives a figure with nothing under it
+      ground: $("ground") ? $("ground").checked : true,
       camera: {view: null},
     });
     show(reply.pose, reply.depth);

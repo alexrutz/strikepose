@@ -369,16 +369,32 @@ def depth_buffer(groups, width, height, blend=0.0):
 
 
 def render_depth(groups, width, height, blend=0.0, near=255, far=45,
-                 background=0):
+                 background=0, reference=None):
     """The same, as a ControlNet depth image. See `depth_buffer`."""
     return depth_to_grey(depth_buffer(groups, width, height, blend),
-                         near, far, background)
+                         near, far, background, reference)
 
 
-def depth_to_grey(zbuf, near=255, far=45, background=0):
+def depth_to_grey(zbuf, near=255, far=45, background=0, reference=None):
     """Normalise a z-buffer to the ControlNet convention: nearest brightest,
     background black. Shared by every depth source, so a scene rendered from
-    the anatomy, a rigged mesh or a mix of the two is graded the same way."""
+    the anatomy, a rigged mesh or a mix of the two is graded the same way.
+
+    `reference` switches the grading from linear depth to INVERSE depth, with
+    a virtual eye that many buffer units in front of the nearest surface. It
+    is what a ground plane needs, and it is also what the consumer expects:
+    ControlNet's depth models are trained on MiDaS, which predicts disparity -
+    inverse depth - not metric distance.
+
+    Linear is right for a figure on its own, where the whole scene is the 40 cm
+    from a chest to a back and the two gradings are within a grey level of each
+    other. It is ruinous as soon as there is a room: a floor receding six
+    metres behind the figure makes the span fifteen times the figure's own, so
+    a linear grade spends 6% of its range on the subject and the body comes out
+    as four flat shades. The same scene in inverse depth gives the figure a
+    fifth of the range and still lets the floor fall away smoothly, because
+    disparity compresses distance exactly where distance stops mattering.
+    """
     covered = np.isfinite(zbuf)
     height, width = zbuf.shape
     img = np.full((height, width), float(background))
@@ -388,7 +404,13 @@ def depth_to_grey(zbuf, near=255, far=45, background=0):
         span = hi - lo
         if span < 1e-6:                 # flat surface: it is all "nearest"
             img[covered] = near
-            span = None
-        if span is not None:
+        elif reference and reference > 0:
+            eye = float(reference)
+            # 1 at the nearest surface, falling towards 0 with distance
+            disparity = eye / (eye + (zbuf[covered] - lo))
+            floor_d = eye / (eye + span)
+            img[covered] = far + (near - far) * (disparity - floor_d) / (
+                1.0 - floor_d)
+        else:
             img[covered] = far + (near - far) * (hi - zbuf[covered]) / span
     return Image.fromarray(np.clip(img, 0, 255).astype("uint8"), mode="L")

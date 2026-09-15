@@ -395,6 +395,8 @@ def main(argv=None):
     parser.add_argument("--preset", help="hold the body fixed")
     parser.add_argument("--size", default="512x768",
                         help="768x512, or a ratio like 16:9")
+    parser.add_argument("--no-ground", action="store_true",
+                        help="leave the floor out of the depth maps")
     args = parser.parse_args(argv)
 
     if args.selftest:
@@ -421,7 +423,8 @@ def main(argv=None):
             figure.outfit = wearables.dress({}, look) or {}
         camera = frame_for(figures, view, width, height)
         pose, depth, _rect = pose_agent.render_scene(figures, camera,
-                                                     width, height)
+                                                     width, height,
+                                                     ground=not args.no_ground)
         stem = "%s/seed_%d" % (args.render, seed)
         pose.save(stem + "_pose.png")
         depth.save(stem + "_depth.png")

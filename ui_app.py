@@ -274,6 +274,10 @@ class EditorApp:
         self.out_h = tk.IntVar(value=768)
         self.aspect_name = tk.StringVar(
             value=exporting.aspect_name(512, 768) or CUSTOM_ASPECT)
+        # The room the figure is standing in. On by default: a depth map with
+        # nothing under the feet says the person is floating, and a generator
+        # conditioned on it puts them nowhere.
+        self.show_ground = tk.BooleanVar(value=True)
         self.status = tk.StringVar(
             value="3D OpenPose editor %s. Drag a joint to pose it." % VERSION)
 
@@ -736,6 +740,13 @@ class EditorApp:
             entry.bind("<Return>", lambda _e: self.sync_aspect())
             entry.bind("<FocusOut>", lambda _e: self.sync_aspect())
         buttons(body, [("Turn it on its side", self.flip_aspect)], cols=1)
+        tk.Checkbutton(body, text="Ground under the figure",
+                       variable=self.show_ground, bg=PANEL, fg=FG, anchor="w",
+                       selectcolor=CONTROL, activebackground=PANEL,
+                       activeforeground=FG, relief="flat", bd=0,
+                       highlightthickness=0, cursor="hand2",
+                       command=self.redraw,
+                       font=("TkDefaultFont", 9)).pack(fill="x", padx=10)
         tk.Checkbutton(body, text="Thicker lines when large",
                        variable=self.thick_lines, bg=PANEL, fg=FG, anchor="w",
                        selectcolor=CONTROL, activebackground=PANEL,
@@ -2103,7 +2114,8 @@ class EditorApp:
         jobs = [(figure, self.mesh_for(figure), self.asset_meshes(figure))
                 for figure in self.figures]
         return rigged_depth_image(jobs, self.camera, self.frame_rect(),
-                                  width, height, self.props)
+                                  width, height, self.props,
+                                  ground=self.show_ground.get())
 
     def smplx_depth_image(self, width, height):
         import smplx_backend
@@ -2148,7 +2160,8 @@ class EditorApp:
         if anatomy:
             return anatomy_depth_image(self.figures, self.camera,
                                        self.frame_rect(), width, height,
-                                       self._thickness(), self.props)
+                                       self._thickness(), self.props,
+                                       ground=self.show_ground.get())
         if self.use_mesh.get() and (self._rigged_mesh is not None
                                     or self.mesh_library):
             return self.mesh_depth_image(width, height)
@@ -2161,7 +2174,8 @@ class EditorApp:
                 for figure, mesh in zip(self.figures,
                                         bodies_lib.for_figures(self.figures))]
         return rigged_depth_image(jobs, self.camera, self.frame_rect(),
-                                  width, height, self.props)
+                                  width, height, self.props,
+                                  ground=self.show_ground.get())
 
     def _depth_or_complain(self, width, height):
         """The depth map, or a dialog saying what is missing and None.

@@ -1029,7 +1029,7 @@ def as_drawn(figures, meshes):
 
 def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
                  thickness=1.0, with_depth=True, props=(), meshes=None,
-                 anatomy=False):
+                 anatomy=False, ground=True):
     """(pose image, depth image or None, export rect) for a built scene.
 
     Objects reach the depth map only. The pose map is the OpenPose skeleton and
@@ -1056,7 +1056,7 @@ def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
     drawn = figures
     if with_depth and anatomy:
         depth = anatomy_depth_image(figures, camera, rect, out_w, out_h,
-                                    thickness, props)
+                                    thickness, props, ground=ground)
     elif with_depth:
         import bodies_lib
         if meshes is None:
@@ -1066,7 +1066,8 @@ def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
         if not jobs:
             raise bodies_lib.MissingBodies(
                 "Nothing to render the depth map from.\n\n" + bodies_lib.HOW)
-        depth = rigged_depth_image(jobs, camera, rect, out_w, out_h, props)
+        depth = rigged_depth_image(jobs, camera, rect, out_w, out_h, props,
+                                   ground=ground)
         drawn = as_drawn(figures, meshes)
     pose = pose_image(drawn, camera, rect, out_w, out_h)
     return pose, depth, rect
@@ -1592,7 +1593,8 @@ def run(args):
     out_w, out_h = args.width, args.height
     pose, depth, rect = render_scene(figures, camera, out_w, out_h,
                                      thickness=args.thickness,
-                                     with_depth=not args.no_depth, props=props)
+                                     with_depth=not args.no_depth, props=props,
+                                     ground=not args.no_ground)
     written = []
     pose_path = os.path.join(args.out, "pose.png")
     pose.save(pose_path)
@@ -1630,6 +1632,9 @@ def build_parser():
                              "--width/--height")
     parser.add_argument("--thickness", type=float, default=1.0,
                         help="body thickness for the depth map")
+    parser.add_argument("--no-ground", action="store_true",
+                        help="leave the floor out of the depth map; the "
+                             "figure then reads as floating")
     parser.add_argument("--no-depth", action="store_true",
                         help="pose image only")
     parser.add_argument("--backend", default="auto",
@@ -1961,12 +1966,60 @@ def _selftest():
     check("the pose map describes the mesh beside it",
           drawn[0].points != figures[0].points,
           "identical, so the rig's own keypoints are not reaching the PNG")
-    lit = render_scene(figures, camera, 128, 192, props=scene)[1]
-    empty = render_scene(figures, camera, 128, 192, props=[])[1]
+    lit = render_scene(figures, camera, 128, 192, props=scene, ground=False)[1]
+    empty = render_scene(figures, camera, 128, 192, props=[], ground=False)[1]
     covered = (sum(1 for v in lit.tobytes() if v),
                sum(1 for v in empty.tobytes() if v))
     check("but does reach the depth map", covered[0] > covered[1] * 1.5,
           "%d px vs %d" % covered)
+
+    # -- the ground -------------------------------------------------------
+    #
+    # The floor is what says where in the room the figure is standing. It has
+    # to obey the same rule every object does - depth map only - and two more
+    # of its own, because it is not a placed object: it must not take part in
+    # the framing, and it must not count as something burying the figure. It
+    # covers most of the lower frame by design, so a floor that counted as an
+    # obstruction would reject every camera with any pitch at all, which is
+    # every camera it is any use to.
+    standing, _p, cam, _w = build_scene({"figures": [
+        {"preset": "Male, average", "commands": []}],
+        "camera": "high_three_quarter"})
+    floored = render_scene(standing, cam, 160, 240, ground=True)
+    floating = render_scene(standing, cam, 160, 240, ground=False)
+    check("the ground never reaches the pose map",
+          floored[0].tobytes() == floating[0].tobytes())
+    on_floor = sum(1 for v in floored[1].tobytes() if v)
+    in_air = sum(1 for v in floating[1].tobytes() if v)
+    check("but fills the depth map under the figure",
+          on_floor > in_air * 2.0, "%d px against %d" % (on_floor, in_air))
+    # A gradient, not a flat slab: the whole point is that it says how far
+    # away things are. Measured down the middle column, below the feet.
+    import numpy as _np
+    grey = _np.asarray(floored[1], float)
+    column = grey[:, grey.shape[1] // 2]
+    lit_rows = _np.nonzero(column)[0]
+    band = column[lit_rows.min():lit_rows.max() + 1]
+    check("and the floor recedes rather than sitting flat",
+          band.max() - band.min() > 60.0,
+          "%.0f grey levels down the middle" % (band.max() - band.min()))
+    # The figure keeps its own modelling. A linear grade over a floor that
+    # runs metres back spends the range on the room; inverse depth - which is
+    # what MiDaS predicts and what ControlNet was trained on - leaves the
+    # subject a usable spread.
+    body_rows = _np.asarray(floating[1], float)
+    lit = body_rows > 0
+    check("and the figure is still modelled, not a flat cut-out",
+          (grey[lit].max() - grey[lit].min()) > 60.0,
+          "%.0f grey levels on the body" % (grey[lit].max() - grey[lit].min()))
+
+    before = (cam.zoom, tuple(cam.target))
+    frame_scene(standing, cam, frame_rect(900, 700, 160 / 240.0))
+    check("the ground is not a prop, so it never moves the framing",
+          (cam.zoom, tuple(cam.target)) == before,
+          "%s against %s" % ((cam.zoom, tuple(cam.target)), before))
+    check("and never counts as burying the figure",
+          not buried(standing, cam, [], rect=frame_rect(900, 700, 160 / 240.0)))
 
     # a backdrop must not shrink the subject out of the frame
     tall = build_scene({"figures": [{"commands": []}]})[2].zoom

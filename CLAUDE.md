@@ -516,6 +516,57 @@ lowest control on a 31-control tab as 107 pixels down. Position against the
 scrolling canvas, plus wherever the canvas is scrolled to, is the only thing
 that answers the question.
 
+**The figure stands on something, and the floor is not a prop.** A depth map
+with nothing under the feet says the person is floating, and a generator
+conditioned on it puts them nowhere. `exporting.ground_part` puts a ground
+plane in every depth export, on by default.
+
+It is deliberately NOT a placed object. A prop takes part in the framing and
+in the buried-figure test; the ground must do neither. Framing to hold a
+24-metre slab would shrink the figure to nothing, and a floor covers most of
+the lower frame by design, so counting it as something in the way would reject
+every camera with any pitch - which is every camera a floor is any use to. It
+is passed to the depth paths separately, which is also what keeps it out of
+the pose map for free.
+
+**The floor starts at the figure and runs AWAY from the camera.** A real floor
+carries on towards the lens, but in a photograph that stretch is below the
+bottom of the frame - the frame is fitted to the person, and their feet are
+its lower edge. An orthographic camera has no "below the frame" to hide it in:
+a slab centred on the scene puts its near edge twelve metres in front of the
+figure, that edge becomes the nearest thing in the buffer and takes the whole
+bright end of the range, and the figure comes out a black silhouette on every
+level view. From a low angle the same slab covered the figure completely.
+
+**A level orthographic camera cannot show a floor, only where it is.** A
+horizontal plane seen at pitch zero is exactly edge-on, so all that is left of
+it is its front face. At twelve centimetres thick that is a bright bar across
+the picture that reads as a step; at three it is a ground line, which is the
+most a level view can honestly say. Pitch is what makes a floor carry depth,
+and `high_three_quarter`, `bird` and `over_shoulder` are where it earns its
+keep.
+
+**A room is graded in inverse depth, a figure on its own in linear.**
+ControlNet's depth models are trained on MiDaS, which predicts disparity -
+inverse depth - not metric distance, so `depth_to_grey` takes a `reference`
+and grades that way whenever there is a ground plane. Linear is fine for a
+figure alone, where the whole scene is the 40 cm from a chest to a back and
+the two gradings are within a grey level of each other. It is ruinous with a
+room: on a standing figure from a high three-quarter, where the floor reaches
+three and a half metres back, a linear grade gives the body 61 grey levels of
+210 and the floor 164.
+
+`GROUND_REFERENCE` is what splits the range between the subject and the room,
+and since MiDaS disparity is scale- and shift-invariant there is no canonical
+value to copy - it is a choice. One body height, so brightness halves over one
+figure's height of distance behind the figure: 114 levels to the body and 116
+to the floor. At 420 cm it was 91 and 138 and the body flattened towards a
+white cut-out; much nearer and the floor falls to black within a metre and
+stops saying how far back anything is.
+
+The figure and the floor merge where they touch, and that is correct - the
+feet are at the floor's depth. Real depth maps do the same.
+
 **The export shape is one table, and changing it re-frames.** `exporting.ASPECTS`
 names the ratios worth having and `parse_size` accepts either spelling, so the
 editor menu, `--size 16:9` on every CLI and the phone's dropdown all read the

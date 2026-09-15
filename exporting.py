@@ -27,7 +27,7 @@ from anthro import build_rest_points
 from posemap import render_openpose, resolution_stickwidth
 from raster import depth_buffer, depth_to_grey, render_depth
 from skeleton import KEYPOINT_NAMES, Skeleton
-from vecmath import vadd, vdot, vmul, vnorm, vsub
+from vecmath import vadd, vcross, vdot, vlen, vmul, vnorm, vsub
 
 INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
 
@@ -156,8 +156,105 @@ def prop_groups(props, camera, rect, out_w):
             for prop in props]
 
 
+# How far the ground reaches, in centimetres, and how thick the slab is. Big
+# enough that its edges are never in shot at any framing the editor allows -
+# an edge reads as a platform the figure is standing on, which is a different
+# picture - and no bigger, because every centimetre of it is solved per pixel.
+GROUND_EXTENT = 2400.0
+
+# Thin on purpose. An orthographic camera at pitch zero sees a horizontal
+# plane exactly edge-on, so all that is left of the floor there is its front
+# face - and at twelve centimetres that is a bright bar across the picture
+# that reads as a step the figure is standing on. At three it is a ground
+# line, which is the most a level view can honestly say: where the floor is,
+# not how it recedes. Pitch is what makes a floor carry depth, and the views
+# that have some - high_three_quarter, bird, over_shoulder - are where this
+# earns its keep.
+GROUND_THICK = 3.0
+
+# The virtual eye for the inverse-depth grading, in centimetres in front of
+# the nearest surface. MiDaS disparity is scale- and shift-invariant, so there
+# is no canonical value to copy and this is a choice: one body height, which
+# makes the rule "brightness halves over one figure's height of distance
+# behind the figure" - a scale the picture already contains.
+#
+# It is what splits the range between the subject and the room, and the split
+# is what the number is for. Measured on a standing figure from a
+# high three-quarter, where the floor reaches three and a half metres back: a
+# linear grade gives the body 61 grey levels of 210 and the floor 164; an eye
+# at 420 cm gives 91 and 138; at 180 it is 114 and 116, which is about even.
+# Further and the body flattens towards a white cut-out, nearer and the floor
+# falls to black within a metre and stops saying how far back anything is.
+GROUND_REFERENCE = 180.0
+
+
+def ground_level(figures):
+    """The y the figures are standing on: the lowest point any of them has.
+
+    A figure's floor is its own lowest foot rather than a plane in the scene -
+    nothing moves the pelvis, so a squat is a figure with its feet closer to
+    its hips and not a figure lower down. Measured on the silhouette, because
+    the sole is 8 cm past the ankle keypoint and a floor drawn at the ankle
+    cuts through both feet.
+    """
+    points = [p for figure in figures for p in silhouette_points(figure)]
+    if not points:
+        return None
+    return min(p[1] for p in points)
+
+
+def ground_part(figures, camera, rect, out_w, level=None):
+    """The ground, as one camera-space part ready for the depth rasteriser.
+
+    Not a prop. A prop is something somebody placed, and it takes part in the
+    framing and in the buried-figure test; the ground is the room the figure
+    is in, and it must do neither. Framing to hold a 24-metre slab would
+    shrink the figure to nothing, and a floor covers the whole lower frame by
+    design, so counting it as something in the way would reject every camera
+    with any pitch at all - which is every camera the floor is any use to.
+    """
+    level = ground_level(figures) if level is None else level
+    if level is None:
+        return None
+    points = [p for figure in figures for p in silhouette_points(figure)]
+    _right, _up, fwd = camera.basis()
+
+    # The floor starts at the figure and runs AWAY from the camera. It is not
+    # a plane centred under the scene, and the difference is the whole thing
+    # working or not.
+    #
+    # A real floor does of course carry on towards the lens, but in a
+    # photograph that stretch is below the bottom of the frame - the frame is
+    # fitted to the person, and the person's feet are its lower edge. This
+    # camera is orthographic, so there is no "below the frame" to hide it in:
+    # a slab centred on the scene puts its near edge twelve metres in front of
+    # the figure, which becomes the nearest thing in the buffer and takes the
+    # whole bright end of the range. The figure came out a black silhouette on
+    # every level view, and from a low angle the slab covered it completely.
+    back = (fwd[0], 0.0, fwd[2])
+    if vlen(back) < 1e-6:        # straight down or straight up: any heading
+        back = (0.0, 0.0, 1.0)   # will do, the floor fills the frame anyway
+    back = vnorm(back)
+    side = vnorm(vcross(back, (0.0, 1.0, 0.0)))
+    near = min(vdot(p, back) for p in points)
+    across = sum(vdot(p, side) for p in points) / len(points)
+
+    half = GROUND_EXTENT / 2.0
+    centre = vadd(vmul(side, across),
+                  vadd(vmul(back, near + half),
+                       (0.0, level - GROUND_THICK / 2.0, 0.0)))
+    part = [("box", centre, (side, (0.0, 1.0, 0.0), back),
+             (half, GROUND_THICK / 2.0, half))]
+    return to_camera_space(part, camera, rect, out_w)
+
+
+def ground_reference(camera, rect, out_w):
+    """`GROUND_REFERENCE` in the buffer's own units, which are pixels."""
+    return GROUND_REFERENCE * camera.zoom * out_w / (rect[2] - rect[0])
+
+
 def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
-                        props=()):
+                        props=(), ground=True):
     """Depth map from the built-in anatomy, framed to match `pose_image`.
 
     The always-available depth source: no model files, no torch, numpy and
@@ -173,9 +270,16 @@ def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
                for part in body_parts(figure, thickness)]
               for figure in figures]
     groups += prop_groups(props, camera, rect, out_w)
+    floor = ground_part(figures, camera, rect, out_w) if ground else None
+    if floor is not None:
+        # its own group: a floor blended into the figure would fillet the feet
+        # into it, and a person is not moulded to the ground they stand on
+        groups.append([floor])
     if not groups:
         groups = [[]]
-    return render_depth(groups, out_w, out_h, blend=2.0 * k)
+    return render_depth(groups, out_w, out_h, blend=2.0 * k,
+                        reference=(ground_reference(camera, rect, out_w)
+                                   if floor is not None else None))
 
 
 def pose_body(figure, mesh):
@@ -228,7 +332,8 @@ def rigged_keypoints(jobs):
     return out
 
 
-def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
+def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=(),
+                       ground=True):
     """Depth map from posed rigged meshes, framed to match `pose_image`.
 
     `jobs` is a list of (figure, mesh, assets): the editor supplies what it has
@@ -292,12 +397,18 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
     # and mixing the two is worse than either, because the eye reads the join.
     # A slot the garment library has nothing for is simply not worn here;
     # `garments_lib.describe()` says which those are.
-    if len(props):
+    floor = ground_part([f for f, _m, _a in jobs], camera, rect, out_w) \
+        if ground else None
+    solids = list(prop_groups(props, camera, rect, out_w))
+    if floor is not None:
+        solids.append([floor])
+    if solids:
         # the triangle rasteriser and the analytic one write the same units, so
         # the objects simply join the buffer and the nearer surface wins
-        np.minimum(zbuf, depth_buffer(prop_groups(props, camera, rect, out_w),
-                                      out_w, out_h), out=zbuf)
-    return depth_to_grey(zbuf)
+        np.minimum(zbuf, depth_buffer(solids, out_w, out_h), out=zbuf)
+    return depth_to_grey(zbuf,
+                         reference=(ground_reference(camera, rect, out_w)
+                                    if floor is not None else None))
 
 
 def body_frame(skeleton):

@@ -244,6 +244,28 @@ accepted. A preset with no file is a refusal naming the command that builds
 it, never a quiet fall back to the sweep: the PNG would still appear and
 nothing would say it was a mannequin.
 
+## The ground the figure stands on
+
+Every depth map has a floor in it. Without one the figure is a cut-out against
+black, which tells the generator nothing about where in a room the person is -
+and a figure with nothing under its feet reads as floating.
+
+The floor is the ground the figures are actually standing on: it sits at the
+lowest point any of them reaches, so it fits a crouch, a child and a figure
+lying down without being told. Turn it off with the **Ground under the figure**
+box on the Export tab, or `--no-ground` on any of the command lines.
+
+What it can show depends on the camera. A horizontal plane seen from a level
+camera is exactly edge-on, so on `front`, `side` and the other pitch-zero
+views all you get is a ground line at the feet - which is still worth having,
+since it says where the floor is. A view with some pitch in it -
+`high_three_quarter`, `bird`, `over_shoulder` - shows the floor receding, and
+that is what carries the distance.
+
+The grading follows MiDaS, which is what ControlNet's depth models were
+trained on: inverse depth, so the subject keeps its modelling while the room
+falls away behind it.
+
 ## The export shape
 
 The **Export** tab picks the shape first and the pixels second: 2:3 and 3:4
