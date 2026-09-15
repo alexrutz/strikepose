@@ -2,6 +2,7 @@ import os, sys, math
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tkinter as tk
 from openpose3d_editor import EditorApp, KEYPOINT_NAMES, LIMB_SEQ, vlen, vsub
+from ui_app import TAB_ORDER
 
 root = tk.Tk(); root.geometry("1180x800")
 app = EditorApp(root)
@@ -52,5 +53,56 @@ pts = app.export_points(512, 768)
 print("export x range", round(min(p[0] for p in pts)), round(max(p[0] for p in pts)))
 print("export y range", round(min(p[1] for p in pts)), round(max(p[1] for p in pts)))
 app.canvas.postscript(file="/dev/null")
+
+# ---- the randomizer, through the panel rather than through its own module
+#
+# The module's selftest proves the maths; this proves the button is wired to
+# it - that a seed typed into the box is the seed used, that undo takes the
+# whole thing back, and above all that a pose arrived at by dice still cannot
+# resize a bone, which is the one guarantee the editor makes about every
+# other way of moving a joint.
+def bone_lengths():
+    return {c: vlen(vsub(app.skeleton.points[c], app.skeleton.points[p]))
+            for p, c in LIMB_SEQ}
+
+rest_points, rest_lengths = list(app.skeleton.points), bone_lengths()
+app.random_seed.set("4242")
+app.randomize_pose()
+root.update()
+moved = max(vlen(vsub(a, b))
+            for a, b in zip(rest_points, app.skeleton.points))
+stretched = max(abs(rest_lengths[k] - v) for k, v in bone_lengths().items())
+print("randomize moved a joint %.1f cm, stretched a bone %.2e cm"
+      % (moved, stretched))
+assert moved > 1.0, "the randomize button did nothing"
+assert stretched < 1e-9, "randomizing resized a bone by %g cm" % stretched
+assert "4242" in app.random_status.get(), app.random_status.get()
+scrambled = list(app.skeleton.points)
+app.undo()
+root.update()
+assert max(vlen(vsub(a, b))
+           for a, b in zip(rest_points, app.skeleton.points)) < 1e-9, \
+    "undo did not take the random pose back"
+app.random_seed.set("4242")
+app.randomize_pose()
+root.update()
+assert max(vlen(vsub(a, b))
+           for a, b in zip(scrambled, app.skeleton.points)) < 1e-9, \
+    "the same seed gave a different pose"
+for var in app.random_parts.values():
+    var.set(False)
+app.randomize_pose()
+assert "Nothing ticked" in app.random_status.get(), app.random_status.get()
+print("randomizer: seeded, reproducible, undoable, no bone resized")
+
+# ---- the panel's tabs
+for name in TAB_ORDER:
+    app.show_tab(name)
+    root.update()
+assert app.active_tab.get() == TAB_ORDER[-1]
+app.next_tab(1)
+assert app.active_tab.get() == TAB_ORDER[0], "Ctrl+Tab did not wrap"
+print("tabs: all four raise, and cycling wraps")
+
 print("OK no exceptions")
 root.destroy()

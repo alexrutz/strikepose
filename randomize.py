@@ -264,6 +264,28 @@ def random_scene(parts=None, amount=0.6, seed=None, count=1, preset=None):
     return figures, outfits, view, seed
 
 
+
+def frame_for(figures, view=None, out_w=512, out_h=768, view_w=900, view_h=700):
+    """A camera framing these figures, built exactly as `build_scene` builds
+    one: same view table, same export rectangle, same framing pass. Written
+    out rather than borrowed because a randomizer that framed its own way
+    would be previewing a picture the export does not produce - which is the
+    mistake the phone made and the suite now pins.
+    """
+    import math
+    import pose_agent
+    from camera import Camera
+
+    camera = Camera(view_w, view_h)
+    export = pose_agent.frame_rect(view_w, view_h, float(out_w) / out_h)
+    if view is None or view not in pose_agent.CAMERA_VIEWS:
+        view = pose_agent.legible_view(figures, rect=export)
+    yaw, pitch = pose_agent.CAMERA_VIEWS[view]
+    camera.yaw, camera.pitch = math.radians(yaw), math.radians(pitch)
+    pose_agent.frame_scene(figures, camera, export)
+    return camera
+
+
 # ---------------------------------------------------------------------------
 
 def describe():
@@ -395,8 +417,7 @@ def main(argv=None):
         for figure, look in zip(figures, outfits):
             import wearables
             figure.outfit = wearables.dress({}, look) or {}
-        camera = pose_agent.camera_for(figures, view) if view else \
-            pose_agent.legible_view(figures, [])
+        camera = frame_for(figures, view, width, height)
         pose, depth, _rect = pose_agent.render_scene(figures, camera,
                                                      width, height)
         stem = "%s/seed_%d" % (args.render, seed)

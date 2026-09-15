@@ -15,6 +15,7 @@ import io
 import json
 import math
 import os
+import random
 import sys
 import time
 from copy import deepcopy
@@ -43,10 +44,12 @@ from anthro import (ANSUR, BODY_PRESETS, DEFAULT_PRESET, REST_POSE,
                     build_rest_points, derive_proportions, merge_body,
                     preset_params)
 from camera import Camera
-from exporting import (anatomy_depth_image, frame_rect, pose_body, pose_image,
-                       project_people, prop_groups, rigged_depth_image,
+from exporting import (anatomy_depth_image, frame_rect, frame_scene,
+                       pose_body, pose_image, project_people,
+                       prop_groups, rigged_depth_image,
                        rigged_keypoints, to_camera_space)
 from posemap import render_openpose, resolution_stickwidth
+import randomize
 from raster import (depth_to_grey, inside_polygon, render_depth,
                     silhouette_quads, solid_quads)
 from scenefile import (scene_from_dict, scene_load, scene_objects,
@@ -71,6 +74,34 @@ MUTED = "#82828f"
 ACCENT = "#7aa2ff"
 PICK_RADIUS = 14.0
 
+# The panel's tabs, and which section lives on each. Grouped by what you are
+# doing rather than by what the code calls them: everything that changes the
+# POSE is on one tab, everything about the FIGURE on the next, the room it
+# stands in on SCENE, and the two conditioning images on EXPORT.
+TAB_ORDER = ("Pose", "Figure", "Scene", "Export")
+
+# Wide enough for a standing figure to read at a glance, narrow enough that
+# the main view still gets the room the export frame needs. Two columns: at
+# one column of five the thumbnails were a third of the height they had room
+# for and most of the window was still black.
+ORTHO_WIDTH = 296
+ORTHO_COLUMNS = 2
+
+SECTION_TABS = {
+    "Prompt": "Pose",
+    "Randomize": "Pose",
+    "Edit": "Pose",
+    "Turn figure": "Pose",
+    "Body": "Figure",
+    "Hair and clothes": "Figure",
+    "Scene": "Scene",
+    "Objects": "Scene",
+    "View": "Scene",
+    "Export": "Export",
+    "Depth source": "Export",
+    "Keys": "Export",
+}
+
 # Guide circles drawn while dragging: the sphere of reach sliced by the three
 # world planes through the parent joint. Named by the plane, coloured by the
 # axis perpendicular to it.
@@ -93,6 +124,8 @@ HELP = [
     "< >  tip about the hinge axis",
     "Double click  flip a limb front/back",
     "O  front/left/top + two 3/4 views",
+    "X  randomize   Shift+X  again, new seed",
+    "Ctrl+Tab  next panel tab",
     "Tab  next person   [ ] ; ' , .  turn",
     "0  frame everyone in the export",
     "1 2 3 4 5 6  front back right left top bottom",
@@ -170,6 +203,15 @@ class EditorApp:
         self.prompt_status = tk.StringVar(
             value="Describe a pose and press Enter. Needs a local model "
                   "running; falls back to keywords without one.")
+        self.random_parts = {
+            part: tk.BooleanVar(value=part in randomize.DEFAULT_PARTS)
+            for part in randomize.PART_ORDER}
+        self.random_amount = tk.DoubleVar(value=0.55)
+        self.random_seed = tk.StringVar(value="")
+        self.random_status = tk.StringVar(
+            value="Edge cases a catalogue never reaches. 1.0 is a "
+                  "contortionist. A seed repeats one exactly, so an odd "
+                  "figure can be reported.")
         self.figures = [Skeleton(preset_params(DEFAULT_PRESET))]
         self.active = 0
         self.figure_label = tk.StringVar(value="Person 1 of 1")
@@ -287,20 +329,19 @@ class EditorApp:
         self.set_active((self.active + 1) % len(self.figures))
 
     def frame_all(self):
-        """Pan and zoom so every figure sits inside the export frame."""
-        right, up, _ = self.camera.basis()
-        points = [p for f in self.figures for p in f.points]
-        across = [vdot(vsub(p, self.camera.target), right) for p in points]
-        along = [vdot(vsub(p, self.camera.target), up) for p in points]
-        cx = (min(across) + max(across)) / 2.0
-        cy = (min(along) + max(along)) / 2.0
-        self.camera.target = vadd(self.camera.target,
-                                  vadd(vmul(right, cx), vmul(up, cy)))
-        x0, y0, x1, y1 = self.frame_rect()
-        wide = max(1.0, max(across) - min(across)) * 1.18   # margin for flesh
-        tall = max(1.0, max(along) - min(along)) * 1.12
-        self.camera.zoom = max(0.3, min(40.0, min((x1 - x0) / wide,
-                                                  (y1 - y0) / tall)))
+        """Pan and zoom so every figure sits inside the export frame.
+
+        `exporting.frame_scene`, the very call a headless export makes, rather
+        than a second fit of its own. The editor used to have one, framing on
+        the eighteen keypoints with a flat 18% margin, and it cropped the
+        crown and the feet off a standing figure at rest - a hand reaches
+        17 cm past the wrist, a sole 8 cm past the ankle and the crown 14 cm
+        past the nose, and none of them is a keypoint. Two framings also meant
+        the viewport could disagree with the PNG about what was in shot, which
+        is the one thing this rectangle exists to promise.
+        """
+        frame_scene(self.figures, self.camera, self.frame_rect(),
+                    props=self.props)
         self.redraw()
         self.status.set("Framed %d %s." % (
             len(self.figures), "person" if len(self.figures) == 1 else "people"))
@@ -341,9 +382,11 @@ class EditorApp:
         self._sections = {}
         self._toggle_vars = {}
 
-        column = tk.Frame(self.root, bg=PANEL, width=262)
+        column = tk.Frame(self.root, bg=PANEL, width=268)
         column.pack(side="right", fill="y")
         column.pack_propagate(False)
+        self.tab_strip = tk.Frame(column, bg=PANEL)
+        self.tab_strip.pack(side="top", fill="x")
         self.panel_canvas = tk.Canvas(column, bg=PANEL, highlightthickness=0, bd=0)
         bar = tk.Scrollbar(column, orient="vertical", bg=PANEL,
                            troughcolor=PANEL, activebackground=EDGE,
@@ -361,23 +404,49 @@ class EditorApp:
             lambda e: self.panel_canvas.itemconfigure(window, width=e.width))
         self.panel = panel
 
+        # One tab's worth of sections at a time. Twelve collapsible groups in
+        # one column is a list to scroll past and hunt through even when every
+        # one of them is folded, and folding is not free either: the thing you
+        # want is three clicks away and you have to remember which heading it
+        # lives under. Four tabs of three or four sections each fit a laptop
+        # screen with nothing hidden and nothing to scroll.
+        self._tabs = {}
+        self._tab_buttons = {}
+        self.active_tab = tk.StringVar(value=TAB_ORDER[0])
+        tabs = tk.Frame(self.tab_strip, bg=PANEL)
+        tabs.pack(fill="x")
+        for name in TAB_ORDER:
+            holder = tk.Frame(panel, bg=PANEL)
+            self._tabs[name] = holder
+            button = tk.Label(tabs, text=name.upper(), bg=PANEL, fg=MUTED,
+                              cursor="hand2", pady=6,
+                              font=("TkDefaultFont", 8, "bold"))
+            button.pack(side="left", fill="x", expand=True)
+            button.bind("<Button-1>", lambda _e, n=name: self.show_tab(n))
+            self._tab_buttons[name] = button
+        tk.Frame(self.tab_strip, bg=EDGE, height=1).pack(fill="x")
+
         self.canvas = tk.Canvas(self.root, bg=BG, highlightthickness=0,
                                 width=900, height=760)
 
         # ---- small widget vocabulary -------------------------------------
-        def section(title, opened=True):
-            """A collapsible group. Everything folds, so the panel is a list of
-            headings until you open what you need instead of one long column
-            that has to be scrolled past."""
-            head = tk.Frame(panel, bg=PANEL, cursor="hand2")
+        def section(title, opened=True, tab=None):
+            """A collapsible group inside one tab.
+
+            Everything still folds - a tab holds three or four of these and the
+            ones you are not using stay shut - but which tab it lives on is
+            what keeps the column short enough to see all at once.
+            """
+            home = self._tabs[tab or SECTION_TABS.get(title, TAB_ORDER[0])]
+            head = tk.Frame(home, bg=PANEL, cursor="hand2")
             head.pack(fill="x", pady=(9, 0))
-            tk.Frame(panel, bg=EDGE, height=1).pack(fill="x", padx=12)
+            tk.Frame(home, bg=EDGE, height=1).pack(fill="x", padx=12)
             chevron = tk.Label(head, text="", bg=PANEL, fg=MUTED,
                                font=("TkDefaultFont", 7))
             chevron.pack(side="right", padx=(0, 14))
             tk.Label(head, text=title.upper(), bg=PANEL, fg=MUTED, anchor="w",
                      font=("TkDefaultFont", 8, "bold")).pack(side="left", padx=14)
-            body = tk.Frame(panel, bg=PANEL)
+            body = tk.Frame(home, bg=PANEL)
             state = {"open": True}
 
             def flip(_event=None):
@@ -458,6 +527,45 @@ class EditorApp:
         field(body, "Model host", self.prompt_host, width=18)
         field(body, "Model", self.prompt_model, width=18)
         tk.Label(body, textvariable=self.prompt_status, bg=PANEL, fg=MUTED,
+                 anchor="w", justify="left", wraplength=210,
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
+
+        # ---- randomize ----------------------------------------------------
+        #
+        # Selectable because the whole point is isolating a case. "The depth
+        # map goes wrong when an arm comes round the back" is a hypothesis you
+        # test by randomizing arms and nothing else, forty times; a button that
+        # scrambles everything at once gives you forty pictures and no answer.
+        body = section("Randomize", opened=True)
+        grid = tk.Frame(body, bg=PANEL)
+        grid.pack(fill="x", padx=10, pady=(0, 2))
+        for i, part in enumerate(randomize.PART_ORDER):
+            var = self.random_parts[part]
+            tk.Checkbutton(
+                grid, text=part.title(), variable=var, bg=PANEL, fg=FG,
+                anchor="w", selectcolor=CONTROL, activebackground=PANEL,
+                activeforeground=FG, relief="flat", bd=0, highlightthickness=0,
+                cursor="hand2", pady=0, font=("TkDefaultFont", 8)
+            ).grid(row=i // 2, column=i % 2, sticky="ew")
+        for c in (0, 1):
+            grid.columnconfigure(c, weight=1, uniform="rnd")
+        tk.Label(body, text="How far from rest", bg=PANEL, fg=MUTED,
+                 anchor="w",
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(3, 0))
+        # A tk Scale paints its handle in `bg` and its groove in `troughcolor`,
+        # so a slider given the panel's own background has an invisible
+        # handle: all you see is the number floating over an empty strip.
+        tk.Scale(body, from_=0.0, to=1.2, resolution=0.05, orient="horizontal",
+                 variable=self.random_amount, bg=CONTROL, fg=FG,
+                 troughcolor=BG, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, relief="flat",
+                 sliderrelief="flat", showvalue=True, sliderlength=20,
+                 width=10, font=("TkDefaultFont", 7)).pack(fill="x", padx=12,
+                                                           pady=(0, 2))
+        field(body, "Seed", self.random_seed, width=10)
+        buttons(body, [("Randomize (X)", self.randomize_pose),
+                       ("Again (Shift+X)", self.randomize_again)])
+        tk.Label(body, textvariable=self.random_status, bg=PANEL, fg=MUTED,
                  anchor="w", justify="left", wraplength=210,
                  font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
 
@@ -650,10 +758,18 @@ class EditorApp:
         tk.Label(strip, textvariable=self.status, bg=PANEL, fg=FG, anchor="w",
                  padx=12, pady=5, font=("TkDefaultFont", 9)).pack(fill="x")
 
-        self.ortho_frame = tk.Frame(self.root, bg=BG, height=196)
-        self.ortho_frame.pack(side="bottom", fill="x")
+        # The locked views used to be a strip across the bottom, which cost the
+        # main view 196px of height it needed and left the room either side of
+        # the export frame empty. The export frame is 2:3 and the window is
+        # wide, so fitting that frame into the canvas leaves most of the width
+        # black however big the window gets: at 1600x1000 the frame was 460px
+        # of a 1340px canvas and the other 880 were nothing at all. Stacked
+        # down the left they fill exactly that space, and the main view gets
+        # the height back.
+        self.ortho_frame = tk.Frame(self.root, bg=BG, width=ORTHO_WIDTH)
+        self.ortho_frame.pack(side="left", fill="y")
         self.ortho_frame.pack_propagate(False)
-        tk.Frame(self.ortho_frame, bg=EDGE, height=1).pack(fill="x")
+        tk.Frame(self.ortho_frame, bg=EDGE, width=1).pack(side="right", fill="y")
         holders = tk.Frame(self.ortho_frame, bg=BG)
         holders.pack(fill="both", expand=True)
         # The two 3/4 views look from the +X side, the same side the Left view
@@ -667,14 +783,20 @@ class EditorApp:
                                   ("Back R", math.radians(135.0),
                                    math.radians(30.0))):
             holder = tk.Frame(holders, bg=BG)
-            holder.pack(side="left", fill="both", expand=True, padx=1)
+            row, col = divmod(len(self.ortho_views), ORTHO_COLUMNS)
+            holder.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
+            holders.columnconfigure(col, weight=1, uniform="ortho")
+            holders.rowconfigure(row, weight=1, uniform="ortho")
             tk.Label(holder, text=label.upper(), bg=BG, fg=MUTED, anchor="w",
                      font=("TkDefaultFont", 7, "bold")).pack(fill="x", padx=6,
                                                              pady=(3, 1))
+            # width=10 and height=10: a tk Canvas defaults to 378x188, and
+            # five of those stacked overflow the column and collapse the last
+            # ones to a pixel. Ask for nothing and let `expand` share.
             small = tk.Canvas(holder, bg=VIEW_BG, highlightthickness=0,
-                              width=10, height=168)   # expand shares the row
+                              width=10, height=10)
+            camera = Camera(ORTHO_WIDTH // ORTHO_COLUMNS, 200)
             small.pack(fill="both", expand=True)
-            camera = Camera(300, 168)
             camera.yaw, camera.pitch = yaw, pitch
             view = Viewport(small, camera, label.lower().replace(" ", "_"),
                             locked=True)
@@ -694,10 +816,55 @@ class EditorApp:
             small.bind("<Double-Button-1>", lambda e, v=view: self.on_double(e, v))
         self.canvas.pack(side="left", fill="both", expand=True)
         self.main_view = Viewport(self.canvas, self.camera, "main")
+        self.show_tab(TAB_ORDER[0])
+        # Frame the figure once the window has a real size. Without this the
+        # editor opens on whatever zoom the Camera defaults to, which left the
+        # figure at about 60% of the height of its own export frame - a small
+        # figure in a large empty rectangle, which is what the frame is there
+        # to stop. `after_idle` rather than now: the canvas is still 1x1 until
+        # tk has laid the window out, so framing to it here frames to nothing.
+        self.root.after_idle(self._initial_frame)
+
+    def _initial_frame(self):
+        if self.canvas.winfo_width() > 1:
+            self.frame_all()
+            self.status.set("Drag a joint to pose it. X randomizes.")
+        else:
+            self.root.after(40, self._initial_frame)
 
     def _refresh_scroll(self):
         self.panel_canvas.update_idletasks()
         self.panel_canvas.configure(scrollregion=self.panel_canvas.bbox("all"))
+
+    def show_tab(self, name):
+        """Raise one tab of the panel. Ctrl+Tab cycles; the tabs are also keys.
+
+        Packed and unpacked rather than stacked with `lift`, because the panel
+        scrolls: a hidden tab that still takes height would leave the scroll
+        region tall enough for all four and the visible one floating in the
+        middle of it.
+        """
+        if name not in self._tabs:
+            return
+        self.active_tab.set(name)
+        for tab, holder in self._tabs.items():
+            chosen = tab == name
+            if chosen:
+                holder.pack(fill="x", expand=False)
+            else:
+                holder.pack_forget()
+            self._tab_buttons[tab].configure(
+                fg=FG if chosen else MUTED,
+                bg=CONTROL if chosen else PANEL)
+        self.panel_canvas.yview_moveto(0.0)
+        self._refresh_scroll()
+
+    def next_tab(self, step=1):
+        order = list(TAB_ORDER)
+        here = order.index(self.active_tab.get()) if \
+            self.active_tab.get() in order else 0
+        self.show_tab(order[(here + step) % len(order)])
+        return "break"
 
     def set_flag(self, attr, value):
         """Single path for every display toggle, so the panel checkboxes and
@@ -710,7 +877,7 @@ class EditorApp:
             if value:
                 # pack_forget drops it from the packing order, so re-packing
                 # puts it last and the expanding canvas has taken the space
-                self.ortho_frame.pack(side="bottom", fill="x",
+                self.ortho_frame.pack(side="left", fill="y",
                                       before=self.canvas)
             else:
                 self.ortho_frame.pack_forget()
@@ -764,6 +931,7 @@ class EditorApp:
         self.root.bind("<Control-z>", lambda e: self.undo())
         # Tab would otherwise move focus between the panel's widgets
         self.root.bind("<Tab>", lambda e: (self.next_figure(), "break")[1])
+        self.root.bind("<Control-Tab>", lambda e: self.next_tab(1))
 
     # -- helpers -----------------------------------------------------------
     def scene_snapshot(self):
@@ -811,8 +979,13 @@ class EditorApp:
         self.active_prop = None
         self.refresh_props()
         self.refresh_outfit()
+        # Take the VIEW the agent chose - that is a real decision about which
+        # way the pose reads - but frame it here, against this window's own
+        # export rectangle, rather than adopting a zoom fitted to a rectangle
+        # of a different size.
         self.camera.yaw, self.camera.pitch = camera.yaw, camera.pitch
-        self.camera.target, self.camera.zoom = camera.target, camera.zoom
+        frame_scene(self.figures, self.camera, self.frame_rect(),
+                    props=self.props)
         self.set_active(0, announce=False)
         self.redraw()
         note = "read by %s" % report["source"]
@@ -1152,8 +1325,17 @@ class EditorApp:
         return best[2], best[3]
 
     def frame_rect(self):
-        """Safe frame matching the export aspect ratio."""
-        w, h = self.canvas.winfo_width(), self.canvas.winfo_height()
+        """Safe frame matching the export aspect ratio.
+
+        Measured against the CAMERA's size, not the canvas widget's. They are
+        the same thing in a live window - `on_resize` sets one from the other
+        - but `camera.project` puts the origin at the middle of the camera, so
+        a rectangle centred on anything else is not centred on the projection.
+        Where the two drifted apart, the figure was framed about a point the
+        export did not share and keypoints landed outside the PNG. Widening
+        the panel was enough to expose it; the bug was there all along.
+        """
+        w, h = int(self.camera.width), int(self.camera.height)
         if w < 50 or h < 50:        # asked for before the window was laid out
             w, h = self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight()
         try:
@@ -1483,7 +1665,10 @@ class EditorApp:
             "r": self.reset_pose, "m": self.mirror,
             "f": self.flip_selected, "v": self.toggle_visibility,
             "l": self.toggle_length_mode, "p": self.preview_depth,
+            "x": self.randomize_pose,
         }
+        if event.keysym == "X":          # shift: a fresh seed, same settings
+            return self.randomize_again()
         if key in actions:
             actions[key]()
 
@@ -1518,6 +1703,55 @@ class EditorApp:
         self.skeleton.mirror_x()
         self.redraw()
         self.status.set("Pose mirrored.")
+
+    def chosen_random_parts(self):
+        return tuple(part for part in randomize.PART_ORDER
+                     if self.random_parts[part].get())
+
+    def randomize_pose(self, seed=None):
+        """Scramble the chosen parts of the active figure.
+
+        Goes through `randomize`, which goes through `move_joint` and
+        `rotate_about_axis` - the same calls a drag makes - so the result is a
+        pose the editor could have been dragged into and `check_lengths` has
+        nothing to complain about. An edge case it finds is therefore a real
+        one rather than an artefact of how it was generated.
+        """
+        parts = self.chosen_random_parts()
+        if not parts:
+            self.random_status.set("Nothing ticked: choose what to randomize.")
+            return
+        if seed is None:
+            typed = self.random_seed.get().strip()
+            try:
+                seed = int(typed) if typed else random.randrange(1, 10 ** 9)
+            except ValueError:
+                seed = random.randrange(1, 10 ** 9)
+        self.push_undo()
+        amount = float(self.random_amount.get())
+        if "preset" in parts:
+            name = random.Random(seed).choice(list(BODY_PRESETS))
+            self.preset_name.set(name)
+            self.apply_preset(name)
+        if "outfit" in parts:
+            import wearables
+            look = random.Random(seed + 1).choice(
+                [n for n in wearables.OUTFIT_NAMES if n != "bare"])
+            self.outfit_name.set(look)
+            self.set_outfit()
+        randomize.randomize_figure(self.skeleton, parts, amount, seed=seed)
+        if "camera" in parts:
+            self.frame_all()
+        self.random_seed.set(str(seed))
+        self.random_status.set("Seed %d, %s at %.2f. The seed reproduces it "
+                               "exactly." % (seed, "+".join(parts), amount))
+        self.redraw()
+        self.status.set("Randomized: seed %d." % seed)
+
+    def randomize_again(self):
+        """Another draw from the same settings, and a new seed to name it."""
+        self.random_seed.set("")
+        self.randomize_pose()
 
     def scale(self, factor):
         self.push_undo()

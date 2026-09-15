@@ -9,22 +9,27 @@ class E:
     def __init__(s,x,y,state=0): s.x,s.y,s.state=x,y,state
 
 # ---- ortho toggle round trip
-h0 = app.ortho_frame.winfo_height()
-c0 = app.canvas.winfo_height()
+#
+# The locked views are a column down the LEFT now, not a strip across the
+# bottom: the export frame is 2:3 and the window is wide, so fitting that
+# frame into the canvas left most of the width black whatever the window
+# size. So hiding them gives the main canvas width back, not height.
+w0 = app.ortho_frame.winfo_width()
+c0 = app.canvas.winfo_width()
 app.toggle_ortho(); root.update(); root.update_idletasks()
 check("ortho hidden", app.ortho_frame.winfo_ismapped() == 0)
-check("main canvas grew", app.canvas.winfo_height() > c0)
+check("main canvas grew", app.canvas.winfo_width() > c0)
 app.toggle_ortho(); root.update(); root.update_idletasks()
 check("ortho reappears", app.ortho_frame.winfo_ismapped() == 1)
-check("ortho back at full height", app.ortho_frame.winfo_height() == h0,
-      "%d vs %d" % (app.ortho_frame.winfo_height(), h0))
-check("main canvas back to size", app.canvas.winfo_height() == c0)
+check("ortho back at full width", app.ortho_frame.winfo_width() == w0,
+      "%d vs %d" % (app.ortho_frame.winfo_width(), w0))
+check("main canvas back to size", app.canvas.winfo_width() == c0)
 for v in app.ortho_views:
     check("  %s still draws" % v.name, len(v.canvas.find_all()) > 20)
 for i in range(3):      # repeated toggling must stay stable
     app.toggle_ortho(); root.update_idletasks(); app.toggle_ortho(); root.update_idletasks()
-check("stable after 4 round trips", app.ortho_frame.winfo_height() == h0
-      and app.canvas.winfo_height() == c0)
+check("stable after 4 round trips", app.ortho_frame.winfo_width() == w0
+      and app.canvas.winfo_width() == c0)
 
 # ---- two anchors via the UI
 sk = app.skeleton

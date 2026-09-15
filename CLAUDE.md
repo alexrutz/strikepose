@@ -7,8 +7,10 @@ Project context for Claude Code. Read this before changing anything.
 A desktop editor for authoring OpenPose skeletons in 3D and exporting matched
 pose and depth images for ControlNet. The layout:
 
-- `openpose3d_editor.py` - the tkinter application, the anthropometry, the
-  swept-anatomy preview and the analytic depth rasteriser.
+- `openpose3d_editor.py` - the entry point and the public surface. What used
+  to be one 4300-line file is now `vecmath`, `anthro`, `camera`, `skeleton`,
+  `posemap`, `anatomy`, `raster`, `exporting`, `scenefile`, `randomize` and
+  `ui_app`; this re-exports all of them, so existing callers are untouched.
 - `mesh_backend.py` - loads a rigged GLB and poses its own armature. This is
   where a depth export comes from; `smplx_backend.py` is the same job for an
   SMPL-X model file.
@@ -26,10 +28,11 @@ pose and depth images for ControlNet. The layout:
 ## Run the tests before and after every change
 
 ```
-./tests/run_all.sh                  # 26 checks; needs python3-tk and xvfb
+./tests/run_all.sh                  # 27 checks; needs python3-tk and xvfb
 python3 tests/test_core.py          # pure maths, no display needed
 python3 mesh_backend.py --selftest  # rigged mesh maths, no model files needed
 python3 smplx_backend.py --selftest # SMPL-X maths, no model files needed
+python3 randomize.py --selftest     # the randomizer, no display needed
 python3 tests/check_glb.py bodies/*.glb   # the body set itself, not in run_all
 ```
 
@@ -450,6 +453,76 @@ selftest asserts every segment matches the rig's own to machine precision
 (4e-16) rather than to a tolerance. A tolerance is what let a per-segment
 scaling pass hide behind "close enough" for several releases.
 
+**The editor is modules now, and `openpose3d_editor.py` is the front door.**
+The 4300-line file is split - `vecmath`, `anthro`, `camera`, `skeleton`,
+`posemap`, `anatomy`, `raster`, `exporting`, `scenefile`, `randomize`,
+`ui_app` - and every name it used to export is re-exported from it, so all 28
+callers and all 26 test files kept working with nothing edited. That is the
+point of the facade and it should stay: a split that made every caller change
+would have been a rewrite wearing a refactor's clothes. New code should import
+the module it wants; old code must keep working through the front door.
+
+**There is ONE framing, and both the window and the export use it.**
+`exporting.frame_scene` fits the figure's own silhouette - the crown, the
+hands and the soles, none of which is a keypoint, plus the widest
+cross-section the body carries - into the export rectangle. The editor used to
+have a second one: eighteen keypoints with a flat 18% margin, which cropped
+the crown and the feet off a figure standing at rest, and which could frame
+about a different centre from the one the PNG used. Two framings mean the
+rectangle on screen stops promising what it exists to promise.
+
+**`frame_rect` is measured against the camera, not the canvas widget.** They
+are the same size in a live window, because `on_resize` sets one from the
+other, but `camera.project` puts its origin at the middle of the camera - so a
+rectangle centred on anything else is not centred on the projection. Where the
+two drifted apart, keypoints landed outside the exported PNG. Widening the
+panel was enough to expose it; it had been latent for as long as the two
+existed.
+
+**A random pose is made of the same rotations a drag is.** `randomize` goes
+through `move_joint` and `rotate_about_axis` and never writes a coordinate, so
+no bone can change length whatever the dice say, and an edge case it finds is
+a real one rather than an artefact of how it was generated. A seed names a
+pose, which is what makes "the elbow is inside the ribcage at seed 412" a bug
+report instead of a screenshot.
+
+The two bugs its own length check caught on the first run are the general
+lesson about rotating part of a figure. **Both are about where the AXIS runs,
+not about what is being rotated.** Leaning the torso about the hip LINE is
+exact because both hips lie on that axis and so cannot move, so the neck's
+distance to each of them is preserved however far it swings. Twisting about
+the vertical through the hip midpoint is not, because by then the legs have
+moved the hips and the neck is no longer over them - 17 cm on a neck-to-hip
+bone. Anchoring the twist at the neck fixes that, and then reading the neck
+BEFORE the lean moved it put 5 cm back, which looked identical to the first
+bug and needed its own fix. `pose_agent`'s `lean` is safe for a reason worth
+knowing: its "sideways" axis is the torso's own up vector through the hip
+midpoint, and OpenPose's neck IS the shoulder midpoint, so the neck sits
+exactly on that axis by construction.
+
+**The panel is four tabs, and every section names the tab it lives on.**
+Twelve collapsible groups in one column is a list to hunt through even folded,
+and folding is not free: the thing you want is three clicks away and you have
+to remember which heading it is under. `SECTION_TABS` is the table, and
+`tests/test_panel_layout.py` asserts no section is missing from it - one left
+out would still be built, into whichever tab came first, and would look like
+it belonged there.
+
+That test also had to be fixed to measure what it claimed. It checked that
+every control could be scrolled into view using `winfo_y`, which is relative
+to the widget's own PARENT - so for a button nested three frames deep it
+measured the offset inside that frame and nothing else, and reported the
+lowest control on a 31-control tab as 107 pixels down. Position against the
+scrolling canvas, plus wherever the canvas is scrolled to, is the only thing
+that answers the question.
+
+**The locked views live in the width the export frame cannot use.** The export
+is 2:3 and a window is wide, so fitting that frame into the canvas leaves most
+of the width black at any window size - 880 of 1340 pixels at 1600x1000. The
+five small views are a column down the left rather than a strip across the
+bottom, which fills exactly that space and gives the main view back the height
+the strip was taking.
+
 **Assets ride the body's pose solution.** `pose_rig` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
 solve an asset separately or it will drift from the body.
@@ -623,12 +696,11 @@ a build.
 
 ## Known weak spots, in rough priority order
 
-1. `openpose3d_editor.py` is one ~3000-line file grown by successive edits. It
-   wants splitting into modules — skeleton, anatomy, rendering, UI — with the
-   test suite as the guard. Do this first, in small steps, running the tests
-   between each.
-2. The tests are scripts printing PASS/FAIL, not pytest. Converting them keeps
+1. The tests are scripts printing PASS/FAIL, not pytest. Converting them keeps
    the assertions but gains proper reporting and selection.
+2. `ui_app.py` is still 2200 lines. It is one class doing input, drawing,
+   panel construction and file dialogs; the panel is the part that would come
+   out most cleanly.
 3. Depth export is CPU rasterisation. Live depth would want the geometry on the
    GPU rather than the analytic rasteriser ported.
 4. Wrists are never rotated; there is no keypoint for them. Ankles are only

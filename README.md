@@ -244,6 +244,27 @@ accepted. A preset with no file is a refusal naming the command that builds
 it, never a quiet fall back to the sweep: the PNG would still appear and
 nothing would say it was a mannequin.
 
+## Random poses, for the edge cases
+
+The pose catalogue is 84 poses somebody chose, which means it is 84 poses
+somebody thought of. What breaks a depth map is the pose nobody thought of.
+Press **X** in the editor, or:
+
+    python3 randomize.py --list
+    python3 randomize.py --render out/random --count 24 --parts arms,legs
+    python3 randomize.py --render out/random --seed 7 --amount 1.0
+
+Tick what should move - arms, legs, torso, head, which way the figure faces,
+and the body, outfit and camera around it - and how far from rest, where 1.0
+is a contortionist. Every joint moves by rotation about its parent, the same
+call a mouse drag makes, so no bone changes length whatever the dice say and
+anything odd that comes out is a real case rather than an artefact.
+
+A seed names a pose. `--seed 7` is the same figure on this build and the next
+one, so an awkward result is something you can report rather than screenshot.
+The editor shows the seed it used and puts it in the box; typing one back
+reproduces that figure exactly.
+
 ## Tests
 
     ./tests/run_all.sh

@@ -26,8 +26,10 @@ from anatomy import body_parts
 from anthro import build_rest_points
 from posemap import render_openpose, resolution_stickwidth
 from raster import depth_buffer, depth_to_grey, render_depth
-from skeleton import KEYPOINT_NAMES
-from vecmath import vdot
+from skeleton import KEYPOINT_NAMES, Skeleton
+
+INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
+from vecmath import vadd, vdot, vmul, vnorm, vsub
 
 
 def frame_rect(view_w, view_h, aspect):
@@ -224,3 +226,90 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
         np.minimum(zbuf, depth_buffer(prop_groups(props, camera, rect, out_w),
                                       out_w, out_h), out=zbuf)
     return depth_to_grey(zbuf)
+
+
+def body_frame(skeleton):
+    """(side, up, facing) of the figure as it stands now, side to its left."""
+    frame = Skeleton.torso_frame(skeleton.points)
+    if frame is None:                  # a degenerate torso; fall back to world
+        return (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+    return frame
+
+
+def silhouette_points(figure):
+    """Keypoints plus the ends of the parts that have no keypoint of their own.
+
+    The crown, the hands and the feet all reach well past the last keypoint on
+    their chain - a hand is another 17 cm past the wrist - so framing on the
+    keypoints alone crops them off, which is exactly what it did to a figure
+    lying down.
+    """
+    points = list(figure.points)
+    at = lambda name: figure.points[INDEX[name]]
+    head_up = vnorm(vsub(at("nose"), at("neck")))
+    points.append(vadd(at("nose"), vmul(head_up, 14.0)))
+    for side in ("r", "l"):
+        forearm = vnorm(vsub(at(side + "_wrist"), at(side + "_elbow")))
+        points.append(vadd(at(side + "_wrist"), vmul(forearm, 19.0)))
+        shin = vnorm(vsub(at(side + "_ankle"), at(side + "_knee")))
+        sole = vadd(at(side + "_ankle"), vmul(shin, 8.0))
+        _side, _up, facing = body_frame(figure)
+        points.append(vadd(sole, vmul(facing, 21.0)))
+        points.append(vadd(sole, vmul(facing, -9.0)))
+    return points
+
+
+def frame_scene(figures, camera, rect, margin=1.06, props=(), grow=1.9):
+    """Point the camera at the scene and zoom so the whole of it fits `rect`.
+
+    A posed figure is not the same size on screen as the rest pose - arms up
+    adds a head's height, lying down turns it on its side - so a fixed zoom
+    crops exactly the poses a prompt is most likely to ask for. The fit is to
+    the export rectangle rather than the whole view, because that is the part
+    that becomes the PNG.
+
+    A skeleton has no thickness and a body does, so the fit is padded by the
+    widest cross-section the figure carries. A 6% margin is ample on a
+    standing figure, where the 175 cm of height dwarfs it, and not nearly
+    enough on a deep crouch: folded up, the figure is 90 cm across and a 19 cm
+    chest half-width is a fifth of that, which is a head and two hands over
+    the edge of the frame.
+    """
+    points = [p for figure in figures for p in silhouette_points(figure)]
+    if not points:
+        return
+    girth = max([0.0] + [max(figure.body[part][i] for part in
+                             ("chest", "waist", "pelvis") for i in (0, 1))
+                         for figure in figures])
+    right, up, _fwd = camera.basis()
+    xs = [vdot(p, right) for p in points]
+    ys = [vdot(p, up) for p in points]
+    # The people set the scale; objects may widen the frame but only so far.
+    # A 6 m floor or a 4 m wall is a backdrop, and framing to hold all of one
+    # shrinks the figure the whole image is about to a few dozen pixels.
+    xs = [x - girth for x in xs] + [x + girth for x in xs]
+    ys = [y - girth for y in ys] + [y + girth for y in ys]
+    lo_x, hi_x, lo_y, hi_y = min(xs), max(xs), min(ys), max(ys)
+    room_x = (hi_x - lo_x) * (grow - 1.0) / 2.0
+    room_y = (hi_y - lo_y) * (grow - 1.0) / 2.0
+    for prop in props:
+        lo, hi = props_module.bounds(prop)
+        # the eight corners, not the two: a wall is in frame only if its far
+        # top corner is, and that is neither of them
+        for corner in ((x, y, z) for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                       for z in (lo[2], hi[2])):
+            cx, cy = vdot(corner, right), vdot(corner, up)
+            xs.append(min(max(cx, lo_x - room_x), hi_x + room_x))
+            ys.append(min(max(cy, lo_y - room_y), hi_y + room_y))
+    mid_x, mid_y = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    # put the bounding box centre on the camera target, in the camera's own
+    # plane: the mean of the keypoints would pull the frame towards the head,
+    # which carries five of the eighteen
+    zero = vmul(right, 0.0)
+    camera.target = vadd(zero, vadd(vmul(right, mid_x), vmul(up, mid_y)))
+    half_w = (max(xs) - min(xs)) / 2.0
+    half_h = (max(ys) - min(ys)) / 2.0
+    rect_w, rect_h = rect[2] - rect[0], rect[3] - rect[1]
+    camera.zoom = max(0.3, min(40.0,
+                               min(rect_w / (2.0 * max(1.0, half_w) * margin),
+                                   rect_h / (2.0 * max(1.0, half_h) * margin))))
