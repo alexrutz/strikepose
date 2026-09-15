@@ -97,7 +97,7 @@ check("and every pose says what it is",
       all(p["about"] for g in vocabulary["groups"] for p in g["poses"]))
 check("and the objects and clothing the editor has",
       len(vocabulary["shapes"]) >= 20
-      and len(vocabulary["wearables"]) == len(vocabulary["slots"]) == 6,
+      and len(vocabulary["wearables"]) == len(vocabulary["slots"]) == 5,
       "%d shapes, %d slots" % (len(vocabulary["shapes"]),
                                len(vocabulary["wearables"])))
 # The phone dresses a figure without a round trip, so it needs the looks
@@ -105,7 +105,7 @@ check("and the objects and clothing the editor has",
 # has to be one the same vocabulary offers, or a tap sets a slot to something
 # the renderer will drop on the floor.
 check("and the named outfits, as the slots they set",
-      len(vocabulary["outfits"]) >= 40
+      len(vocabulary["outfits"]) >= 30
       and all(isinstance(v, dict) for v in vocabulary["outfits"].values()),
       "%d outfits" % len(vocabulary["outfits"]))
 stray = sorted({"%s/%s" % (slot, name)

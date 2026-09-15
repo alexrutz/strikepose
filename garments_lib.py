@@ -128,13 +128,17 @@ def dress(figure, preset, body):
     import numpy as np
     import wearables
     outfit = wearables.clean(getattr(figure, "outfit", None))
-    worn, hidden = [], []
+    worn, hidden, seen = [], [], set()
     for slot, name in outfit.items():
         if name == "none":
             continue
         stem = named(slot, name)
-        if not stem:
+        # One file often fills two slots - a casual suit is the shirt and the
+        # trousers - and a mesh drawn twice is the same surface z-fighting
+        # with itself for no gain.
+        if not stem or stem in seen:
             continue
+        seen.add(stem)
         found = load(stem, preset, body)
         if found is None:
             continue

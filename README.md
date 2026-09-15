@@ -44,16 +44,20 @@ character.
 
 ## Depth sources
 
-Three, tried in order, each falling back to the next:
+Two, and neither is the built-in sweep:
 
-1. **Rigged mesh** — a `.glb` exported from Blender with its armature. Build
-   bodies with MPFB2, one file per body type in a folder, named after the
-   preset (`male_average.glb`). Hair and clothing go in an assets folder and
-   are worn per figure.
+1. **Rigged mesh** — a `.glb` with its armature, which is what `bodies/`
+   holds. The rig is *posed*, not fitted: each bone is rotated to point the
+   way its two keypoints do and nothing is slid or resized, so every segment
+   comes out at the length its author drew it. The eighteen OpenPose keypoints
+   are then read back off the posed rig, so the pose map and the depth map
+   cannot disagree about where the figure is.
 2. **SMPL-X** — needs `pip install smplx torch` and the model files from
    smpl-x.is.tue.mpg.de.
-3. **Built-in anatomy** — always available, no dependencies beyond NumPy.
-   Measured cross-sections swept along the bones.
+
+The built-in swept anatomy draws the viewport and cuts garments out; it is
+never an export. Press **P** to see the armature that will be exported, **B**
+for the sweep.
 
 Inspect a rig before loading it:
 
@@ -128,12 +132,23 @@ The **Hair and clothes** panel dresses the active figure from five independent
 slots - hair, headgear, top, bottom, feet - so a coat does not take the
 trousers off. `python3 wearables.py --list` prints them all.
 
-A garment is not a mesh. It is the body's own swept profile, taken over the
-stretch it covers and pushed outward by a few millimetres of cloth, so it fits
-every preset and every pose for nothing: it *is* the arm, slightly larger. The
-cost is that cloth cannot hang - a skirt flares because it is told to, not
-because it falls - which for a depth map is the right trade, since what
-conditions the generator is the silhouette.
+What a depth export actually wears is a real mesh: the CC0 MakeHuman community
+garment packs, fitted to every body in `bodies/` and skinned to its armature,
+so a coat rides the body's own pose solution instead of drifting off it. They
+live in `garments/`; `python3 garments_lib.py --list` says which preset name
+maps to which mesh, and a garment hides the body under it rather than hovering
+a millimetre off a chest. Rebuild or widen the set with:
+
+    python3 tools/make_wearables.py --fetch     # ~530 MB of packs, not vendored
+    python3 tools/make_wearables.py --list
+    python3 tools/make_wearables.py --build
+
+The viewport draws something cheaper, because it has to redraw at sixty frames
+a second: the body's own swept profile over the stretch the garment covers,
+pushed outward by a few millimetres of cloth, so it fits every preset and every
+pose for nothing. It is an approximation and it never reaches an export. A slot
+the library has no mesh for is simply not worn on the rigged path, which is why
+the vocabulary only names garments the library can deliver.
 
 Outfits save with the scene and ride the undo stack, and the prompt route reads
 them: "a woman with long hair in a long skirt and boots" dresses her.
@@ -217,18 +232,17 @@ one, and a contact sheet per group. A figure that sits gets a chair under it, a
 figure at a desk gets a desk, and both are sized against that body, so the
 child's chair is a child's chair.
 
-Point `--bodies` at a folder of rigged `.glb` bodies and the depth map comes
-from real geometry instead of the swept anatomy - hands with fingers, a face,
-a chest that belongs to the body it is on:
+The depth map always comes from real geometry - hands with fingers, a face, a
+chest that belongs to the body it is on. The body set is found without being
+told where; `--bodies` only says *which* folder:
 
     python3 everyday.py --render out/set --bodies bodies/
 
 One file per preset, named after it with spaces and commas turned into
 underscores - `female_curvy.glb`, `child_about_7.glb`, an `mpfb_` prefix
-accepted - and any preset without a file falls back to the swept anatomy. The
-pose PNG is identical either way, because it is the same eighteen keypoints:
-the depth side of a conditioning pair can be upgraded without the OpenPose
-side moving a pixel.
+accepted. A preset with no file is a refusal naming the command that builds
+it, never a quiet fall back to the sweep: the PNG would still appear and
+nothing would say it was a mannequin.
 
 ## Tests
 

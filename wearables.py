@@ -28,7 +28,7 @@ crotch - which is how a jacket reaches below the hip.
 Presets and outfits
 -------------------
 A preset is one garment in one slot; an outfit is a named set of them - "chef",
-"winter", "knight". The same split the pose side makes between a command and a
+"winter", "hiking". The same split the pose side makes between a command and a
 stance, and for the same reason: the garment names are picked on *every* `wear`
 command so that list stays short, while an outfit is picked at most once and
 saves five guesses, so the catalogue can be long. An outfit names only the
@@ -39,8 +39,8 @@ from __future__ import annotations
 
 import math
 
-from openpose3d_editor import (_blob, _tube, sample_profile, vadd, vcross,
-                               vdot, vlen, vmul, vnorm, vsub)
+from openpose3d_editor import (_blob, _tube, sample_profile, vadd, vdot,
+                               vlen, vmul, vnorm, vsub)
 
 # ---------------------------------------------------------------------------
 # the vocabulary
@@ -69,8 +69,6 @@ HAIR = {
                  ("tail", 0.60, 21.0, 3.0, 9.0)],
     "bun": [("drape", "head", 0.46, 1.00, 1.1, 0.0),
             ("knot", 0.86, -0.55, 4.4)],
-    "afro": [("drape", "head", 0.40, 1.00, 5.2, 0.0)],
-    "shaved": [("drape", "head", 0.50, 1.00, 0.25, 0.0)],
 }
 
 TOPS = {
@@ -91,13 +89,10 @@ TOPS = {
     "coat": [("drape", "torso", -0.05, 1.34, 2.2, 1.6),
              ("sleeve", "upper_arm", 0.00, 1.00, 2.2, 0.0),
              ("sleeve", "forearm", 0.00, 1.00, 2.2, 0.3)],
-    "armour": [("drape", "torso", -0.03, 0.86, 2.6, 0.0),
-               ("pauldron", 0.0, 0.0, 0.0)],
 }
 
 BOTTOMS = {
     "none": [],
-    "briefs": [("drape", "torso", 0.86, 1.16, 0.5, 0.0)],
     "shorts": [("drape", "torso", 0.84, 1.18, 1.0, 0.4),
                ("sleeve", "thigh", 0.00, 0.42, 1.1, 0.5)],
     "leggings": [("drape", "torso", 0.84, 1.18, 0.5, 0.0),
@@ -110,10 +105,6 @@ BOTTOMS = {
     "long_skirt": [("skirt", 0.80, 62.0, 7.0)],
     "dress": [("drape", "torso", 0.06, 0.86, 0.7, 0.0),
               ("skirt", 0.84, 46.0, 6.0)],
-    "robe": [("drape", "torso", 0.02, 0.90, 1.6, 0.0),
-             ("sleeve", "upper_arm", 0.00, 1.00, 2.4, 0.8),
-             ("sleeve", "forearm", 0.00, 0.80, 3.2, 1.2),
-             ("skirt", 0.88, 70.0, 9.0)],
 }
 
 FEET = {
@@ -137,27 +128,13 @@ HEADGEAR = {
             ("brim", 0.66, 12.0, 1.5)],
     "sun_hat": [("drape", "head", 0.64, 1.09, 2.0, 0.0),
                 ("brim", 0.66, 15.0, 1.7)],
-    "beanie": [("drape", "head", 0.62, 1.04, 1.4, 0.0)],
-    "helmet": [("drape", "head", 0.44, 1.04, 1.8, 0.0)],
-}
-
-# Worn over a top: things whose silhouette is their own, not the body's. An
-# apron hangs flat down the front, a cape down the back, a pack stands off it.
-OVER = {
-    "none": [],
-    "apron": [("panel", 0.18, 1.10, 1.1, 2.0, 0.86)],
-    "scarf": [("drape", "head", 0.00, 0.16, 2.8, 0.0),
-              ("panel", 0.02, 0.30, 1.8, 2.4, 0.30)],
-    "cape": [("cloak", 0.02, 74.0, 1.9, 7.0)],
-    "backpack": [("pack", 0.30, 13.0, 9.5, 19.0)],
 }
 
 SLOTS = {"hair": HAIR, "headgear": HEADGEAR, "top": TOPS,
-         "over": OVER, "bottom": BOTTOMS, "shoes": FEET}
+         "bottom": BOTTOMS, "shoes": FEET}
 
-# The order a panel and a listing show the slots in: head down, and "over"
-# after "top" because that is the order they go on.
-SLOT_ORDER = ("hair", "headgear", "top", "over", "bottom", "shoes")
+# The order a panel and a listing show the slots in: head down.
+SLOT_ORDER = ("hair", "headgear", "top", "bottom", "shoes")
 
 DEFAULT_OUTFIT = {slot: "none" for slot in SLOTS}
 
@@ -179,7 +156,6 @@ DEFAULT_OUTFIT = {slot: "none" for slot in SLOTS}
 
 OUTFITS = {
     "bare": dict(DEFAULT_OUTFIT),
-    "underwear": {"top": "tank_top", "bottom": "briefs"},
     "pyjamas": {"top": "t_shirt", "bottom": "shorts"},
 
     "casual": {"top": "t_shirt", "bottom": "trousers", "shoes": "shoes"},
@@ -191,10 +167,8 @@ OUTFITS = {
     "business": {"top": "jacket", "bottom": "trousers", "shoes": "shoes"},
     "suit": {"top": "jacket", "bottom": "trousers", "shoes": "shoes",
              "hair": "short"},
-    "commuter": {"top": "jacket", "bottom": "trousers", "shoes": "shoes",
-                 "over": "backpack"},
     "student": {"top": "hoodie", "bottom": "trousers", "shoes": "shoes",
-                "headgear": "cap", "over": "backpack"},
+                "headgear": "cap", },
     "evening": {"bottom": "dress", "shoes": "shoes", "hair": "bun"},
     "party": {"bottom": "dress", "shoes": "shoes", "hair": "long"},
     "sundress": {"bottom": "dress", "shoes": "sandals",
@@ -203,12 +177,8 @@ OUTFITS = {
                "hair": "pigtails"},
 
     "summer": {"top": "tank_top", "bottom": "shorts", "shoes": "sandals"},
-    "beach": {"top": "none", "bottom": "briefs", "shoes": "none",
-              "headgear": "sun_hat"},
-    "swimming": {"top": "none", "bottom": "briefs", "shoes": "none",
-                 "hair": "bun"},
     "winter": {"top": "coat", "bottom": "trousers", "shoes": "boots",
-               "headgear": "beanie", "over": "scarf"},
+               },
     "rain": {"top": "coat", "bottom": "trousers", "shoes": "boots",
              "headgear": "hat"},
 
@@ -217,52 +187,29 @@ OUTFITS = {
                 "hair": "ponytail"},
     "yoga": {"top": "tank_top", "bottom": "leggings", "shoes": "none",
              "hair": "bun"},
-    "dancer": {"top": "tank_top", "bottom": "leggings", "shoes": "none",
-               "hair": "bun"},
-    "cycling": {"top": "t_shirt", "bottom": "shorts", "shoes": "shoes",
-                "headgear": "helmet"},
+    "cycling": {"top": "t_shirt", "bottom": "shorts", "shoes": "shoes",},
     "hiking": {"top": "long_sleeve", "bottom": "shorts", "shoes": "boots",
-               "headgear": "cap", "over": "backpack"},
+               "headgear": "cap", },
     "tourist": {"top": "t_shirt", "bottom": "shorts", "shoes": "shoes",
-                "headgear": "cap", "over": "backpack"},
+                "headgear": "cap", },
     "explorer": {"top": "long_sleeve", "bottom": "trousers", "shoes": "boots",
-                 "headgear": "hat", "over": "backpack"},
+                 "headgear": "hat", },
 
     "chef": {"top": "long_sleeve", "bottom": "trousers", "shoes": "shoes",
-             "headgear": "cap", "over": "apron"},
-    "barista": {"top": "t_shirt", "bottom": "trousers", "shoes": "shoes",
-                "over": "apron"},
-    "waiter": {"top": "long_sleeve", "bottom": "trousers", "shoes": "shoes",
-               "over": "apron"},
-    "artist": {"top": "t_shirt", "bottom": "trousers", "shoes": "shoes",
-               "over": "apron"},
+             "headgear": "cap", },
     "doctor": {"top": "coat", "bottom": "trousers", "shoes": "shoes",
                "hair": "short"},
     "nurse": {"top": "long_sleeve", "bottom": "trousers", "shoes": "shoes",
               "hair": "bun"},
-    "builder": {"top": "long_sleeve", "bottom": "trousers", "shoes": "boots",
-                "headgear": "helmet"},
+    "builder": {"top": "long_sleeve", "bottom": "trousers", "shoes": "boots",},
     "mechanic": {"top": "long_sleeve", "bottom": "trousers", "shoes": "boots",
-                 "headgear": "cap", "over": "apron"},
+                 "headgear": "cap", },
     "farmer": {"top": "long_sleeve", "bottom": "trousers", "shoes": "boots",
                "headgear": "sun_hat"},
     "gardener": {"top": "t_shirt", "bottom": "trousers", "shoes": "boots",
-                 "headgear": "sun_hat", "over": "apron"},
-    "soldier": {"top": "long_sleeve", "bottom": "trousers", "shoes": "boots",
-                "headgear": "helmet", "over": "backpack"},
-    "biker": {"top": "jacket", "bottom": "trousers", "shoes": "boots",
-              "headgear": "helmet"},
+                 "headgear": "sun_hat", },
+    "biker": {"top": "jacket", "bottom": "trousers", "shoes": "boots",},
 
-    "knight": {"top": "armour", "bottom": "trousers", "shoes": "tall_boots",
-               "headgear": "helmet"},
-    "wizard": {"bottom": "robe", "shoes": "boots", "headgear": "hat",
-               "hair": "long"},
-    "monk": {"bottom": "robe", "shoes": "sandals", "hair": "shaved"},
-    "priest": {"bottom": "robe", "shoes": "shoes", "hair": "short"},
-    "superhero": {"top": "tank_top", "bottom": "leggings", "shoes": "boots",
-                  "over": "cape"},
-    "royal": {"bottom": "dress", "shoes": "shoes", "over": "cape",
-              "hair": "long"},
 }
 
 OUTFIT_NAMES = sorted(OUTFITS)
@@ -403,16 +350,6 @@ def layers(skeleton, segments, frame, coarsen=1.0):
         w, d, _off = sample_profile(seg["profile"], t)
         return w * seg["scale_w"] + pad, d * seg["scale_d"] + pad
 
-    def torso_at(t):
-        """(centre on the surface's own axis, half width, half depth) at t."""
-        seg = segments.get("torso")
-        if seg is None:
-            return None
-        at = vadd(seg["a"], vmul(vsub(seg["b"], seg["a"]), t))
-        w, d, off = sample_profile(seg["profile"], t)
-        return (vadd(at, vmul(facing, off)),
-                w * seg["scale_w"], d * seg["scale_d"])
-
     out = []
     for slot in SLOT_ORDER:
         name = outfit.get(slot, "none")
@@ -435,17 +372,7 @@ def layers(skeleton, segments, frame, coarsen=1.0):
                 if seg is not None:
                     emit(pad, _piece(seg, t0, t1, pad, flare, coarsen))
 
-            elif kind in ("sleeve", "pauldron"):
-                if kind == "pauldron":
-                    dw, dd, dh = B["deltoid"]
-                    for sd in ("r", "l"):
-                        joint = skeleton.points[
-                            [i for i, n in enumerate(_NAMES)
-                             if n == sd + "_shoulder"][0]]
-                        emit(2.2, _blob(vadd(joint, vmul(up, -1.4)),
-                                        (side, facing, up),
-                                        (dw + 2.2, dd + 2.2, dh + 1.4)))
-                    continue
+            elif kind == "sleeve":
                 _k, limb, t0, t1, pad, flare = piece
                 for sd in ("r", "l"):
                     seg = segments.get("%s_%s" % (sd, limb))
@@ -559,62 +486,6 @@ def layers(skeleton, segments, frame, coarsen=1.0):
                 emit(1.2, _cloth_tube(
                     anchor, down, length, w + 1.2, d + 1.2, (side, facing),
                     grow_w=flare, grow_d=flare * 0.8))
-
-            elif kind == "panel":           # an apron: flat down the front
-                _k, t0, t1, thick, stand, narrow = piece
-                torso = segments.get("torso")
-                if torso is None:
-                    continue
-                run = vsub(torso["b"], torso["a"])
-                probe = [torso_at(t0 + (t1 - t0) * i / 10.0)
-                         for i in range(11)]
-                probe = [v for v in probe if v is not None]
-                if not probe:
-                    continue
-                # One flat slab, not a stack that follows the body station by
-                # station. A panel of cloth has one width and hangs in one
-                # plane; giving each station the profile's own width and depth
-                # put a step between every pair of them, and an apron came out
-                # of the depth map in horizontal bands. It clears the rigged
-                # body by the standoff wherever the body is deeper than the
-                # plane, which is what makes it drape over a belly.
-                half_w = max(w for _c, w, _d in probe) * narrow
-                front = max(vdot(c, facing) + d for c, _w, d in probe)
-                mid = vadd(torso["a"], vmul(run, 0.5 * (t0 + t1)))
-                mid = vadd(mid, vmul(facing,
-                                     front - thick - vdot(mid, facing)))
-                emit(stand, [("slab", mid, (side, facing, vnorm(run)),
-                              (max(0.4, half_w), thick,
-                               0.5 * (t1 - t0) * vlen(run)))])
-
-            elif kind == "cloak":           # a cape down the back
-                _k, t, length, thick, flare = piece
-                at = torso_at(t)
-                if at is None:
-                    continue
-                centre, w, d = at
-                start = vadd(centre, vmul(face, -(d + thick)))
-                shell = _cloth_tube(start, down, length, w, thick,
-                                    (side, face), grow_w=flare, grow_d=0.0)
-                # a rounded hem, for the same reason hair gets one: a stack of
-                # cylinders cut off square reads as a plank
-                shell += _blob(vadd(start, vmul(down, length)),
-                               (side, face, down),
-                               (w + flare, thick * 1.2, thick * 1.6))
-                emit(None, shell)
-
-            elif kind == "pack":            # a rucksack behind the shoulders
-                _k, t, half_w, half_d, half_h = piece
-                at = torso_at(t)
-                if at is None:
-                    continue
-                centre, w, d = at
-                # A box, not a blob. Swept as an ellipsoid a rucksack is a
-                # beach ball on someone's back; the corners are most of what
-                # says "pack" in a silhouette.
-                emit(None, [("box", vadd(centre, vmul(face, -(d + half_d))),
-                             (side, face, up),
-                             (min(half_w, w * 1.15), half_d, half_h))])
 
         for standoff in sorted(buckets, key=lambda v: (v is None, v)):
             out.append((slot, standoff, buckets[standoff]))
@@ -827,8 +698,7 @@ def _selftest():
     check("an outfit sets the slots it names and leaves the rest",
           dress({"hair": "ponytail"}, "winter")
           == dict(DEFAULT_OUTFIT, hair="ponytail", top="coat",
-                  bottom="trousers", shoes="boots", headgear="beanie",
-                  over="scarf"),
+                  bottom="trousers", shoes="boots"),
           str(dress({"hair": "ponytail"}, "winter")))
     check("and one nobody has is refused rather than guessed at",
           dress({}, "black tie") is None)
@@ -836,7 +706,7 @@ def _selftest():
                                                 for n in OUTFIT_NAMES
                                                 if n != "bare"))
     check("and \"bare\" takes it all off",
-          not worn(dress({"top": "coat", "hair": "afro"}, "bare")))
+          not worn(dress({"top": "coat", "hair": "bob"}, "bare")))
 
     # nonsense in, default out
     check("an unknown slot or preset falls back rather than failing",

@@ -5,17 +5,32 @@ Project context for Claude Code. Read this before changing anything.
 ## What this is
 
 A desktop editor for authoring OpenPose skeletons in 3D and exporting matched
-pose and depth images for ControlNet. `openpose3d_editor.py` is the tkinter
-application; `mesh_backend.py` and `smplx_backend.py` are optional depth
-sources; `web/` is a mobile prototype sharing the same maths in JavaScript.
+pose and depth images for ControlNet. The layout:
+
+- `openpose3d_editor.py` - the tkinter application, the anthropometry, the
+  swept-anatomy preview and the analytic depth rasteriser.
+- `mesh_backend.py` - loads a rigged GLB and poses its own armature. This is
+  where a depth export comes from; `smplx_backend.py` is the same job for an
+  SMPL-X model file.
+- `bodies_lib.py` / `bodies/` - the nine rigged bodies, one per preset, built
+  by `tools/make_bodies.py`.
+- `garments_lib.py` / `garments/` - real CC0 MakeHuman garment meshes fitted
+  to each of those bodies by `tools/make_wearables.py`.
+- `wearables.py` - the garment *vocabulary*, plus the swept approximation the
+  viewport draws at sixty frames a second.
+- `pose_agent.py`, `everyday.py`, `props.py` - the command vocabulary a local
+  model emits, the 84-pose catalogue and the object library.
+- `server.py` + `web/` - a mobile prototype; the maths it duplicates is only
+  the projection and the drag.
 
 ## Run the tests before and after every change
 
 ```
-./tests/run_all.sh                  # everything, needs xvfb on a headless box
+./tests/run_all.sh                  # 26 checks; needs python3-tk and xvfb
 python3 tests/test_core.py          # pure maths, no display needed
 python3 mesh_backend.py --selftest  # rigged mesh maths, no model files needed
 python3 smplx_backend.py --selftest # SMPL-X maths, no model files needed
+python3 tests/check_glb.py bodies/*.glb   # the body set itself, not in run_all
 ```
 
 These are not decoration. Every check in them was written because something
@@ -203,30 +218,32 @@ garment there is came out of a rigged export looking like bare skin, and since
 the silhouette still grew the PNG looked plausible, which is why nothing
 caught it for a release. So `wearables.layers` hands the rigged path one part
 per standoff rather than one per garment, and the standoff is the piece's own
-padding - `None` for a fall of hair, a hat brim, a bun or a rucksack, which
-are not over the body at all and are dragged round to the front of the face by
-any standoff whatsoever. The test is not coverage, which the clamp never
+padding - `None` for a fall of hair, a hat brim or a bun, which are not over
+the body at all and are dragged round to the front of the face by any standoff
+whatsoever. The test is not coverage, which the clamp never
 touched: it is whether the thick version stands *proud* of what the thin one
 reaches.
 
 **The garment names are the vocabulary, the outfits are the catalogue.** The
 same split `everyday.POSES` makes against the command ops, for the same
-reason: a model picks a garment on every `wear`, so those forty-odd names stay
-lean, while `outfit` is picked at most once per figure and saves five guesses,
-so `wearables.OUTFITS` can name forty-six looks. An outfit sets only the slots
+reason: a model picks a garment on every `wear`, so those thirty-odd names
+stay lean, while `outfit` is picked at most once per figure and saves four
+guesses, so `wearables.OUTFITS` can name thirty-one looks. An outfit sets only
+the slots
 it names - "outfit winter" leaves the haircut alone, and a `wear` either side
 of it still lands - which is why "bare" has to name every slot explicitly:
 taking it all off is the one thing that cannot be said by omission.
 
-**A panel of cloth is one slab, and a pair of tails has to splay.** An apron
-built as a stack of stations following the torso's own profile gives every
-station its own width and its own depth, and every step between them comes out
-as a band across the apron; it hangs in one plane, so build it as one. Two
-ponytails at the same fall hang in the same place and read as one, so a pair
-splays as it falls. And a rucksack swept as an ellipsoid is a beach ball on
-someone's back - `_box_z` exists, and the corners are most of what says
-"pack". A hat brim is round: giving the reach to the depth alone and 45% of it
-to the width put a diving board on a walking figure in a sun hat.
+**A pair of tails has to splay, and a hat brim is round.** Two ponytails at
+the same fall hang in the same place and read as one, so a pair splays as it
+falls. And giving a brim's reach to the depth alone with 45% of it to the
+width put a diving board on a walking figure in a sun hat. The same class of
+mistake is why a flat panel of cloth - an apron, a cape - has to be one slab
+rather than a stack of stations following the torso's profile, which comes out
+of the depth map in horizontal bands, and why a rucksack wants `_box_z` rather
+than an ellipsoid, which is a beach ball on someone's back. Those three are
+not in the vocabulary now, because the library has no mesh for them; if they
+come back, they come back knowing this.
 
 **A rigged export wears real meshes, and only real meshes.** `wearables`
 builds a garment out of the body's own swept profile; that draws the viewport
@@ -328,8 +345,9 @@ that: every bone was aimed at a keypoint, then slid onto it and scaled until it
 landed, so the mesh came out wearing the keypoint skeleton's proportions -
 stretched by up to a tenth per segment, thigh and shin pulling opposite ways on
 the same leg. Those proportions come from a table and the rig is a measured
-body; the two were never going to agree, and most of the length of this file is
-the reconciliation. None of it is needed. A pose is a set of joint ANGLES, and
+body; the two were never going to agree, and reconciling them took six passes
+of per-segment scaling, a landmark-offset table, and several hundred lines that
+are no longer here. None of it was needed. A pose is a set of joint ANGLES, and
 the line from a shoulder keypoint to an elbow keypoint says which way an upper
 arm points no matter whose arm it is. So `mesh_backend.pose_rig` takes the
 directions and nothing else, every bone is rotated and none is moved or
@@ -337,10 +355,9 @@ resized, and each segment comes out at exactly the length it was authored with.
 The rig's own hands, feet and spine chain come along for free - 85 of its 104
 bones, 30 of them in the hands, had nothing to do under a retarget.
 
-`solve_pose` stays for a rig that has no figure behind it, and `stature` still
-sizes the body, because a figure has to be the right height to stand beside
-another one - but that is one uniform scale over the whole mesh and it changes
-no proportion.
+`stature` still sizes the body, because a figure has to be the right height to
+stand beside another one - but that is one uniform scale over the whole mesh
+and it changes no proportion.
 
 **And the OpenPose PNG is a description of that mesh, never a second opinion
 about it.** `keypoint_riders` and `keypoints_of` read the eighteen back off the
@@ -360,25 +377,17 @@ the same point.** OpenPose's shoulder is the acromion - the bony corner on
 mean by it - while the bone an arm swings from starts at the glenohumeral
 joint, below it and well inboard. Its neck is not a neck at all: COCO has none,
 so it is inferred as the *midpoint of the shoulders*, out in the middle of the
-upper chest, where a rig's neck bone starts at the top of the thorax. Sliding a
-rig joint onto either drags the body with it - the shoulder line up and
-outward, the whole head down. `mesh_backend.LANDMARK_JOINTS` names them and
-`landmark_shift` holds each at the offset the rig itself has at rest, measured
-from the hip midpoint and rotated into a common frame on both sides, because
-the rig's coordinates and the editor's share neither an origin nor a heading
-and a raw difference of positions is dominated by that - which threw the
-shoulders further out than leaving them alone did. Elbow, wrist, knee and ankle
-keypoints *are* joint centres and must never be in that list.
-
-**A landmark offset says where a joint sits, never how long the bone leaving
-it is.** Two releases went out getting this wrong in opposite directions.
-Applied whole against keypoints that hang the arm from the acromion, the
-shoulder's offset moves the joint 6 cm down the arm while the elbow keypoint
-stays put, so the humerus spans a gap 6 cm shorter than it is: 18% of an
-adult's upper arm and 54% of the child's. Masking the offset along the bone
-keeps the humerus and throws away the correction that lowers the shoulder
-line, so every figure stands with its shoulders round its ears. Neither is a
-fix, because both are working around keypoints that are wrong.
+upper chest, where a rig's neck bone starts at the top of the thorax. This is
+why nothing slides a rig joint onto a keypoint: doing so drags the body with it
+- the shoulder line up and outward, the whole head down - and correcting it
+with a table of per-joint offsets went out wrong twice in opposite directions.
+Applied whole, the shoulder's offset moved the joint 6 cm down the arm while
+the elbow keypoint stayed put, so the humerus spanned a gap 6 cm shorter than
+it is: 18% of an adult's upper arm and 54% of the child's. Masking the offset
+along the bone kept the humerus and threw away the correction, so every figure
+stood with its shoulders round its ears. Neither was a fix. Aiming a bone needs
+no offset at all, because a direction does not care where either end sits - and
+elbow, wrist, knee and ankle keypoints are joint centres anyway.
 
 **So the arm hangs from the joint.** `derive_proportions` closes the arm on the
 measured span from `gh_w`, the glenohumeral half-width, and splits it by
@@ -387,22 +396,10 @@ acromion-radiale ratio, which starts at a bony corner 0.022 of stature above
 and 0.009 inboard of the joint and overstates the humerus by the difference.
 Measured from the joint it closes to a tenth of a percent: gh_w + humerus +
 forearm + hand is 0.5172 of stature against a measured half-span of 0.5165 on
-the adult male rig. `build_rest_points` then carries `l_gh`/`r_gh` and
-`neck_joint` alongside the eighteen keypoints - not keypoints, OpenPose has no
-such thing, but the only place that knows where those joints are - and
-`mesh_backend.LANDMARK_SOURCE` reads them. The offset is then that figure's own
-anthropometry, so moving the rig's shoulder onto it lands the joint exactly a
-humerus away from the elbow keypoint and nothing is stretched to reach.
-
-Derived from the rig instead, as `landmark_shift` still must for a rig whose
-figure says nothing, the offset came out 6.5 cm where the anthropometry says
-3.9: the extra 2.6 is whatever the rig and the preset disagree about between
-the hip and the shoulder, and every centimetre of it lands on the humerus.
-
-With both declared, the shoulder line sits within 0.007 of the body's height of
-where the rig author put it - against 0.027 before any of this - every figure
-finishes within 1.5 cm of its stature, and no arm bone is off the rig's own by
-more than 7%.
+the adult male rig, which is what `tests/test_proportions.py` asserts. The
+keypoints the editor hands out then put the elbow exactly a humerus from the
+shoulder joint rather than from the bony corner above it, and every figure
+finishes within 1.5 cm of its stature.
 
 The lesson underneath is duller and worth more. Every check written for the
 first attempt was on the shoulder - where it sat, how wide it was, how proud it
@@ -418,23 +415,19 @@ landmarks.** This divided the keypoints' shoulder-to-hip distance by the rig's
 own, and those two spans do not measure the same thing - an acromion-to-
 trochanter against a glenohumeral-to-femoral-head - so the whole rig came up
 15% oversize on an average adult and 41% on the child before a single bone had
-been aimed. The per-segment scaling then spent six passes dragging the limbs
-back down, and what it could not reach stayed inflated: shoulders 4 cm high and
-4.5 cm broad on an average man, 5.6 and 6.4 on a woman, and a child 8 cm too
-tall with its shoulders 21 cm high and half again too wide. `solve_pose` takes
-`stature` and sizes the rig by it against its own rest height; a body set built
-for these presets is authored at the figure's stature, so the rig is left the
-size it was drawn. Without one it falls back to the span, which is all an
-outside rig can offer.
+been aimed, and the scaling passes that tried to drag it back down left
+shoulders 4 cm high on an average man and a child 8 cm too tall. `pose_rig`
+takes `stature` and sizes the rig by it against its own rest height; a body set
+built for these presets is authored at the figure's stature, so the rig is left
+the size it was drawn. Without one - an outside GLB with no figure behind it -
+it falls back to the torso span, which is all such a rig can offer, and that
+fallback is the only thing that span is still used for.
 
-Two things say the sizing stayed fixed. The fit is *exact* - every mapped joint
-lands on the point it was sent to and every segment matches to 0.00 cm, where
-the best before was 1.2 cm - so the sentinel in that test starts at -1.0, or a
-perfect fit reports as "none measured". And the rigged body now fills the same
-frame as the swept anatomy to within a tenth. The old detail test passed on the
-strength of the bug: a body a sixth too big for its own skeleton covers more of
-the picture and carries more edge with it, so normalise that measure per
-covered pixel or it is measuring size, not surface.
+The rigged body now fills the same frame as the swept anatomy to within a
+tenth. The old detail test passed on the strength of the bug: a body a sixth
+too big for its own skeleton covers more of the picture and carries more edge
+with it, so normalise that measure per covered pixel or it is measuring size,
+not surface.
 
 **There is no child in ANSUR, so the child row is measured against the body
 set's own rigs.** It is the male row times the adult-to-child shape change,
@@ -450,47 +443,14 @@ puts it at 63.0, so the torso ran 8 cm long. Only the ratio is taken from the
 rig and never the absolute: the rig's shoulder is the glenohumeral joint and
 the table's is the acromion.
 
-**A rig is fitted to the figure segment by segment, never dragged onto it.**
-One number - the ratio of the two shoulder-to-hip spans - cannot match a torso
-and the limbs hanging off it unless the two bodies have the same proportions.
-Against the editor's presets the same rig came out with a forearm 30% long on
-an average man and 54% on the child, whose thigh and shin were 58% and 61%
-over. Sliding each joint onto its keypoint and carrying its subtree, which is
-what closed that, puts the *joint* right and leaves the geometry between at
-the rig's own length: a 42 cm shin pulled onto a 26 cm gap overshoots the
-ankle, and the child came out with bowed shins and its feet hanging off them.
-Scale is what was missing. `skin_mesh` builds a general 4x4 out of Q, so a
-uniform scale per bone shortens a segment's geometry along with its length -
-a shorter shin is a thinner shin, which is what a child's is - and the mesh is
-never torn. Four things it took to work:
+**A bone keeps the length it was authored with, and the self-test says so
+exactly.** `skin_mesh` still builds a general 4x4 out of Q, because the uniform
+stature scale rides in it, but nothing writes a per-bone scale any more: the
+selftest asserts every segment matches the rig's own to machine precision
+(4e-16) rather than to a tolerance. A tolerance is what let a per-segment
+scaling pass hide behind "close enough" for several releases.
 
-- the scale goes into `local`, not `Q`: `propagate` rebuilds every Q from
-  local and wipes anything written to Q directly;
-- `local` composes down the tree, so scaling the top of a chain scales
-  everything hanging below it - the whole leg for a thigh, the whole body for
-  the spine. Divide it back out at every branch off the chain, so a hand keeps
-  the body's scale rather than its forearm's correction;
-- scaling moves joints, which leaves every aimed direction stale: a pelvis
-  pulled in carries the thigh with it and the knee ends up inboard of the
-  keypoint the thigh was pointed at. Aim again each pass and the two converge;
-- and measure the target from the *rig's own parent joint*, not from the
-  keypoint standing in for it. Aiming has already put the child on the ray
-  from that joint towards the keypoint, so scaling by that ratio lands it
-  exactly - whereas aiming a shoulder from the collar and then scaling it from
-  the neck are two constraints that place it nowhere in particular.
-
-Once Q can carry a scale, `aim` has to take the rotation out of it before
-using the transpose as an inverse, or every re-aim multiplies the limb by the
-square of its scale. Worst joint error across the nine bodies went from
-30 cm to 1.2 cm, and the worst limb pinch from 14% to 7%.
-
-**A bone keeps its shape, not its size.** The self-test used to assert that
-distances inside one bone's vertex set were preserved exactly, and that check
-had to go with the above - a scaled segment is a scaled segment. What must not
-change is the *shape*: a uniform scale leaves every ratio of distances alone,
-while shear, a torn joint, or a limb dragged onto its keypoint do not.
-
-**Assets ride the body's pose solution.** `solve_pose` returns the result keyed
+**Assets ride the body's pose solution.** `pose_rig` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
 solve an asset separately or it will drift from the body.
 
@@ -674,12 +634,15 @@ a build.
 4. Wrists are never rotated; there is no keypoint for them. Ankles are only
    levelled, not aimed - a foot taking weight goes flat, but nothing turns it
    in or out.
-5. The garment library covers hair, tops, bottoms and shoes; `over`
-   (apron, cape, backpack, scarf) and most headgear have no mesh behind them
-   yet, so those slots are silently not worn on a rigged export. The packs
-   have hats and more besides - `tools/make_wearables.py --list` shows the
-   fifty-odd available - it is a matter of building and vendoring them.
-5. The web prototype duplicates the maths in JavaScript. It is tested
+5. The garment vocabulary was cut back to what the library can actually put
+   on a figure: the `over` slot (apron, cape, backpack, scarf) and eleven
+   presets with no mesh behind them are gone rather than silently absent from
+   a rigged export. Headgear is one fedora standing in for hat, cap and sun
+   hat. The packs have far more - `tools/make_wearables.py --list` shows the
+   fifty-odd available - so widening the vocabulary again is a matter of
+   building and vendoring meshes first, never of naming things the export
+   cannot deliver.
+6. The web prototype duplicates the maths in JavaScript. It is tested
    independently (`node web/test.mjs`) and will drift from the Python. Two
    things no longer can: the preset table is generated from `preset_params`
    and `tests/test_proportions.py` reads it back and compares - it had drifted

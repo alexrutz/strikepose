@@ -97,7 +97,7 @@ for sex, ref in REFERENCE.items():
     # arm hangs from the glenohumeral joint, not from the acromion keypoint,
     # and adding shoulder_w to the segments counts the 0.9 cm between them as
     # arm. That is how a sum can close while the elbow sits 4 cm high.
-    span = 2.0 * (abs(at("l_gh")[0]) + body["upper_arm"] + body["forearm"]
+    span = 2.0 * (body["gh_w"] + body["upper_arm"] + body["forearm"]
                   + table["hand"] * stature)
     close(span / stature, ref["span"], 0.004,
           "the arm span closes on the measured span")

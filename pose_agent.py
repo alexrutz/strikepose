@@ -364,7 +364,7 @@ outfit NAME:  %(outfits)s
   `wear`. An outfit only sets the slots it names, so a haircut chosen before or
   after it survives.
 wear:         %(wearables)s
-  one from each of hair, headgear, top, over, bottom and shoes at most; they
+  one from each of hair, headgear, top, bottom and shoes at most; they
   stack, so a coat does not remove the trousers. Leave a slot out to leave it
   bare.
 
@@ -1944,7 +1944,7 @@ def _selftest():
           not wearables.worn(skeleton.outfit), str(skeleton.outfit))
     check("a whole look asked for through `wear` is still understood",
           apply_command(skeleton, {"op": "wear", "wears": "chef"}) is None
-          and skeleton.outfit.get("over") == "apron", str(skeleton.outfit))
+          and skeleton.outfit.get("headgear") == "cap", str(skeleton.outfit))
     check("a prompt that names a job is dressed for it",
           keyword_plan("a chef chopping onions")["figures"][0]["commands"]
           [-1:] != []

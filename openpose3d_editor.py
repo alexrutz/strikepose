@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.40.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.41.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -206,8 +206,6 @@ ANSUR = {
         "ankle_height": 0.0415,         # lateral malleolus height
         "shoulder_w": 0.1184,           # biacromial breadth / 2
         "hip_w": 0.0500,                # femoral heads; see below
-        "neck_rise": 0.0377,          # the neck bone starts this far
-                                    # above the shoulder midpoint
         "gh_w": 0.1094,               # glenohumeral half-width
         "gh_drop": 0.0222,            # acromion down to that joint
         "arm_split": 0.5124,          # humerus / (humerus + forearm)
@@ -228,8 +226,6 @@ ANSUR = {
         "ankle_height": 0.0385,
         "shoulder_w": 0.1122,
         "hip_w": 0.0535,
-        "neck_rise": 0.0265,          # the neck bone starts this far
-                                    # above the shoulder midpoint
         "gh_w": 0.0982,               # glenohumeral half-width
         "gh_drop": 0.0279,            # acromion down to that joint
         "arm_split": 0.5451,          # humerus / (humerus + forearm)
@@ -263,8 +259,6 @@ ANSUR = {
         "ankle_height": 0.0416,         # x 1.002
         "shoulder_w": 0.1043,           # x 0.881 - the big one
         "hip_w": 0.0500,
-        "neck_rise": 0.0386,          # the neck bone starts this far
-                                    # above the shoulder midpoint
         "gh_w": 0.0964,               # glenohumeral half-width
         "gh_drop": 0.0215,            # acromion down to that joint
         "arm_split": 0.5231,          # humerus / (humerus + forearm)
@@ -352,7 +346,6 @@ def derive_proportions(stature, sex="male", leg_ratio=1.0):
         # humerus
         "gh_w": stature * m["gh_w"],
         "gh_drop": stature * m["gh_drop"],
-        "neck_rise": stature * m["neck_rise"],
         "hip_w": stature * m["hip_w"],                          # femoral heads
         "torso_len": (m["shoulder_height"]
                       - m["hip_height"] * leg_ratio) * stature,
@@ -515,13 +508,7 @@ def build_rest_points(body):
     nose_up = body.get("nose_up", 16.0 * h)
     ear_up = body.get("ear_up", 19.0 * h)
     pts = {"neck": (0.0, 0.0, 0.0),
-           "nose": (0.0, nose_up, 5.0 * h),
-           # Not a keypoint either. OpenPose's neck is the midpoint of the
-           # shoulders, out in the middle of the upper chest; a neck bone
-           # starts at the top of the thorax, 4 to 7 cm above it. Without
-           # this the rig's neck is dragged down onto the chest and takes the
-           # head with it, which reads as a figure with no neck at all.
-           "neck_joint": (0.0, body.get("neck_rise", 0.0), 0.0)}
+           "nose": (0.0, nose_up, 5.0 * h)}
     for side, sx in (("r", -1.0), ("l", 1.0)):
         pts[side + "_eye"] = (sx * 3.0 * h, ear_up + 1.0 * h, 7.0 * h)
         pts[side + "_ear"] = (sx * 7.5 * h, ear_up, 1.0 * h)
@@ -536,13 +523,6 @@ def build_rest_points(body):
         kn = (hp[0] + sx * 0.023 * th, hp[1] - 0.9997 * th, 0.0)
         an = (kn[0], kn[1] - 0.9976 * ca, kn[2] - 0.0697 * ca)
         pts[side + "_shoulder"], pts[side + "_elbow"], pts[side + "_wrist"] = sh, el, wr
-        # Not a keypoint - OpenPose has no such thing - but the rig fitter
-        # needs it, and this is the only place that knows it. Carried as an
-        # extra entry rather than derived over there from a rig whose torso
-        # may not be this figure's: measured that way the offset came out
-        # 6.5 cm where the anthropometry says 3.9, and the extra 2.6 was a
-        # disagreement about torso length being charged to the humerus.
-        pts[side + "_gh"] = gh
         pts[side + "_hip"], pts[side + "_knee"], pts[side + "_ankle"] = hp, kn, an
     return pts
 
@@ -2645,8 +2625,8 @@ class EditorApp:
                                 activebackground=HOVER, activeforeground=FG)
         looks.pack(side="right", fill="x", expand=True)
         for slot, label in (("hair", "Hair"), ("headgear", "Headgear"),
-                            ("top", "Top"), ("over", "Over"),
-                            ("bottom", "Bottom"), ("shoes", "Feet")):
+                            ("top", "Top"), ("bottom", "Bottom"),
+                            ("shoes", "Feet")):
             line = tk.Frame(body, bg=PANEL)
             line.pack(fill="x", padx=12, pady=1)
             tk.Label(line, text=label, bg=PANEL, fg=MUTED, anchor="w", width=8,

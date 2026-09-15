@@ -204,8 +204,8 @@ check("and the body does not come through it",
 sweep = lambda outfit: (setattr(worn, "outfit", dict(outfit)),
                         np.asarray(editor.anatomy_depth_image(
                             [worn], camera, rect, 384, 576), float))[1]
-for slot, thin, thick in (("hair", "shaved", "afro"),
-                          ("headgear", "none", "helmet")):
+for slot, thin, thick in (("hair", "short", "curly"),
+                          ("headgear", "none", "hat")):
     lean = sweep({slot: thin})[:int(0.22 * 576)]
     bulky = sweep({slot: thick})[:int(0.22 * 576)]
     check("a swept %s is thicker than a %s" % (thick, thin),
@@ -213,143 +213,54 @@ for slot, thin, thick in (("hair", "shaved", "afro"),
           "%d px against %d" % (int((bulky > 0).sum()), int((lean > 0).sum())))
 worn.outfit = {}
 
-# -- a rig is fitted segment by segment, not dragged -----------------------
+# -- the rig is posed, not fitted -----------------------------------------
 #
-# The rig used to be fitted to the figure by one number, the ratio of the two
-# shoulder-to-hip spans, and one number cannot match a torso and the limbs
-# hanging off it unless the bodies have the same proportions. Against these
-# presets the same rig came out with a forearm 30% long on an average man and
-# 54% on the child, whose thigh and shin were 58% and 61% over - and the fix
-# for that was to slide each joint onto its keypoint and carry its subtree,
-# which puts the *joint* right and leaves the geometry between at the rig's
-# own length. A 42 cm shin pulled onto a 26 cm gap overshoots the ankle. The
-# child came out with bowed shins and its feet hanging off them.
+# Every bone points the way its two keypoints do and keeps the length the rig
+# authored, so a joint sits off its keypoint by however much the two bodies'
+# proportions differ and nothing is stretched to close that gap. What this
+# replaced aimed each bone at the absolute keypoint and then slid and scaled
+# it until it landed, which put +7% on a humerus and -10% on a shin of the
+# same figure.
 import mesh_backend
 from openpose3d_editor import Skeleton, preset_params, build_rest_points
 
 SEGMENTS = [("l_shoulder", "l_elbow"), ("l_elbow", "l_wrist"),
             ("l_hip", "l_knee"), ("l_knee", "l_ankle"),
             ("r_shoulder", "r_elbow"), ("r_hip", "r_knee")]
-index = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
-# -1.0, not 0.0: the fit lands exactly now, and a sentinel that only records
-# a value strictly greater than zero reports a perfect fit as "none measured",
-# which reads like the loop never ran.
-worst_segment, worst_joint = ("exactly", -1.0), ("exactly", -1.0)
+worst_length, worst_aim = ("exactly", -1.0), ("exactly", -1.0)
 for preset in BODY_PRESETS:
     mesh = bank[preset]
     skeleton = Skeleton(preset_params(preset))
     points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
-    solved = mesh_backend.solve_pose(
-        mesh, points, mesh["roles"],
-        rest_points=build_rest_points(skeleton.body),
-        stature=skeleton.body.get("stature"))
-    names, roles = mesh["joint_names"], mesh["roles"]
-    at = lambda role: solved["bones"][names[roles[role]]][1]
-    # Where the joint was actually SENT. For most roles that is the keypoint;
-    # for a landmark role it is the keypoint plus the rig's own rest offset,
-    # because OpenPose's shoulder is the acromion on top of the shoulder and
-    # the arm swings from the joint below and inboard of it. Measuring against
-    # the bare keypoint is measuring against a point no bone was aimed at.
-    sent = lambda role: (np.asarray(points[role], float)
-                         + solved["shift"].get(role, 0.0))
-    for top, end in SEGMENTS:
-        if top not in roles or end not in roles:
-            continue
-        got = float(np.linalg.norm(at(end) - at(top)))
-        want = float(np.linalg.norm(sent(end) - sent(top)))
-        gap = abs(got - want) / max(1e-9, want)
-        if gap > worst_segment[1]:
-            worst_segment = ("%s %s->%s (%.1f vs %.1f cm)"
-                             % (preset, top, end, got, want), gap)
-    for role in ("l_shoulder", "l_elbow", "l_wrist", "l_hip", "l_knee",
-                 "l_ankle"):
-        if role not in roles:
-            continue
-        off = float(np.linalg.norm(at(role) - sent(role)))
-        if off > worst_joint[1]:
-            worst_joint = ("%s %s" % (preset, role), off)
-
-check("every limb segment is scaled to the keypoints on every body",
-      worst_segment[1] < 0.02,
-      "worst %s off by %.1f%%" % (worst_segment[0], 100.0 * worst_segment[1]))
-check("and every mapped joint still lands where it was sent",
-      worst_joint[1] < 0.5, "worst %s by %.2f cm" % worst_joint)
-
-# The shoulder is the one that is deliberately NOT sent to its keypoint, and
-# the correction has to be real and small: zero means the landmark offset has
-# quietly stopped being applied, and a large one means it is being computed in
-# the wrong frame - which it was first time round, when subtracting two
-# positions that share no origin threw the shoulders further out than leaving
-# them alone did.
-pulls = []
-for preset in BODY_PRESETS:
-    skeleton = Skeleton(preset_params(preset))
-    points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
-    shift = mesh_backend.solve_pose(
-        bank[preset], points, bank[preset]["roles"],
-        rest_points=build_rest_points(skeleton.body),
-        stature=skeleton.body.get("stature"))["shift"]
-    pulls.append((preset, float(np.linalg.norm(shift.get("l_shoulder", 0.0)))))
-# A landmark offset says where a joint SITS, never how long the bone leaving
-# it is - this project's oldest invariant, arriving somewhere new. Applied
-# whole, the shoulder's offset moved the joint 6 cm down the arm while the
-# elbow keypoint stayed put, so the humerus had to span a gap 6 cm shorter
-# than it is: 18% of an adult's upper arm and 54% of the child's, which came
-# out of the depth map as visibly deformed elbows. It shipped, because every
-# check here was on the shoulder and none was on the arm hanging off it.
-squashed = ("none", 0.0)
-for preset in BODY_PRESETS:
-    mesh = bank[preset]
-    skeleton = Skeleton(preset_params(preset))
-    points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
-    solved = mesh_backend.solve_pose(
+    solved = mesh_backend.pose_rig(
         mesh, points, mesh["roles"],
         rest_points=build_rest_points(skeleton.body),
         stature=skeleton.body.get("stature"))
     names, roles = mesh["joint_names"], mesh["roles"]
     at = lambda role: solved["bones"][names[roles[role]]][1]
     rested = mesh["rest_position"] * solved["scale"]
-    for role, bone in mesh_backend.LANDMARK_JOINTS.items():
-        if bone is None or role not in roles or role not in solved["shift"]:
+    for top, end in SEGMENTS:
+        if top not in roles or end not in roles:
             continue
-        was = float(np.linalg.norm(rested[roles[bone]] - rested[roles[role]]))
-        now = float(np.linalg.norm(at(bone) - at(role)))
+        was = float(np.linalg.norm(rested[roles[end]] - rested[roles[top]]))
+        now = float(np.linalg.norm(at(end) - at(top)))
         gap = abs(now / max(1e-9, was) - 1.0)
-        if gap > squashed[1]:
-            squashed = ("%s %s->%s (%.1f vs %.1f cm)"
-                        % (preset, role, bone, now, was), gap)
+        if gap > worst_length[1]:
+            worst_length = ("%s %s->%s (%.2f vs %.2f cm)"
+                            % (preset, top, end, now, was), gap)
+        got = at(end) - at(top)
+        got = got / max(1e-9, float(np.linalg.norm(got)))
+        want = (np.asarray(points[end], float)
+                - np.asarray(points[top], float))
+        want = want / max(1e-9, float(np.linalg.norm(want)))
+        off = float(np.linalg.norm(got - want))
+        if off > worst_aim[1]:
+            worst_aim = ("%s %s->%s" % (preset, top, end), off)
 
-# The offset may point along the bone - the acromion sits almost straight
-# above the glenohumeral joint, so on a hanging arm it mostly does. What it
-# may not do is change the bone's length, and the honest way to hold both is
-# for the keypoints to be right: the rest pose hangs the arm from the
-# glenohumeral joint, so moving the rig's shoulder there lands it exactly the
-# humerus away from the elbow keypoint. Masking the offset along the bone
-# instead keeps the humerus and throws away the correction that lowers the
-# shoulder line - which is what shipped, with every figure's shoulders round
-# its ears. So this checks the length, not the direction.
-check("no landmark bone is squashed or stretched to reach its keypoint",
-      squashed[1] < 0.12, "worst %s off by %.0f%%"
-      % (squashed[0], 100.0 * squashed[1]))
-
-# and the reason it is not: the rest pose puts the arm's origin at the joint,
-# inboard of and below the shoulder keypoint
-gaps = []
-for preset in BODY_PRESETS:
-    rest = build_rest_points(Skeleton(preset_params(preset)).body)
-    if "l_gh" not in rest:
-        gaps.append("%s has no l_gh" % preset)
-        continue
-    inboard = abs(rest["l_shoulder"][0]) - abs(rest["l_gh"][0])
-    below = rest["l_shoulder"][1] - rest["l_gh"][1]
-    if not (0.4 < inboard < 6.0 and 1.5 < below < 8.0):
-        gaps.append("%s in %.1f down %.1f" % (preset, inboard, below))
-check("the arm hangs from the joint, not from the shoulder keypoint",
-      not gaps, str(gaps[:3]))
-
-check("the shoulder is held off its keypoint, by a few centimetres",
-      all(1.0 < v < 9.0 for _p, v in pulls),
-      ", ".join("%s %.1f cm" % (p.split(",")[0], v) for p, v in pulls[:4]))
+check("every bone keeps the length the rig authored, on every body",
+      worst_length[1] < 1e-9, "worst %s off by %.2e" % worst_length)
+check("and points the way its two keypoints do",
+      worst_aim[1] < 1e-9, "worst %s by %.2e" % worst_aim)
 
 # The mesh must not be torn doing it: a sliding subtree leaves a seam, so
 # check the limb is still one connected piece of surface by measuring the
@@ -357,7 +268,7 @@ check("the shoulder is held off its keypoint, by a few centimetres",
 child = bank["Child, about 7"]
 skeleton = Skeleton(preset_params("Child, about 7"))
 points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
-solved = mesh_backend.solve_pose(child, points, child["roles"],
+solved = mesh_backend.pose_rig(child, points, child["roles"],
                                  rest_points=build_rest_points(skeleton.body))
 posed = mesh_backend.skin_with(child, solved)
 seam = (None, 0.0)
