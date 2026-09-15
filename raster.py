@@ -369,32 +369,16 @@ def depth_buffer(groups, width, height, blend=0.0):
 
 
 def render_depth(groups, width, height, blend=0.0, near=255, far=45,
-                 background=0, reference=None):
+                 background=0):
     """The same, as a ControlNet depth image. See `depth_buffer`."""
     return depth_to_grey(depth_buffer(groups, width, height, blend),
-                         near, far, background, reference)
+                         near, far, background)
 
 
-def depth_to_grey(zbuf, near=255, far=45, background=0, reference=None):
+def depth_to_grey(zbuf, near=255, far=45, background=0):
     """Normalise a z-buffer to the ControlNet convention: nearest brightest,
     background black. Shared by every depth source, so a scene rendered from
-    the anatomy, a rigged mesh or a mix of the two is graded the same way.
-
-    `reference` switches the grading from linear depth to INVERSE depth, with
-    a virtual eye that many buffer units in front of the nearest surface. It
-    is what a ground plane needs, and it is also what the consumer expects:
-    ControlNet's depth models are trained on MiDaS, which predicts disparity -
-    inverse depth - not metric distance.
-
-    Linear is right for a figure on its own, where the whole scene is the 40 cm
-    from a chest to a back and the two gradings are within a grey level of each
-    other. It is ruinous as soon as there is a room: a floor receding six
-    metres behind the figure makes the span fifteen times the figure's own, so
-    a linear grade spends 6% of its range on the subject and the body comes out
-    as four flat shades. The same scene in inverse depth gives the figure a
-    fifth of the range and still lets the floor fall away smoothly, because
-    disparity compresses distance exactly where distance stops mattering.
-    """
+    the anatomy, a rigged mesh or a mix of the two is graded the same way."""
     covered = np.isfinite(zbuf)
     height, width = zbuf.shape
     img = np.full((height, width), float(background))
@@ -404,13 +388,51 @@ def depth_to_grey(zbuf, near=255, far=45, background=0, reference=None):
         span = hi - lo
         if span < 1e-6:                 # flat surface: it is all "nearest"
             img[covered] = near
-        elif reference and reference > 0:
-            eye = float(reference)
-            # 1 at the nearest surface, falling towards 0 with distance
-            disparity = eye / (eye + (zbuf[covered] - lo))
-            floor_d = eye / (eye + span)
-            img[covered] = far + (near - far) * (disparity - floor_d) / (
-                1.0 - floor_d)
         else:
             img[covered] = far + (near - far) * (hi - zbuf[covered]) / span
+    return Image.fromarray(np.clip(img, 0, 255).astype("uint8"), mode="L")
+
+
+def grade_scene(subject, ground=None, near=255, far=45, background=0,
+                fade=None, brightest=0.62):
+    """The scene graded to grey, with the ground on a falloff of its own.
+
+    Two curves, because the ground is not the subject. The subject - the
+    figures and anything placed with them - is normalised over its OWN depth
+    range exactly as `depth_to_grey` does, so a figure is graded identically
+    whether or not there is a floor under it. The ground then falls away from
+    `brightest` with an inverse-depth curve, halving every `fade` units, and
+    reaches the background before it runs out.
+
+    One curve over both does not work, and the reason is worth keeping. A
+    linear grade spends its range on the room: with a floor three metres back
+    the body gets 61 grey levels of 210. Grading everything in inverse depth
+    instead - MiDaS's own convention - buys some of that back, but the floor
+    then crosses the whole frame as a slow gradient and stops at `far`, so it
+    ends in a hard grey line against the black background and reads as a
+    platform the figure is standing on. A floor should fade out, and fading
+    out means reaching the background, which is below `far` by definition.
+
+    So the ground gets to go all the way to black, which is also the truthful
+    answer: disparity really does go to zero at the horizon.
+    """
+    height, width = subject.shape
+    img = np.full((height, width), float(background))
+    lit = np.isfinite(subject)
+    if lit.any():
+        z = subject[lit]
+        lo, hi = z.min(), z.max()
+        span = hi - lo
+        if span < 1e-6:
+            img[lit] = near
+        else:
+            img[lit] = far + (near - far) * (hi - subject[lit]) / span
+    if ground is not None and fade:
+        here = np.isfinite(ground)
+        # whichever surface is nearer wins the pixel, as everywhere else
+        show = here & (~lit | (ground < subject))
+        if show.any():
+            z0 = ground[show].min()
+            img[show] = (near * brightest * fade
+                         / (fade + (ground[show] - z0)))
     return Image.fromarray(np.clip(img, 0, 255).astype("uint8"), mode="L")

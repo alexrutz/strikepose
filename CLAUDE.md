@@ -546,26 +546,30 @@ most a level view can honestly say. Pitch is what makes a floor carry depth,
 and `high_three_quarter`, `bird` and `over_shoulder` are where it earns its
 keep.
 
-**A room is graded in inverse depth, a figure on its own in linear.**
-ControlNet's depth models are trained on MiDaS, which predicts disparity -
-inverse depth - not metric distance, so `depth_to_grey` takes a `reference`
-and grades that way whenever there is a ground plane. Linear is fine for a
-figure alone, where the whole scene is the 40 cm from a chest to a back and
-the two gradings are within a grey level of each other. It is ruinous with a
-room: on a standing figure from a high three-quarter, where the floor reaches
-three and a half metres back, a linear grade gives the body 61 grey levels of
-210 and the floor 164.
+**The ground is graded by a curve of its own, and the figure never notices
+it.** `raster.grade_scene` takes two buffers. The subject - the figures and
+anything placed with them - is normalised over its OWN depth range exactly as
+`depth_to_grey` does, so a figure comes out pixel-identical whether or not
+there is a floor under it; the selftest asserts that, and that the only pixels
+that differ are ones the floor COVERS, down at the ankles where the slab's
+near face crosses in front of the feet.
 
-`GROUND_REFERENCE` is what splits the range between the subject and the room,
-and since MiDaS disparity is scale- and shift-invariant there is no canonical
-value to copy - it is a choice. One body height, so brightness halves over one
-figure's height of distance behind the figure: 114 levels to the body and 116
-to the floor. At 420 cm it was 91 and 138 and the body flattened towards a
-white cut-out; much nearer and the floor falls to black within a metre and
-stops saying how far back anything is.
+One curve over both does not work, and both attempts are worth keeping. A
+linear grade spends the range on the room: with a floor three metres back the
+body got 61 grey levels of 210 and came out a flat white cut-out. Grading
+everything in inverse depth instead - MiDaS's own convention, and ControlNet's
+depth models are trained on MiDaS - bought some of that back, 114 levels
+against the floor's 116. But it still crossed the whole frame as a slow
+gradient and stopped at `far`, so it ended in a horizontal grey line against
+the black background and read as a platform the figure was standing on.
 
-The figure and the floor merge where they touch, and that is correct - the
-feet are at the floor's depth. Real depth maps do the same.
+A floor should fade OUT, and fading out means reaching the background, which
+is below `far` by definition. So the ground gets its own falloff, and it gets
+to go all the way to black - which is also the truthful answer, since
+disparity really does go to zero at the horizon. `GROUND_FADE` halves its
+brightness every 22 cm and `GROUND_BRIGHT` starts it at 0.48 of full white, so
+it is a pool of ground around the feet reaching about the bottom fifth of the
+frame, under the figure rather than competing with it.
 
 **The export shape is one table, and changing it re-frames.** `exporting.ASPECTS`
 names the ratios worth having and `parse_size` accepts either spelling, so the

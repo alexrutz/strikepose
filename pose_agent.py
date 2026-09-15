@@ -2003,15 +2003,41 @@ def _selftest():
     check("and the floor recedes rather than sitting flat",
           band.max() - band.min() > 60.0,
           "%.0f grey levels down the middle" % (band.max() - band.min()))
-    # The figure keeps its own modelling. A linear grade over a floor that
-    # runs metres back spends the range on the room; inverse depth - which is
-    # what MiDaS predicts and what ControlNet was trained on - leaves the
-    # subject a usable spread.
-    body_rows = _np.asarray(floating[1], float)
-    lit = body_rows > 0
-    check("and the figure is still modelled, not a flat cut-out",
-          (grey[lit].max() - grey[lit].min()) > 60.0,
-          "%.0f grey levels on the body" % (grey[lit].max() - grey[lit].min()))
+
+    # The figure is graded by its OWN depth range, so putting a floor under it
+    # changes nothing about the subject. This is the whole reason the ground
+    # has a curve of its own: one curve over both spent the range on the room
+    # and left the body a handful of flat shades.
+    bare = _np.asarray(floating[1], float)
+    lit = bare > 0
+    same = grey == bare
+    agree = float(same[lit].mean())
+    check("and the figure is graded exactly as it is with no floor at all",
+          agree > 0.98, "%.1f%% of body pixels identical" % (100.0 * agree))
+    # The pixels that do differ are the ones the floor COVERS, not ones it
+    # regrades: the slab's near face sits at the figure's own nearest depth,
+    # so it wins the z-test over anything further back at the same pixel -
+    # the ankles, where the floor in front of the feet crosses them. They are
+    # all near the foot of the frame, and nowhere else.
+    rows = _np.nonzero((lit & ~same).any(axis=1))[0]
+    check("and the only pixels it changes are ones it covers, down at the feet",
+          rows.size == 0 or rows.min() > 0.6 * grey.shape[0],
+          "highest changed row %d of %d"
+          % (rows.min() if rows.size else -1, grey.shape[0]))
+
+    # The floor fades OUT rather than stopping at a fixed grey. `far` is the
+    # darkest the subject is allowed to be, so a floor that reaches below it
+    # is one that runs into the background instead of ending in a horizontal
+    # band across the picture - which reads as a platform, not a floor.
+    only_floor = (grey > 0) & ~lit
+    check("and fades into the background instead of ending on a line",
+          grey[only_floor].min() < 45.0,
+          "dimmest floor pixel %.0f, against far=45"
+          % grey[only_floor].min())
+    check("while staying under the figure it is beside",
+          grey[only_floor].max() < grey[lit].max(),
+          "floor peaks at %.0f, figure at %.0f"
+          % (grey[only_floor].max(), grey[lit].max()))
 
     before = (cam.zoom, tuple(cam.target))
     frame_scene(standing, cam, frame_rect(900, 700, 160 / 240.0))

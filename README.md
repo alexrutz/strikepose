@@ -262,9 +262,11 @@ since it says where the floor is. A view with some pitch in it -
 `high_three_quarter`, `bird`, `over_shoulder` - shows the floor receding, and
 that is what carries the distance.
 
-The grading follows MiDaS, which is what ControlNet's depth models were
-trained on: inverse depth, so the subject keeps its modelling while the room
-falls away behind it.
+The floor is graded by a curve of its own: it starts a little under the
+figure's brightness at the feet and fades to black within a couple of metres,
+so it reads as the ground the person is on rather than a room filling the
+frame. The figure is graded over its own depth range, exactly as it is with no
+floor at all, so adding the ground never costs the subject any modelling.
 
 ## The export shape
 

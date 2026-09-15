@@ -25,7 +25,7 @@ except ImportError:
 from anatomy import body_parts
 from anthro import build_rest_points
 from posemap import render_openpose, resolution_stickwidth
-from raster import depth_buffer, depth_to_grey, render_depth
+from raster import depth_buffer, depth_to_grey, grade_scene, render_depth
 from skeleton import KEYPOINT_NAMES, Skeleton
 from vecmath import vadd, vcross, vdot, vlen, vmul, vnorm, vsub
 
@@ -172,20 +172,21 @@ GROUND_EXTENT = 2400.0
 # earns its keep.
 GROUND_THICK = 3.0
 
-# The virtual eye for the inverse-depth grading, in centimetres in front of
-# the nearest surface. MiDaS disparity is scale- and shift-invariant, so there
-# is no canonical value to copy and this is a choice: one body height, which
-# makes the rule "brightness halves over one figure's height of distance
-# behind the figure" - a scale the picture already contains.
+# How the floor falls away: its brightness halves every GROUND_FADE
+# centimetres behind the figure, from GROUND_BRIGHT of full white at the feet.
 #
-# It is what splits the range between the subject and the room, and the split
-# is what the number is for. Measured on a standing figure from a
-# high three-quarter, where the floor reaches three and a half metres back: a
-# linear grade gives the body 61 grey levels of 210 and the floor 164; an eye
-# at 420 cm gives 91 and 138; at 180 it is 114 and 116, which is about even.
-# Further and the body flattens towards a white cut-out, nearer and the floor
-# falls to black within a metre and stops saying how far back anything is.
-GROUND_REFERENCE = 180.0
+# These are what make it a pool of ground around the figure rather than a room
+# floor crossing the whole frame. Seventy centimetres puts it at a third of
+# its starting brightness a metre back and into the background within three,
+# so the slab's far edge is never a visible line - a floor that stops at a
+# fixed grey ends in a horizontal band across the picture and reads as a
+# platform, which is the version this replaced.
+#
+# GROUND_BRIGHT keeps it under the figure. At 1.0 the floor at the feet is the
+# brightest thing in the picture, which is true - it is nearest - and wrong
+# for a conditioning image, where the subject should lead.
+GROUND_FADE = 22.0
+GROUND_BRIGHT = 0.48
 
 
 def ground_level(figures):
@@ -248,9 +249,9 @@ def ground_part(figures, camera, rect, out_w, level=None):
     return to_camera_space(part, camera, rect, out_w)
 
 
-def ground_reference(camera, rect, out_w):
-    """`GROUND_REFERENCE` in the buffer's own units, which are pixels."""
-    return GROUND_REFERENCE * camera.zoom * out_w / (rect[2] - rect[0])
+def ground_fade(camera, rect, out_w):
+    """`GROUND_FADE` in the buffer's own units, which are pixels."""
+    return GROUND_FADE * camera.zoom * out_w / (rect[2] - rect[0])
 
 
 def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
@@ -270,16 +271,18 @@ def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
                for part in body_parts(figure, thickness)]
               for figure in figures]
     groups += prop_groups(props, camera, rect, out_w)
-    floor = ground_part(figures, camera, rect, out_w) if ground else None
-    if floor is not None:
-        # its own group: a floor blended into the figure would fillet the feet
-        # into it, and a person is not moulded to the ground they stand on
-        groups.append([floor])
     if not groups:
         groups = [[]]
-    return render_depth(groups, out_w, out_h, blend=2.0 * k,
-                        reference=(ground_reference(camera, rect, out_w)
-                                   if floor is not None else None))
+    subject = depth_buffer(groups, out_w, out_h, blend=2.0 * k)
+    # The ground is buffered on its own, never blended into the figure: it is
+    # graded by a curve of its own, and a floor smooth-minimumed into the feet
+    # would fillet a person into the ground they stand on.
+    floor = ground_part(figures, camera, rect, out_w) if ground else None
+    return grade_scene(subject,
+                       depth_buffer([[floor]], out_w, out_h)
+                       if floor is not None else None,
+                       fade=ground_fade(camera, rect, out_w),
+                       brightest=GROUND_BRIGHT)
 
 
 def pose_body(figure, mesh):
@@ -397,18 +400,18 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=(),
     # and mixing the two is worse than either, because the eye reads the join.
     # A slot the garment library has nothing for is simply not worn here;
     # `garments_lib.describe()` says which those are.
-    floor = ground_part([f for f, _m, _a in jobs], camera, rect, out_w) \
-        if ground else None
-    solids = list(prop_groups(props, camera, rect, out_w))
-    if floor is not None:
-        solids.append([floor])
-    if solids:
+    if len(props):
         # the triangle rasteriser and the analytic one write the same units, so
         # the objects simply join the buffer and the nearer surface wins
-        np.minimum(zbuf, depth_buffer(solids, out_w, out_h), out=zbuf)
-    return depth_to_grey(zbuf,
-                         reference=(ground_reference(camera, rect, out_w)
-                                    if floor is not None else None))
+        np.minimum(zbuf, depth_buffer(prop_groups(props, camera, rect, out_w),
+                                      out_w, out_h), out=zbuf)
+    floor = ground_part([f for f, _m, _a in jobs], camera, rect, out_w) \
+        if ground else None
+    return grade_scene(zbuf,
+                       depth_buffer([[floor]], out_w, out_h)
+                       if floor is not None else None,
+                       fade=ground_fade(camera, rect, out_w),
+                       brightest=GROUND_BRIGHT)
 
 
 def body_frame(skeleton):
