@@ -740,7 +740,8 @@ def main(argv=None):
     parser.add_argument("--preset", action="append", default=[],
                         help="only bodies whose name contains this")
     parser.add_argument("--size", default="512x768",
-                        help="export size, default 512x768")
+                        help="export size: 768x512, or a ratio like 16:9 "
+                             "(default 512x768)")
     parser.add_argument("--bodies", metavar="DIR",
                         help="folder of rigged .glb bodies, one per preset, "
                              "named after it (female_curvy.glb). Found "
@@ -770,7 +771,8 @@ def main(argv=None):
     if not presets:
         print("no body preset matched", file=sys.stderr)
         return 2
-    out_w, out_h = (int(v) for v in args.size.lower().split("x"))
+    from exporting import parse_size
+    out_w, out_h = parse_size(args.size)
     index, trouble = render_set(args.render, poses or None, presets,
                                 out_w, out_h, sheets=not args.no_sheets,
                                 bodies=args.bodies)

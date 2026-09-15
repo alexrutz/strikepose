@@ -44,7 +44,9 @@ from anthro import (ANSUR, BODY_PRESETS, DEFAULT_PRESET, REST_POSE,
                     build_rest_points, derive_proportions, merge_body,
                     preset_params)
 from camera import Camera
-from exporting import (anatomy_depth_image, frame_rect, frame_scene,
+import exporting
+from exporting import (ASPECT_NAMES, anatomy_depth_image, frame_rect,
+                       frame_scene,
                        pose_body, pose_image, project_people,
                        prop_groups, rigged_depth_image,
                        rigged_keypoints, to_camera_space)
@@ -86,6 +88,11 @@ TAB_ORDER = ("Pose", "Figure", "Scene", "Export")
 # for and most of the window was still black.
 ORTHO_WIDTH = 296
 ORTHO_COLUMNS = 2
+
+# What the shape menu says when the typed pixels are not one of the named
+# ratios. It is a label, never a setting: picking it changes nothing,
+# because there is nothing for "custom" to mean until someone types one.
+CUSTOM_ASPECT = "Custom"
 
 SECTION_TABS = {
     "Prompt": "Pose",
@@ -265,6 +272,8 @@ class EditorApp:
         self.body_thickness = tk.StringVar(value="1.0")
         self.out_w = tk.IntVar(value=512)
         self.out_h = tk.IntVar(value=768)
+        self.aspect_name = tk.StringVar(
+            value=exporting.aspect_name(512, 768) or CUSTOM_ASPECT)
         self.status = tk.StringVar(
             value="3D OpenPose editor %s. Drag a joint to pose it." % VERSION)
 
@@ -694,10 +703,29 @@ class EditorApp:
         switch(body, "Depth shading (D)", "depth_shading")
 
         # ---- export -------------------------------------------------------
-        body = section("Export", opened=False)
+        #
+        # The shape first and the pixels second. The frame drawn in the
+        # viewport is this ratio, and it is the rectangle everything is framed
+        # into, so it is the setting that changes what the picture is - the
+        # pixel count only changes how big a copy of it you get.
+        body = section("Export", opened=True)
+        shape = tk.Frame(body, bg=PANEL)
+        shape.pack(fill="x", padx=12, pady=(0, 2))
+        tk.Label(shape, text="Shape", bg=PANEL, fg=MUTED, anchor="w",
+                 font=("TkDefaultFont", 9)).pack(side="left")
+        ratio = tk.OptionMenu(shape, self.aspect_name,
+                              *(ASPECT_NAMES + (CUSTOM_ASPECT,)),
+                              command=self.set_aspect)
+        ratio.configure(bg=CONTROL, fg=FG, relief="flat", bd=0, anchor="w",
+                        highlightthickness=0, activebackground=HOVER,
+                        activeforeground=FG, padx=8, pady=2, cursor="hand2",
+                        font=("TkDefaultFont", 8))
+        ratio["menu"].configure(bg=PANEL, fg=FG, relief="flat", bd=0,
+                                activebackground=HOVER, activeforeground=FG)
+        ratio.pack(side="right", fill="x", expand=True)
         size = tk.Frame(body, bg=PANEL)
         size.pack(fill="x", padx=12, pady=2)
-        tk.Label(size, text="Size", bg=PANEL, fg=MUTED, anchor="w",
+        tk.Label(size, text="Pixels", bg=PANEL, fg=MUTED, anchor="w",
                  font=("TkDefaultFont", 9)).pack(side="left")
         for variable in (self.out_h, self.out_w):
             entry = tk.Entry(size, textvariable=variable, width=5, bg=CONTROL,
@@ -705,8 +733,9 @@ class EditorApp:
                              justify="center", highlightthickness=1,
                              highlightbackground=EDGE, highlightcolor=ACCENT)
             entry.pack(side="right", padx=2, ipady=3)
-            entry.bind("<Return>", lambda _e: self.redraw())
-            entry.bind("<FocusOut>", lambda _e: self.redraw())
+            entry.bind("<Return>", lambda _e: self.sync_aspect())
+            entry.bind("<FocusOut>", lambda _e: self.sync_aspect())
+        buttons(body, [("Turn it on its side", self.flip_aspect)], cols=1)
         tk.Checkbutton(body, text="Thicker lines when large",
                        variable=self.thick_lines, bg=PANEL, fg=FG, anchor="w",
                        selectcolor=CONTROL, activebackground=PANEL,
@@ -835,6 +864,45 @@ class EditorApp:
     def _refresh_scroll(self):
         self.panel_canvas.update_idletasks()
         self.panel_canvas.configure(scrollregion=self.panel_canvas.bbox("all"))
+
+    def set_aspect(self, name=None):
+        """Take a named shape, put the pixels to match, and re-frame.
+
+        Re-framing is the point. The export rectangle IS this ratio, so a
+        figure fitted to a tall frame is not fitted to a wide one: turning a
+        2:3 portrait on its side without re-framing crops the head and the
+        feet off, and the viewport would show it happening with no way to say
+        why. `frame_scene` is the same call the export makes.
+        """
+        name = self.aspect_name.get() if name is None else name
+        size = exporting.size_for(name)
+        if size is None:                 # "Custom" is a label, not a setting
+            return
+        self.aspect_name.set(name)
+        self.out_w.set(size[0])
+        self.out_h.set(size[1])
+        self.frame_all()
+        self.status.set("Export shape %s, %d x %d." % (name, size[0], size[1]))
+
+    def sync_aspect(self):
+        """Typed pixels won: say which named shape they are, or Custom.
+
+        By ratio rather than by the exact numbers, so 1024x1536 still reads as
+        2:3 - a control that only recognised its own defaults would call every
+        scaled-up export custom.
+        """
+        width, height = self._sizes()
+        self.aspect_name.set(exporting.aspect_name(width, height)
+                             or CUSTOM_ASPECT)
+        self.frame_all()
+
+    def flip_aspect(self):
+        """Portrait to landscape and back, whatever the shape is."""
+        width, height = self._sizes()
+        self.out_w.set(height)
+        self.out_h.set(width)
+        self.sync_aspect()
+        self.status.set("Export is now %d x %d." % (height, width))
 
     def show_tab(self, name):
         """Raise one tab of the panel. Ctrl+Tab cycles; the tabs are also keys.

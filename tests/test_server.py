@@ -95,6 +95,16 @@ check("and the whole pose catalogue, grouped",
          len(vocabulary["groups"])))
 check("and every pose says what it is",
       all(p["about"] for g in vocabulary["groups"] for p in g["poses"]))
+# The phone offers the same export shapes the desktop does, from one table.
+check("the vocabulary carries the export shapes",
+      len(vocabulary["aspects"]) >= 5
+      and all({"name", "width", "height"} <= set(a)
+              for a in vocabulary["aspects"]),
+      "%d shapes" % len(vocabulary["aspects"]))
+check("and a landscape one renders at that shape",
+      post("/api/render", {"plan": {"figures": [{"preset": "Male, average",
+           "commands": [{"op": "stance", "name": "standing"}]}]},
+           "width": 288, "height": 162})[1]["pose"].startswith("data:image/png"))
 check("and the objects and clothing the editor has",
       len(vocabulary["shapes"]) >= 20
       and len(vocabulary["wearables"]) == len(vocabulary["slots"]) == 5,

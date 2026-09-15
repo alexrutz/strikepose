@@ -27,9 +27,81 @@ from anthro import build_rest_points
 from posemap import render_openpose, resolution_stickwidth
 from raster import depth_buffer, depth_to_grey, render_depth
 from skeleton import KEYPOINT_NAMES, Skeleton
+from vecmath import vadd, vdot, vmul, vnorm, vsub
 
 INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
-from vecmath import vadd, vdot, vmul, vnorm, vsub
+
+
+# The aspect ratios worth naming, longest-edge 768 so every one of them is a
+# comparable amount of pixels rather than a comparable width. A conditioning
+# image is used at whatever size the generator wants, so what matters here is
+# the SHAPE; the sizes are a sensible default to go with each shape and
+# anything can still be typed in.
+#
+# 2:3 is first because it is what SD 1.5 and SDXL portrait checkpoints are
+# trained near, and a standing figure is a tall thin subject.
+ASPECTS = (
+    ("2:3 portrait", 512, 768),
+    ("3:4 portrait", 576, 768),
+    ("9:16 tall", 432, 768),
+    ("1:1 square", 768, 768),
+    ("4:3 landscape", 768, 576),
+    ("3:2 landscape", 768, 512),
+    ("16:9 wide", 768, 432),
+)
+
+ASPECT_NAMES = tuple(name for name, _w, _h in ASPECTS)
+
+
+def size_for(name):
+    """(width, height) for a named ratio, or None if it is not one of them."""
+    for entry, w, h in ASPECTS:
+        if entry == name:
+            return w, h
+    return None
+
+
+def aspect_name(width, height, tolerance=0.01):
+    """Which named ratio these pixels are, or None for anything else.
+
+    By ratio and not by the exact numbers: 1024x1536 is 2:3 as much as 512x768
+    is, and a control that only recognised its own defaults would call every
+    scaled-up export "custom".
+    """
+    if width <= 0 or height <= 0:
+        return None
+    ratio = float(width) / height
+    for name, w, h in ASPECTS:
+        if abs(ratio - float(w) / h) <= tolerance * ratio:
+            return name
+    return None
+
+
+def parse_size(text, long_edge=768):
+    """"768x512", "16:9" or "2:3 portrait" -> (width, height).
+
+    A ratio is as useful as a size on the command line and easier to get
+    right - nobody remembers that 9:16 at this long edge is 432 - so both
+    spellings are accepted wherever a size is.
+    """
+    text = str(text).strip().lower()
+    named = [n for n in ASPECT_NAMES if text == n.lower()]
+    if named:
+        return size_for(named[0])
+    for entry, w, h in ASPECTS:          # "16:9", the bare ratio of a name
+        if text == entry.split()[0]:
+            return w, h
+    if "x" in text:
+        wide, tall = text.split("x", 1)
+        return max(16, int(wide)), max(16, int(tall))
+    if ":" in text:
+        wide, tall = (float(v) for v in text.split(":", 1))
+        if wide <= 0 or tall <= 0:
+            raise ValueError("a ratio needs two positive numbers: %r" % text)
+        if wide >= tall:
+            return long_edge, max(16, int(round(long_edge * tall / wide)))
+        return max(16, int(round(long_edge * wide / tall))), long_edge
+    raise ValueError("size should be WxH or a ratio like 16:9, not %r" % text)
 
 
 def frame_rect(view_w, view_h, aspect):

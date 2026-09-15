@@ -516,6 +516,21 @@ lowest control on a 31-control tab as 107 pixels down. Position against the
 scrolling canvas, plus wherever the canvas is scrolled to, is the only thing
 that answers the question.
 
+**The export shape is one table, and changing it re-frames.** `exporting.ASPECTS`
+names the ratios worth having and `parse_size` accepts either spelling, so the
+editor menu, `--size 16:9` on every CLI and the phone's dropdown all read the
+same list - the phone's comes over the wire in `/api/vocabulary` rather than
+being written out again in JavaScript, for the same reason the preset table is
+generated.
+
+Changing the shape must call `frame_scene`, not just write two numbers. The
+export rectangle IS the ratio, so a figure fitted to a tall frame is not
+fitted to a wide one: turning a 2:3 portrait on its side without re-framing
+crops the head and the feet, and the only place that shows is the PNG. And a
+shape is recognised by RATIO, never by the exact pixels - 1024x1536 is 2:3 as
+much as 512x768 is, and a control that only knew its own defaults would call
+every scaled-up export "custom".
+
 **The locked views live in the width the export frame cannot use.** The export
 is 2:3 and a window is wide, so fitting that frame into the canvas leaves most
 of the width black at any window size - 880 of 1340 pixels at 1600x1000. The

@@ -56,7 +56,7 @@ import wearables
 from openpose3d_editor import (
     BODY_PRESETS, DEFAULT_PRESET, KEYPOINT_NAMES, VERSION, Camera, Skeleton,
     anatomy_depth_image, body_frame, carry_chain, frame_rect, frame_scene,
-    inside_polygon, pose_image,
+    inside_polygon, parse_size, pose_image,
     rigged_depth_image, silhouette_points,
     preset_params, project_people, scene_to_dict, solid_quads, vadd, vcross,
     vdot, vlen, vmul, vnorm, vsub,
@@ -1566,6 +1566,11 @@ def describe_vocabulary():
 
 
 def run(args):
+    # --size is the same setting as --width/--height and easier to get right,
+    # since nobody remembers what 9:16 is in pixels. Resolved once, here, so
+    # everything downstream sees one pair of numbers.
+    if getattr(args, "size", None):
+        args.width, args.height = parse_size(args.size)
     llm = None
     if not args.no_llm:
         llm = discover(args.backend, args.host, args.model, args.api_key,
@@ -1620,6 +1625,9 @@ def build_parser():
     parser.add_argument("--out", default="out", help="folder to write into")
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=768)
+    parser.add_argument("--size", metavar="WxH|RATIO",
+                        help="export shape, e.g. 768x512 or 16:9; overrides "
+                             "--width/--height")
     parser.add_argument("--thickness", type=float, default=1.0,
                         help="body thickness for the depth map")
     parser.add_argument("--no-depth", action="store_true",

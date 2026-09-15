@@ -95,6 +95,38 @@ app.randomize_pose()
 assert "Nothing ticked" in app.random_status.get(), app.random_status.get()
 print("randomizer: seeded, reproducible, undoable, no bone resized")
 
+# ---- the export shape
+#
+# Changing the shape has to RE-FRAME, not just change two numbers: the export
+# rectangle is this ratio, so a figure fitted to a tall frame is not fitted to
+# a wide one. Turning a 2:3 portrait on its side without re-framing crops the
+# head and the feet off, and the only sign of it is in the PNG.
+import exporting
+app.set_aspect("2:3 portrait")
+root.update()
+for shape in ("16:9 wide", "1:1 square", "9:16 tall", "3:2 landscape"):
+    app.set_aspect(shape)
+    root.update()
+    w, h = app._sizes()
+    assert exporting.aspect_name(w, h) == shape, (shape, w, h)
+    inside = app.export_points(w, h)
+    assert all(0 <= x <= w and 0 <= y <= h for x, y in inside), \
+        "%s cropped a keypoint: x %.0f..%.0f y %.0f..%.0f of %dx%d" % (
+            shape, min(p[0] for p in inside), max(p[0] for p in inside),
+            min(p[1] for p in inside), max(p[1] for p in inside), w, h)
+    assert app.depth_image(w, h).size == (w, h)
+print("export shape: four ratios, each framed and exported without a crop")
+
+# Typed pixels win, and are recognised by RATIO - a control that only knew its
+# own defaults would call every scaled-up export custom.
+app.out_w.set(1024); app.out_h.set(1536); app.sync_aspect()
+assert app.aspect_name.get() == "2:3 portrait", app.aspect_name.get()
+app.out_w.set(700); app.out_h.set(513); app.sync_aspect()
+assert app.aspect_name.get() == "Custom", app.aspect_name.get()
+app.flip_aspect()
+assert app._sizes() == (513, 700), app._sizes()
+print("export shape: typed pixels name their own ratio, and flip swaps them")
+
 # ---- the panel's tabs
 for name in TAB_ORDER:
     app.show_tab(name)

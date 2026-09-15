@@ -393,7 +393,8 @@ def main(argv=None):
     parser.add_argument("--seed", type=int,
                         help="reproduce one run exactly")
     parser.add_argument("--preset", help="hold the body fixed")
-    parser.add_argument("--size", default="512x768")
+    parser.add_argument("--size", default="512x768",
+                        help="768x512, or a ratio like 16:9")
     args = parser.parse_args(argv)
 
     if args.selftest:
@@ -406,7 +407,8 @@ def main(argv=None):
     import json
     import os
     import pose_agent
-    width, height = (int(v) for v in args.size.lower().split("x"))
+    from exporting import parse_size
+    width, height = parse_size(args.size)
     os.makedirs(args.render, exist_ok=True)
     index = []
     base = args.seed if args.seed is not None else random.randrange(1, 10 ** 9)

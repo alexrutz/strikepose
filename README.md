@@ -244,6 +244,21 @@ accepted. A preset with no file is a refusal naming the command that builds
 it, never a quiet fall back to the sweep: the PNG would still appear and
 nothing would say it was a mannequin.
 
+## The export shape
+
+The **Export** tab picks the shape first and the pixels second: 2:3 and 3:4
+portrait, 9:16, square, 4:3, 3:2 and 16:9, or type any width and height you
+like. The rectangle drawn in the viewport is that ratio and the scene is
+re-framed to fit it, so what is inside the rectangle is what comes out of the
+PNG - both PNGs, since the pose map and the depth map are always the same
+frame. "Turn it on its side" swaps portrait for landscape.
+
+Everything headless takes the same setting, as a size or as a ratio:
+
+    python3 pose_agent.py --prompt "..." --size 16:9
+    python3 everyday.py --render out/set --size 3:2
+    python3 randomize.py --render out/random --size 1:1
+
 ## Random poses, for the edge cases
 
 The pose catalogue is 84 poses somebody chose, which means it is 84 poses

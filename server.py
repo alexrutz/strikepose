@@ -42,6 +42,7 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import exporting
 import bodies_lib
 import everyday
 import pose_agent
@@ -178,6 +179,10 @@ def api_vocabulary():
         "point_targets": list(pose_agent.POINT_TARGETS),
         "cameras": list(pose_agent.VIEW_ORDER),
         "shapes": list(props_module.SHAPE_NAMES),
+        # The export shapes, so the phone offers the same ones the desktop
+        # does and there is one table rather than two that drift.
+        "aspects": [{"name": name, "width": w, "height": h}
+                    for name, w, h in exporting.ASPECTS],
         "anchors": sorted(pose_agent.ANCHORS),
         "wearables": {slot: wearables.options(slot)
                       for slot in wearables.SLOT_ORDER},

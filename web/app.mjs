@@ -715,6 +715,46 @@ function buildLibrary(vocabulary) {
   $("search").addEventListener("input", () => draw($("search").value));
 }
 
+// The export shape. The list comes from the server rather than being written
+// out again here, for the same reason the preset table is generated: two
+// copies of a table drift, and this one decides what the PNG is.
+function buildAspects(vocabulary) {
+  const menu = $("aspect");
+  if (!menu || !vocabulary.aspects) return;
+  menu.innerHTML = "";
+  for (const shape of vocabulary.aspects) {
+    const option = document.createElement("option");
+    option.value = shape.width + "x" + shape.height;
+    option.textContent = shape.name;
+    menu.appendChild(option);
+  }
+  const custom = document.createElement("option");
+  custom.value = "custom";
+  custom.textContent = "Custom";
+  menu.appendChild(custom);
+  const match = () => {
+    const w = +$("outw").value || 512, h = +$("outh").value || 768;
+    // by RATIO, so a scaled-up export still reads as the shape it is
+    const found = vocabulary.aspects.find(
+      s => Math.abs(w / h - s.width / s.height) <= 0.01 * (w / h));
+    menu.value = found ? found.width + "x" + found.height : "custom";
+  };
+  menu.addEventListener("change", () => {
+    if (menu.value === "custom") { match(); return; }
+    const [w, h] = menu.value.split("x");
+    $("outw").value = w;
+    $("outh").value = h;
+    // Re-frame: the export rectangle IS this ratio, so a figure fitted to a
+    // tall frame is not fitted to a wide one, and without this the preview
+    // would show a crop that the render then reproduces.
+    fitAll(app.camera);
+    refresh();
+  });
+  for (const id of ["outw", "outh"])
+    $(id).addEventListener("change", match);
+  match();
+}
+
 API.connect().then(() => {
   if (!API.state.online) {
     for (const id of ["t-library", "b-render", "b-ask"])
@@ -724,6 +764,7 @@ API.connect().then(() => {
   }
   buildLibrary(API.state.vocabulary);
   buildWardrobe(API.state.vocabulary);
+  buildAspects(API.state.vocabulary);
   say("Drag a joint, pick a pose, or describe one.");
 });
 
