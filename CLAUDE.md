@@ -309,6 +309,38 @@ two centimetres above where the format puts it and the shoulder line the same
 distance below measured acromial height - one constant, wrong against both the
 survey and the format.
 
+**The rig is posed, not fitted, and the keypoints are read back off it.** A
+depth map is a picture of a body, and the body is the rig's. Fitting inverted
+that: every bone was aimed at a keypoint, then slid onto it and scaled until it
+landed, so the mesh came out wearing the keypoint skeleton's proportions -
+stretched by up to a tenth per segment, thigh and shin pulling opposite ways on
+the same leg. Those proportions come from a table and the rig is a measured
+body; the two were never going to agree, and most of the length of this file is
+the reconciliation. None of it is needed. A pose is a set of joint ANGLES, and
+the line from a shoulder keypoint to an elbow keypoint says which way an upper
+arm points no matter whose arm it is. So `mesh_backend.pose_rig` takes the
+directions and nothing else, every bone is rotated and none is moved or
+resized, and each segment comes out at exactly the length it was authored with.
+The rig's own hands, feet and spine chain come along for free - 85 of its 104
+bones, 30 of them in the hands, had nothing to do under a retarget.
+
+`solve_pose` stays for a rig that has no figure behind it, and `stature` still
+sizes the body, because a figure has to be the right height to stand beside
+another one - but that is one uniform scale over the whole mesh and it changes
+no proportion.
+
+**And the OpenPose PNG is a description of that mesh, never a second opinion
+about it.** `keypoint_riders` and `keypoints_of` read the eighteen back off the
+posed rig: the ten that are joints the rig already has are simply its joints -
+the elbow keypoint is where the forearm bone starts, and nothing describes that
+better than the thing itself - while the face rides the skull and the shoulder
+carries the acromion offset on the collar, because OpenPose puts it at a bony
+corner where nothing rotates. The neck stays the midpoint of the shoulders, or
+the format is not the format. Read in this order the pair cannot disagree with
+itself; read the other way the skeleton and the body it is drawn beside differ
+by five or six centimetres at the shoulder, which is the gap between ANSUR's
+table and this particular body, and no amount of work on either side closes it.
+
 **A keypoint is a landmark; a rig joint is a hinge, and two of them are not
 the same point.** OpenPose's shoulder is the acromion - the bony corner on
 *top* of the shoulder, which is what the COCO format and the ANSUR table both

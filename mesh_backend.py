@@ -72,6 +72,16 @@ AIM_CHAIN = [
     ("r_knee", "r_ankle", "r_ankle"),
 ]
 
+# The keypoint at the near end of each aimed bone, so a pose can be read as a
+# direction between two keypoints rather than as an absolute place to put the
+# far one. The collar has no keypoint of its own: OpenPose's neck is the
+# midpoint of the shoulders, which is where a collar starts.
+AIM_FROM = {"l_collar": "neck", "r_collar": "neck",
+            "l_shoulder": "l_shoulder", "r_shoulder": "r_shoulder",
+            "l_elbow": "l_elbow", "r_elbow": "r_elbow",
+            "l_hip": "l_hip", "r_hip": "r_hip",
+            "l_knee": "l_knee", "r_knee": "r_knee"}
+
 # Which bone each aimed bone takes its roll from. Roll is carried down a limb
 # rather than derived for each bone on its own, so the only direction that can
 # degenerate is a bone folded exactly back onto the one above it. Roots of a
@@ -596,13 +606,30 @@ def landmark_shift(rest_position, roles, points, rest_points):
     return out
 
 
+def _limb_direction(kp, role, target):
+    """Which way a bone points, from the two keypoints at its ends."""
+    import numpy as np
+    start = AIM_FROM.get(role, target)
+    return np.asarray(kp(target), float) - np.asarray(kp(start), float)
+
+
 def pose_globals(rest_position, parents, roles, points, stretch=True,
-                 rest_orient=None, rest_points=None, slide=True):
+                 rest_orient=None, rest_points=None, slide=True,
+                 by_direction=False):
     """Global rotation and position per bone, from the editor's keypoints.
 
     Same closed-form aim used for SMPL-X, but expressed purely in global terms
     so it does not care what rest orientation the rig's bones were authored
     with - only where the joints are.
+
+    `by_direction` turns the fit into a pose. Off, each bone is aimed at the
+    absolute keypoint and then slid and scaled until it lands there, so the rig
+    ends up wearing the keypoint skeleton's proportions - which are not its own,
+    and the mesh is stretched by up to a tenth per segment to get there. On,
+    a bone is only told which WAY to point, taken from the line between two
+    keypoints, and the rig keeps every length it was authored with. Eighteen
+    keypoints are a good witness to direction and a poor one to size; this asks
+    them only for what they know.
     """
     n = len(rest_position)
     # Local rotation per joint. Storing only globals and flagging which were
@@ -705,9 +732,15 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
     spine_roles = [r for r in ("spine", "chest") if r in roles]
     if spine_roles and "neck" in roles:
         for role in spine_roles:
-            aim(role, "neck", goal("neck"))
+            if by_direction:
+                aim(role, "neck", sh_mid - hip_mid, positional=False)
+            else:
+                aim(role, "neck", goal("neck"))
     for role, child, target in AIM_CHAIN:
-        aim(role, child, goal(target))
+        if by_direction:
+            aim(role, child, _limb_direction(kp, role, target), positional=False)
+        else:
+            aim(role, child, goal(target))
 
     # Twist. Aiming only fixes where a bone points, never how it is rolled
     # about its own axis, and the leftover roll compounds down a chain: by the
@@ -1127,6 +1160,129 @@ def solve_pose(mesh, points_cm, roles=None, stretch=True, rest_points=None,
                                     rest_points),
             "bones": {name: (Q[i], q[i])
                       for i, name in enumerate(mesh["joint_names"])}}
+
+
+def pose_rig(mesh, points_cm, roles=None, rest_points=None, stature=None):
+    """Pose the body's OWN rig, rather than fitting it to the keypoints.
+
+    `solve_pose` retargets: it aims each bone at a keypoint, slides the joint
+    onto it and scales the segment until it lands, so the rig comes out wearing
+    the keypoint skeleton's proportions. Those are not its proportions - the
+    keypoints are derived from a table and the rig is a measured body - so the
+    mesh is stretched to close the gap, by up to a tenth per segment, and every
+    disagreement between the two conventions has to be reconciled somewhere:
+    which landmark a shoulder keypoint is, how tall the figure is, how the arm
+    splits. Most of the trouble in this file is that reconciliation.
+
+    None of it is needed for a depth map. A pose is a set of joint ANGLES, and
+    that is the one thing eighteen keypoints report well - the line from a
+    shoulder to an elbow says which way the upper arm points no matter whose
+    arm it is. So this takes the directions and nothing else: every bone is
+    rotated, none is moved or resized, and the body that comes out is exactly
+    the body that went in. The rig's own hands, feet and spine chain come along
+    for free, where a retarget had nothing to say about them.
+
+    `stature` still sizes the rig, because a figure has to be the right height
+    to stand next to another one; it is one uniform scale over the whole body
+    and it changes no proportion.
+    """
+    roles = roles or mesh.get("roles") or resolve_bones(mesh["joint_names"])
+    problems = validate_roles(mesh, roles)
+    if problems:
+        raise RuntimeError(
+            "This rig does not map cleanly:\n  " + "\n  ".join(problems))
+    rest = mesh["rest_position"]
+    if stature:
+        height = float(mesh["vertices"][:, 1].max()
+                       - mesh["vertices"][:, 1].min())
+        scale = float(stature) / max(1e-9, height)
+    else:
+        scale = 1.0
+    Q, q = pose_globals(rest * scale, mesh["parents"], roles, points_cm,
+                        stretch=False, slide=False,
+                        rest_orient=mesh["rest_global"][:, :3, :3],
+                        rest_points=rest_points, by_direction=True)
+    return {"scale": scale, "shift": {},
+            "bones": {name: (Q[i], q[i])
+                      for i, name in enumerate(mesh["joint_names"])}}
+
+
+# Reading the eighteen keypoints back off a posed rig.
+#
+# Most of them are joints the rig already has, and those are simply read: the
+# elbow keypoint is where the forearm bone starts, and no description of it can
+# beat the thing itself. Only the ones the rig has no joint for need carrying -
+# the face, which rides the skull, and the shoulder, which OpenPose puts at the
+# acromion, a bony corner the rig does not model because nothing rotates there.
+JOINT_KEYPOINTS = ("l_elbow", "r_elbow", "l_wrist", "r_wrist",
+                   "l_hip", "r_hip", "l_knee", "r_knee",
+                   "l_ankle", "r_ankle")
+FACE_KEYPOINTS = ("nose", "l_eye", "r_eye", "l_ear", "r_ear")
+
+
+def keypoint_riders(mesh, rest_points, roles=None, stature=None):
+    """What each keypoint needs in order to be read off a posed rig.
+
+    A joint keypoint needs only the bone it is. The face keypoints need their
+    offset from the skull, and the shoulder its offset from the joint the arm
+    swings from - both taken once, against the rig's own rest pose, with the
+    two coordinate systems brought together by the torso, which is the one
+    thing they both describe.
+    """
+    roles = roles or mesh.get("roles") or resolve_bones(mesh["joint_names"])
+    rest = mesh["rest_position"]
+    if stature:
+        height = float(mesh["vertices"][:, 1].max()
+                       - mesh["vertices"][:, 1].min())
+        rest = rest * (float(stature) / max(1e-9, height))
+    at = lambda role: rest[roles[role]]
+    rig_hips = 0.5 * (at("l_hip") + at("r_hip"))
+    rig_up = rest[roles["neck"]] - rig_hips
+    rig_frame = frame_from(np.cross(at("l_hip") - at("r_hip"), rig_up), rig_up)
+
+    kp = lambda name: np.asarray(rest_points[name], float)
+    kp_hips = 0.5 * (kp("l_hip") + kp("r_hip"))
+    kp_up = 0.5 * (kp("l_shoulder") + kp("r_shoulder")) - kp_hips
+    kp_frame = frame_from(np.cross(kp("l_hip") - kp("r_hip"), kp_up), kp_up)
+    into_rig = rig_frame @ kp_frame.T
+    put = lambda name: into_rig @ (kp(name) - kp_hips) + rig_hips
+
+    riders = {}
+    for name in JOINT_KEYPOINTS:
+        if name in roles:
+            riders[name] = ("joint", roles[name], None)
+    for name in FACE_KEYPOINTS:
+        if "head" in roles and name in rest_points:
+            riders[name] = ("ride", roles["head"], put(name) - at("head"))
+    for side in ("l", "r"):
+        role = side + "_shoulder"
+        collar = side + "_collar"
+        if role in roles and collar in roles and role in rest_points:
+            # the acromion, as an offset from the joint the arm swings from,
+            # carried by the collar - which is the bone it actually sits on
+            riders[role] = ("ride", roles[collar], put(role) - at(collar))
+    return riders
+
+
+def keypoints_of(solution, riders, mesh):
+    """The eighteen keypoints, read off a posed rig.
+
+    The other direction from everything else here, and the honest one: the
+    mesh is what the depth map shows, so the skeleton beside it should be a
+    description of that mesh and not an independent claim about the same
+    figure. Read this way the two cannot disagree, whatever the rig's
+    proportions turn out to be.
+    """
+    names = mesh["joint_names"]
+    out = {}
+    for name, (how, j, offset) in riders.items():
+        Q, q = solution["bones"][names[j]]
+        out[name] = q if how == "joint" else q + _rotation_of(Q) @ offset
+    # OpenPose has no neck of its own: it is the midpoint of the shoulders,
+    # and it has to stay that way or the format is not the format.
+    if "l_shoulder" in out and "r_shoulder" in out:
+        out["neck"] = 0.5 * (out["l_shoulder"] + out["r_shoulder"])
+    return out
 
 
 def skin_with(mesh, solution):

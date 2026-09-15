@@ -1084,6 +1084,32 @@ def frame_scene(figures, camera, rect, margin=1.06, props=(), grow=1.9):
                                    rect_h / (2.0 * max(1.0, half_h) * margin))))
 
 
+def as_drawn(figures, meshes):
+    """The figures with their keypoints replaced by the ones the rig lays out.
+
+    Shallow copies: nothing the caller holds is disturbed, and a figure with
+    no body behind it comes back untouched, because there is nothing better to
+    say about it than what it was drawn with.
+    """
+    import copy
+    import openpose3d_editor as editor
+    out = []
+    for figure, mesh in zip(figures, meshes or [None] * len(figures)):
+        if mesh is None:
+            out.append(figure)
+            continue
+        try:
+            _solution, points = editor.pose_body(figure, mesh)
+        except Exception:                     # a rig that will not map
+            out.append(figure)
+            continue
+        shadow = copy.copy(figure)
+        shadow.points = [list(points.get(name, figure.points[i]))
+                         for i, name in enumerate(KEYPOINT_NAMES)]
+        out.append(shadow)
+    return out
+
+
 def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
                  thickness=1.0, with_depth=True, props=(), meshes=None,
                  anatomy=False):
@@ -1100,13 +1126,17 @@ def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
     to say so. `anatomy=True` asks for it deliberately - the viewport preview
     does, and so do the tests that check the sweep itself.
 
-    The pose map is identical either way, because it is the same eighteen
-    keypoints: the depth side of a conditioning pair can be upgraded without
-    the OpenPose side moving a pixel.
+    On the rigged path the pose map is drawn from the keypoints the posed rig
+    lays out, not from the ones that drove it. The rig is posed rather than
+    fitted, so it keeps its own proportions - which are a measured body's and
+    not the table's - and the two differ by a few centimetres at the shoulder.
+    Drawing the authored keypoints beside a mesh that is not shaped like them
+    would put out a pair that disagrees with itself; read off the rig, the
+    skeleton is a description of the very thing the depth map shows.
     """
     rect = frame_rect(view_w, view_h, out_w / out_h)
-    pose = pose_image(figures, camera, rect, out_w, out_h)
     depth = None
+    drawn = figures
     if with_depth and anatomy:
         depth = anatomy_depth_image(figures, camera, rect, out_w, out_h,
                                     thickness, props)
@@ -1120,6 +1150,8 @@ def render_scene(figures, camera, out_w, out_h, view_w=900, view_h=700,
             raise bodies_lib.MissingBodies(
                 "Nothing to render the depth map from.\n\n" + bodies_lib.HOW)
         depth = rigged_depth_image(jobs, camera, rect, out_w, out_h, props)
+        drawn = as_drawn(figures, meshes)
+    pose = pose_image(drawn, camera, rect, out_w, out_h)
     return pose, depth, rect
 
 
@@ -1990,10 +2022,20 @@ def _selftest():
         {"figures": [{"commands": [{"op": "place", "shape": "wall",
                                     "at": "behind"}]}]})
     rect = frame_rect(900, 700, 512.0 / 768.0)
-    bare = pose_image(figures, camera, rect, 128, 192)
+    # Both sides through `render_scene`, because the pose map it draws is the
+    # rig's own keypoints and `pose_image` on the authored ones is a different
+    # picture for a reason that has nothing to do with the wall.
+    bare = render_scene(figures, camera, 128, 192, props=[])[0]
     with_wall = render_scene(figures, camera, 128, 192, props=scene)[0]
     check("an object never reaches the pose map",
           bare.tobytes() == with_wall.tobytes())
+    # and the skeleton drawn is the one the body has, not the one it was
+    # authored with: a pair that disagrees with itself is worse than either
+    # half of it
+    drawn = as_drawn(figures, __import__("bodies_lib").for_figures(figures))
+    check("the pose map describes the mesh beside it",
+          drawn[0].points != figures[0].points,
+          "identical, so the rig's own keypoints are not reaching the PNG")
     lit = render_scene(figures, camera, 128, 192, props=scene)[1]
     empty = render_scene(figures, camera, 128, 192, props=[])[1]
     covered = (sum(1 for v in lit.tobytes() if v),

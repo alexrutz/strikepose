@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.38.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.39.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -1969,6 +1969,56 @@ def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
     return render_depth(groups, out_w, out_h, blend=2.0 * k)
 
 
+def pose_body(figure, mesh):
+    """(solution, keypoints) for one figure on its own rig.
+
+    The rig is POSED, not fitted. The older path aimed each bone at a keypoint
+    and then slid and scaled it until it landed there, so the body came out
+    wearing the keypoint skeleton's proportions - stretched by up to a tenth
+    per segment, and every disagreement between the two conventions had to be
+    reconciled by hand somewhere in `mesh_backend`. A depth map does not need
+    any of that: eighteen keypoints are a good witness to which way a limb
+    points and a poor one to how long it is, so only the directions are taken
+    and the body keeps every length it was measured with.
+
+    The keypoints handed back are read off the posed rig rather than the ones
+    that went in, so the OpenPose PNG describes the same body the depth map
+    shows. It is the only order that cannot disagree with itself.
+    """
+    import mesh_backend
+    rest = build_rest_points(figure.body)
+    stature = figure.body.get("stature")
+    solution = mesh_backend.pose_rig(mesh, {name: figure.points[i]
+                                            for i, name
+                                            in enumerate(KEYPOINT_NAMES)},
+                                     mesh.get("roles"), rest_points=rest,
+                                     stature=stature)
+    riders = mesh_backend.keypoint_riders(mesh, rest, mesh.get("roles"),
+                                          stature=stature)
+    return solution, mesh_backend.keypoints_of(solution, riders, mesh)
+
+
+def rigged_keypoints(jobs):
+    """Every figure's keypoints as its own rig lays them out.
+
+    A figure with no body behind it keeps the ones it was drawn with; there is
+    nothing better to say about it.
+    """
+    out = []
+    for figure, mesh, _assets in jobs:
+        if mesh is None:
+            out.append(list(figure.points))
+            continue
+        try:
+            _solution, points = pose_body(figure, mesh)
+        except Exception:                   # a rig that will not map
+            out.append(list(figure.points))
+            continue
+        out.append([list(points.get(name, figure.points[i]))
+                    for i, name in enumerate(KEYPOINT_NAMES)])
+    return out
+
+
 def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
     """Depth map from posed rigged meshes, framed to match `pose_image`.
 
@@ -2001,9 +2051,7 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
         # by how far the head has *moved* rather than aimed at an absolute
         # direction - there is no keypoint on the skull to aim at.
         rest = build_rest_points(figure.body)
-        solution = mesh_backend.solve_pose(mesh, points, mesh.get("roles"),
-                                           rest_points=rest,
-                                           stature=figure.body.get("stature"))
+        solution = pose_body(figure, mesh)[0]
         # Real garments, where the library has one. `wearables` builds a
         # garment out of the body's own swept profile, which is right for the
         # viewport and an approximation everywhere else; these are the CC0
