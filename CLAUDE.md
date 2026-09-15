@@ -278,6 +278,51 @@ two centimetres above where the format puts it and the shoulder line the same
 distance below measured acromial height - one constant, wrong against both the
 survey and the format.
 
+**A keypoint is a landmark; a rig joint is a hinge, and two of them are not
+the same point.** OpenPose's shoulder is the acromion - the bony corner on
+*top* of the shoulder, which is what the COCO format and the ANSUR table both
+mean by it - while the bone an arm swings from starts at the glenohumeral
+joint, below it and well inboard. Its neck is not a neck at all: COCO has none,
+so it is inferred as the *midpoint of the shoulders*, a point out in the middle
+of the upper chest, where a rig's neck bone starts at the top of the thorax.
+Sliding a rig joint onto either of those drags the body with it - the shoulder
+line up and outward, the whole head down. `mesh_backend.LANDMARK_JOINTS` names
+them, and `landmark_shift` holds each one at the offset the rig itself has at
+rest: measured from the hip midpoint and rotated into a common frame on both
+sides, because the rig's coordinates and the editor's share neither an origin
+nor a heading and a raw difference of the two positions is dominated by that -
+which threw the shoulders further out than leaving them alone did. Then the
+torso's own rotation carries it into the pose, so a figure that has turned does
+not count the torso twice. At rest the correction is exactly the rig's own
+anatomy, the same argument the neck rotation makes. Elbow, wrist, knee and
+ankle keypoints *are* joint centres and must never be in that list: the point
+of sliding them is that they are where the pose says the joint is.
+
+**A rig is sized by the figure's stature, never by a span between two
+landmarks.** This divided the keypoints' shoulder-to-hip distance by the rig's
+own, and those two spans do not measure the same thing - an acromion-to-
+trochanter against a glenohumeral-to-femoral-head - so the whole rig came up
+15% oversize on an average adult and 41% on the child before a single bone had
+been aimed. The per-segment scaling then spent six passes dragging the limbs
+back down, and what it could not reach stayed inflated: shoulders 4 cm high and
+4.5 cm broad on an average man, 5.6 and 6.4 on a woman, and a child 8 cm too
+tall with its shoulders 21 cm high and half again too wide. That is the
+"shoulders up around the ears" every export had, and it read worst on the women
+and worst of all on the child because the error scales with how far the rig's
+joints sit inside its own landmarks. `solve_pose` takes `stature` and sizes the
+rig by it against its own rest height; a body set built for these presets is
+authored at the figure's stature, so the rig is left the size it was drawn.
+Without one it falls back to the span, which is all an outside rig can offer.
+
+Two things say it stayed fixed. The fit is now *exact* - every mapped joint
+lands on the point it was sent to and every segment matches its keypoints to
+0.00 cm, where the best before was 1.2 cm - so the sentinel in that test starts
+at -1.0, or a perfect fit reports as "none measured". And the rigged body now
+fills the same frame as the swept anatomy to within a tenth. The old detail
+test passed on the strength of the bug: a body a sixth too big for its own
+skeleton covers more of the picture and carries more edge with it, so
+normalise that measure per covered pixel or it is measuring size, not surface.
+
 **A rig is fitted to the figure segment by segment, never dragged onto it.**
 One number - the ratio of the two shoulder-to-hip spans - cannot match a torso
 and the limbs hanging off it unless the two bodies have the same proportions.
@@ -502,6 +547,12 @@ a build.
 4. Wrists are never rotated; there is no keypoint for them. Ankles are only
    levelled, not aimed - a foot taking weight goes flat, but nothing turns it
    in or out.
+5. The child preset disagrees with its own rig about where the shoulders are,
+   by 12.5 cm of `landmark_shift` against 4.8-6.9 on the adults, and a fitted
+   child comes out 116 cm against the 122 the preset claims where the adults
+   land within 2 cm. ANSUR has no child, so that preset is inherited and
+   unverified - the rig is the more likely one to be right, and the numbers
+   to check it against are a real measurement problem, not a code one.
 5. The web prototype duplicates the maths in JavaScript. It is tested
    independently (`node web/test.mjs`) and will drift from the Python. Two
    things no longer can: the preset table is generated from `preset_params`

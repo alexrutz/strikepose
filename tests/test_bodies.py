@@ -54,17 +54,31 @@ _pose, swept, _rect = pose_agent.render_scene(figures, camera, 192, 288,
 check("a plain render is not the swept anatomy",
       np.asarray(rigged).tobytes() != np.asarray(swept).tobytes())
 # A rigged body has fingers, a face and a collarbone; the sweep is smooth
-# tapering tubes. Count how much of the picture sits on an edge: the mesh has
-# far more of it, and that is the whole difference the eye is reacting to.
+# tapering tubes. Count how much of the picture sits on an edge, per covered
+# pixel rather than per frame, so the measure is about surface and not about
+# how much room the body takes up - which is what it used to be measuring.
 def detail(image):
     a = np.asarray(image, float)
-    step = np.abs(np.diff(a, axis=0)).mean() + np.abs(np.diff(a, axis=1)).mean()
-    return float(step)
+    edge = (np.abs(np.diff(a, axis=0)).sum() + np.abs(np.diff(a, axis=1)).sum())
+    return float(edge / max(1, int((a > 0).sum())))
 
 
 check("and carries more surface detail than it does",
-      detail(rigged) > 1.15 * detail(swept),
+      detail(rigged) > 1.05 * detail(swept),
       "%.2f against %.2f" % (detail(rigged), detail(swept)))
+
+# And it is the same SIZE as the sweep, which is the point the bar above used
+# to be carrying by accident. The rig used to be sized by dividing the
+# keypoints' shoulder-to-hip span by its own, and those two spans measure
+# different things - an acromion-to-trochanter against a glenohumeral-to-
+# femoral-head - so it came up 15% oversize on an adult and 41% on the child
+# before a bone was aimed. A body a sixth too big for its own skeleton filled
+# more of the frame and carried more edge with it, so the detail test passed
+# on the strength of the bug.
+area = lambda im: int((np.asarray(im) > 0).sum())
+check("and fills the same frame as the sweep, not a sixth more",
+      abs(area(rigged) - area(swept)) < 0.15 * area(swept),
+      "%d px against %d" % (area(rigged), area(swept)))
 
 # -- with no bodies it refuses, and says how ------------------------------
 was = os.environ.get("STRIKEPOSE_BODIES")
@@ -138,36 +152,50 @@ check("and the body does not come through it",
                                    100.0 * behind / max(1, int(both.sum()))))
 
 # A garment clears the rigged body by its OWN thickness, not by a flat
-# centimetre. With one figure for all of them an afro came out the same image
-# as a crew cut, a helmet the same as a bare head and a coat the same as a
-# t-shirt: every thick garment there is rendered as bare skin, and the PNG
-# looked perfectly fine, which is why nothing caught it. So compare a thin
-# garment with a thick one in the same slot rather than either with bare.
-# A garment clears the rigged body by its OWN thickness, not by a flat
 # centimetre. With one figure for all of them an afro came out at the same
 # depth as a crew cut, a helmet as a bare head and a coat as a t-shirt: every
 # thick garment there is rendered as bare skin, and since the silhouette still
 # grew the PNG looked plausible, which is why nothing caught it.
 #
-# So the check is not how much of the frame the garment covers - the clamp
-# never touched coverage - but whether it stands PROUD of what a bare head
-# reaches. Brighter is nearer, so count the pixels the thick version pushes
-# past the thin version's nearest. Flattened to a centimetre that count is
-# exactly zero for every one of them.
-def head_band(outfit):
-    worn.outfit = dict(outfit)
-    grey = np.asarray(editor.rigged_depth_image(
-        [(worn, mesh, ())], camera, rect, 384, 576), float)
-    return grey[:int(0.22 * grey.shape[0])]
+# Reproduce the bug rather than measure a proxy for it. A pixel count of how
+# far a thick garment stands proud is a proxy, and it moved the moment the
+# anatomy underneath it was corrected - it read a helmet as 40 pixels against
+# the bug's 29, which is not a test. Flattening every standoff to the old
+# centimetre and asking whether the picture changes is the thing itself.
+import wearables
 
-for slot, thin, thick in (("hair", "shaved", "afro"),
-                          ("hair", "short", "curly"),
-                          ("headgear", "none", "helmet")):
-    lean = head_band({slot: thin})
-    bulky = head_band({slot: thick})
-    proud = int((bulky > lean[lean > 0].max()).sum())
-    check("a %s stands off the rigged head by its own thickness" % thick,
-          proud > 40, "%d pixels nearer than a bare %s" % (proud, thin))
+def head_of(image, band=0.22):
+    grey = np.asarray(image, float)
+    return grey[:int(band * grey.shape[0])]
+
+
+def dressed_head(outfit):
+    worn.outfit = dict(outfit)
+    return head_of(editor.rigged_depth_image([(worn, mesh, ())], camera, rect,
+                                             384, 576))
+
+
+honest = wearables.layers
+try:
+    flat = []
+    for slot, name in (("hair", "afro"), ("hair", "curly"),
+                       ("headgear", "helmet"), ("top", "coat")):
+        wearables.layers = honest
+        right = dressed_head({slot: name})
+        # exactly the old bug: one standoff for every garment there is
+        wearables.layers = (lambda *a, **k:
+                            [(s, (1.0 if v is not None else None), p)
+                             for s, v, p in honest(*a, **k)])
+        wrong = dressed_head({slot: name})
+        moved = int((np.abs(right - wrong) > 2.0).sum())
+        flat.append(("%s/%s" % (slot, name), moved))
+finally:
+    wearables.layers = honest
+    worn.outfit = {}
+
+check("a garment's own thickness is what it clears the rigged body by",
+      all(n > 150 for _g, n in flat),
+      ", ".join("%s %d px" % (g, n) for g, n in flat))
 
 # and it still has to reach the frame at all
 worn.outfit = {"top": "coat"}
@@ -198,22 +226,32 @@ SEGMENTS = [("l_shoulder", "l_elbow"), ("l_elbow", "l_wrist"),
             ("l_hip", "l_knee"), ("l_knee", "l_ankle"),
             ("r_shoulder", "r_elbow"), ("r_hip", "r_knee")]
 index = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
-worst_segment, worst_joint = ("none measured", 0.0), ("none measured", 0.0)
+# -1.0, not 0.0: the fit lands exactly now, and a sentinel that only records
+# a value strictly greater than zero reports a perfect fit as "none measured",
+# which reads like the loop never ran.
+worst_segment, worst_joint = ("exactly", -1.0), ("exactly", -1.0)
 for preset in BODY_PRESETS:
     mesh = bank[preset]
     skeleton = Skeleton(preset_params(preset))
     points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
     solved = mesh_backend.solve_pose(
         mesh, points, mesh["roles"],
-        rest_points=build_rest_points(skeleton.body))
+        rest_points=build_rest_points(skeleton.body),
+        stature=skeleton.body.get("stature"))
     names, roles = mesh["joint_names"], mesh["roles"]
     at = lambda role: solved["bones"][names[roles[role]]][1]
+    # Where the joint was actually SENT. For most roles that is the keypoint;
+    # for a landmark role it is the keypoint plus the rig's own rest offset,
+    # because OpenPose's shoulder is the acromion on top of the shoulder and
+    # the arm swings from the joint below and inboard of it. Measuring against
+    # the bare keypoint is measuring against a point no bone was aimed at.
+    sent = lambda role: (np.asarray(points[role], float)
+                         + solved["shift"].get(role, 0.0))
     for top, end in SEGMENTS:
         if top not in roles or end not in roles:
             continue
         got = float(np.linalg.norm(at(end) - at(top)))
-        want = float(np.linalg.norm(
-            np.asarray(points[end], float) - np.asarray(points[top], float)))
+        want = float(np.linalg.norm(sent(end) - sent(top)))
         gap = abs(got - want) / max(1e-9, want)
         if gap > worst_segment[1]:
             worst_segment = ("%s %s->%s (%.1f vs %.1f cm)"
@@ -222,15 +260,34 @@ for preset in BODY_PRESETS:
                  "l_ankle"):
         if role not in roles:
             continue
-        off = float(np.linalg.norm(at(role) - np.asarray(points[role], float)))
+        off = float(np.linalg.norm(at(role) - sent(role)))
         if off > worst_joint[1]:
             worst_joint = ("%s %s" % (preset, role), off)
 
 check("every limb segment is scaled to the keypoints on every body",
       worst_segment[1] < 0.02,
       "worst %s off by %.1f%%" % (worst_segment[0], 100.0 * worst_segment[1]))
-check("and every mapped joint still lands on its keypoint",
+check("and every mapped joint still lands where it was sent",
       worst_joint[1] < 0.5, "worst %s by %.2f cm" % worst_joint)
+
+# The shoulder is the one that is deliberately NOT sent to its keypoint, and
+# the correction has to be real and small: zero means the landmark offset has
+# quietly stopped being applied, and a large one means it is being computed in
+# the wrong frame - which it was first time round, when subtracting two
+# positions that share no origin threw the shoulders further out than leaving
+# them alone did.
+pulls = []
+for preset in BODY_PRESETS:
+    skeleton = Skeleton(preset_params(preset))
+    points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
+    shift = mesh_backend.solve_pose(
+        bank[preset], points, bank[preset]["roles"],
+        rest_points=build_rest_points(skeleton.body),
+        stature=skeleton.body.get("stature"))["shift"]
+    pulls.append((preset, float(np.linalg.norm(shift.get("l_shoulder", 0.0)))))
+check("the shoulder is held off its keypoint, by a few centimetres",
+      all(2.0 < v < 14.0 for _p, v in pulls),
+      ", ".join("%s %.1f cm" % (p.split(",")[0], v) for p, v in pulls[:4]))
 
 # The mesh must not be torn doing it: a sliding subtree leaves a seam, so
 # check the limb is still one connected piece of surface by measuring the

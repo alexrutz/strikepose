@@ -80,6 +80,21 @@ ROLL_PARENT = {"l_shoulder": "l_collar", "r_shoulder": "r_collar",
                "l_elbow": "l_shoulder", "r_elbow": "r_shoulder",
                "l_knee": "l_hip", "r_knee": "r_hip"}
 
+# Roles whose keypoint is a surface landmark rather than the joint centre the
+# rig rotates about, so the rig keeps its own rest offset from the keypoint
+# instead of being dragged onto it. The shoulder is the clear case: OpenPose's
+# is the acromion, on top of the shoulder, and the arm swings from the
+# glenohumeral joint below and inboard of it. Elbow, wrist, knee and ankle
+# keypoints are joint centres already and must NOT be in here - the whole
+# point of sliding them is that they are where the pose says the joint is.
+# `neck` is the second: OpenPose has no neck of its own and infers one as the
+# MIDPOINT OF THE SHOULDERS, a point out in the middle of the upper chest,
+# while a rig's neck bone starts at the top of the thorax. Dragging one onto
+# the other pulled the whole head down with it - 6.5 cm on an average man, who
+# then measured 168.8 cm instead of 175 with every keypoint landing exactly
+# where it was asked to.
+LANDMARK_JOINTS = ("l_shoulder", "r_shoulder", "neck")
+
 COMPONENT = {5120: "b", 5121: "B", 5122: "h", 5123: "H", 5125: "I", 5126: "f"}
 COMPONENT_SIZE = {"b": 1, "B": 1, "h": 2, "H": 2, "I": 4, "f": 4}
 NUM_COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
@@ -508,6 +523,60 @@ def validate_roles(mesh, roles):
 # posing
 # ---------------------------------------------------------------------------
 
+def landmark_shift(rest_position, roles, points, rest_points):
+    """Where each landmark role's joint belongs, as an offset from its keypoint.
+
+    A keypoint is a landmark; a rig joint is a hinge, and for the shoulder they
+    are not the same point. OpenPose's shoulder is the acromion - the bony
+    corner on TOP of the shoulder, which is what the format and the survey both
+    mean by it - while the bone the arm swings from starts at the glenohumeral
+    joint, below it and well inboard. Sliding one onto the other lifts the
+    whole shoulder line and widens it, which is what put the shoulders of every
+    figure in the set up around its ears.
+
+    Both sides are measured from the hip midpoint and rotated into a common
+    frame before they are subtracted: the rig's coordinates and the editor's
+    share neither an origin nor necessarily a heading, and a raw difference of
+    the two positions is dominated by that - it threw the shoulders further out
+    than leaving them alone did. The result is then carried into the pose by
+    the torso's own rotation, so a figure that has turned or leaned does not
+    count the torso twice.
+
+    At rest the correction is exactly the rig's own anatomy, which is the same
+    argument the neck makes: the rig is the authority on where a joint sits
+    inside a body, and the keypoints only say where the body is.
+    """
+    if not rest_points or not LANDMARK_JOINTS:
+        return {}
+    try:
+        rest_at = lambda name: np.asarray(rest_points[name], float)
+        now_at = lambda name: np.asarray(points[name], float)
+
+        def frame_of(at):
+            hips = 0.5 * (at("l_hip") + at("r_hip"))
+            up = 0.5 * (at("l_shoulder") + at("r_shoulder")) - hips
+            return frame_from(np.cross(at("l_hip") - at("r_hip"), up), up), hips
+
+        rig_at = lambda role: rest_position[roles[role]]
+        rig_hips = 0.5 * (rig_at("l_hip") + rig_at("r_hip"))
+        rig_up = rest_position[roles["neck"]] - rig_hips
+        rig_frame = frame_from(np.cross(rig_at("l_hip") - rig_at("r_hip"),
+                                        rig_up), rig_up)
+        kp_frame, kp_hips = frame_of(rest_at)
+        now_frame, _now_hips = frame_of(now_at)
+        into_rig = rig_frame @ kp_frame.T
+        carry = now_frame @ rig_frame.T
+    except (KeyError, TypeError, ValueError):
+        return {}
+    out = {}
+    for role in LANDMARK_JOINTS:
+        if role not in roles or role not in rest_points:
+            continue
+        out[role] = carry @ ((rig_at(role) - rig_hips)
+                             - into_rig @ (rest_at(role) - kp_hips))
+    return out
+
+
 def pose_globals(rest_position, parents, roles, points, stretch=True,
                  rest_orient=None, rest_points=None, slide=True):
     """Global rotation and position per bone, from the editor's keypoints.
@@ -554,6 +623,37 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
     for j in range(n):
         if parents[j] < 0:
             local[j] = rotation
+
+    # A keypoint is a landmark; a rig joint is a hinge, and for the shoulder
+    # they are not the same point. OpenPose's shoulder is the acromion - the
+    # bony corner on TOP of the shoulder, which is what the format and the
+    # survey both mean by it - while the bone the arm swings from starts at
+    # the glenohumeral joint, below it and well inboard. Sliding one onto the
+    # other lifts the whole shoulder line and widens it. Against this body
+    # set's own rigs that is 3.5 cm up and 1.6 cm out per side on an average
+    # man, 2.3 cm on an average woman and 2.7 cm on the child - 8%, 14% and
+    # 23% too broad, which is why it read worst on the women and worst of all
+    # on the child, and why every figure came out with its shoulders up around
+    # its ears.
+    #
+    # So the rig's shoulder keeps the offset from the keypoint that the rig
+    # itself has at rest. Both sides are measured from the hip midpoint and
+    # rotated into a common frame before they are subtracted: the rig's
+    # coordinates and the editor's share neither an origin nor necessarily a
+    # heading, and a raw difference of the two positions is dominated by that,
+    # which throws the shoulders further out than leaving them alone did. Then
+    # `rotation` carries the correction into the pose, so a figure that has
+    # turned or leaned does not count the torso twice.
+    #
+    # At rest the correction is exactly the rig's own anatomy, which is the
+    # same argument the neck makes below: the rig is the authority on where a
+    # joint sits inside a body, and the keypoints only say where the body is.
+    shift = landmark_shift(rest_position, roles, points, rest_points)
+
+    def goal(name):
+        """Where the rig's joint for this role belongs - not always where the
+        keypoint is. See `shift` above."""
+        return kp(name) + shift[name] if name in shift else kp(name)
     def recentre():
         # slice assignment, not "q +=": rebinding the name inside aim() would
         # make it a local there and shadow this array
@@ -586,9 +686,9 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
     spine_roles = [r for r in ("spine", "chest") if r in roles]
     if spine_roles and "neck" in roles:
         for role in spine_roles:
-            aim(role, "neck", sh_mid)
+            aim(role, "neck", goal("neck"))
     for role, child, target in AIM_CHAIN:
-        aim(role, child, kp(target))
+        aim(role, child, goal(target))
 
     # Twist. Aiming only fixes where a bone points, never how it is rolled
     # about its own axis, and the leftover roll compounds down a chain: by the
@@ -771,17 +871,17 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
                 kids.setdefault(int(parents[j]), []).append(j)
         here_hips = 0.5 * (kp("r_hip") + kp("l_hip"))
         segments = [
-            ("hips", "neck", here_hips, kp("neck")),
+            ("hips", "neck", here_hips, goal("neck")),
             ("hips", "l_hip", here_hips, kp("l_hip")),
             ("hips", "r_hip", here_hips, kp("r_hip")),
             # from the collar, not the neck: the collar is what aiming
             # pointed at the shoulder, and scaling the chain above the collar
             # moves the collar too, so the shoulder never settles
-            ("l_collar", "l_shoulder", kp("neck"), kp("l_shoulder")),
-            ("r_collar", "r_shoulder", kp("neck"), kp("r_shoulder")),
-            ("l_shoulder", "l_elbow", kp("l_shoulder"), kp("l_elbow")),
+            ("l_collar", "l_shoulder", kp("neck"), goal("l_shoulder")),
+            ("r_collar", "r_shoulder", kp("neck"), goal("r_shoulder")),
+            ("l_shoulder", "l_elbow", goal("l_shoulder"), kp("l_elbow")),
             ("l_elbow", "l_wrist", kp("l_elbow"), kp("l_wrist")),
-            ("r_shoulder", "r_elbow", kp("r_shoulder"), kp("r_elbow")),
+            ("r_shoulder", "r_elbow", goal("r_shoulder"), kp("r_elbow")),
             ("r_elbow", "r_wrist", kp("r_elbow"), kp("r_wrist")),
             ("l_hip", "l_knee", kp("l_hip"), kp("l_knee")),
             ("l_knee", "l_ankle", kp("l_knee"), kp("l_ankle")),
@@ -809,7 +909,7 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
           # inboard of the keypoint the thigh was pointed at. Aim again each
           # time round, and the two converge on each other.
           for role, child, target in AIM_CHAIN:
-              aim(role, child, kp(target))
+              aim(role, child, goal(target))
           for top, end, from_here, to_there in segments:
             if top not in roles or end not in roles:
                 continue
@@ -897,7 +997,7 @@ def pose_globals(rest_position, parents, roles, points, stretch=True,
             if role not in roles:
                 continue
             j = roles[role]
-            delta = kp(placed[role]) - q[j]
+            delta = goal(placed[role]) - q[j]
             if float(np.linalg.norm(delta)) < 1e-9:
                 continue
             for k in subtree(j):
@@ -947,13 +1047,29 @@ def skin_mesh(mesh, Q, q):
 
 
 def solve_pose(mesh, points_cm, roles=None, stretch=True, rest_points=None,
-               slide=True):
+               slide=True, stature=None):
     """Solve the rig once and hand back the result keyed by bone name.
 
     Assets - hair, clothing, shoes - are separate skinned meshes built on the
     same armature, so they must be driven by the body's solution rather than
     solved again. Keying by name also lets an asset carry only the bones it
     actually uses, which hair rigged to the head alone does.
+
+    `stature` is the figure's height in centimetres, and it is how the rig is
+    sized when the caller knows it. What this did instead was divide the
+    keypoints' shoulder-to-hip span by the rig's own, and those two spans do
+    not measure the same thing: OpenPose's shoulder is the acromion, the bony
+    corner on TOP of the shoulder, and its hip is the trochanter on the
+    outside of the pelvis, while the rig's joints are the glenohumeral centre
+    below and inboard of the one and the femoral head inboard of the other.
+    The keypoint span is therefore longer than the rig's on every body, and
+    the whole rig came up 15% oversize on an average adult and 41% on the
+    child before a single bone had been aimed. The per-segment scaling then
+    spent six passes dragging the limbs back down, and what it could not
+    reach - the shoulder mass, the neck, the head - stayed inflated: shoulders
+    4 cm high and 4.5 cm broad on an average man, 5.6 and 6.4 on a woman, and
+    a child 8 cm too tall with shoulders 21 cm high and half again too wide.
+    That is the "shoulders up around the ears" every export had.
     """
     roles = roles or mesh.get("roles") or resolve_bones(mesh["joint_names"])
     problems = validate_roles(mesh, roles)
@@ -963,15 +1079,33 @@ def solve_pose(mesh, points_cm, roles=None, stretch=True, rest_points=None,
             + "\n\nRun 'python3 mesh_backend.py --inspect <file>' to see the "
               "bone names.")
     rest = mesh["rest_position"]
-    span_rig = float(np.linalg.norm(rest[roles["l_shoulder"]] - rest[roles["l_hip"]]))
-    target = np.asarray(points_cm["l_shoulder"], float) - \
-        np.asarray(points_cm["l_hip"], float)
-    scale = float(np.linalg.norm(target)) / max(1e-9, span_rig)
+    if stature:
+        # The body's own height against the rig's. A body set built for these
+        # presets is authored at the figure's stature, so this comes out at
+        # exactly the unit conversion and the rig is left the size it was
+        # drawn - which is the size a person of that height is.
+        rig_height = float(mesh["vertices"][:, 1].max()
+                           - mesh["vertices"][:, 1].min())
+        scale = float(stature) / max(1e-9, rig_height)
+    else:
+        # No stature given - an outside rig, or a bare self-test. Fall back to
+        # the span, knowing what it costs.
+        span_rig = float(np.linalg.norm(rest[roles["l_shoulder"]]
+                                        - rest[roles["l_hip"]]))
+        target = np.asarray(points_cm["l_shoulder"], float) - \
+            np.asarray(points_cm["l_hip"], float)
+        scale = float(np.linalg.norm(target)) / max(1e-9, span_rig)
     Q, q = pose_globals(rest * scale, mesh["parents"], roles, points_cm,
                         stretch=stretch,
                         rest_orient=mesh["rest_global"][:, :3, :3],
                         rest_points=rest_points, slide=slide)
     return {"scale": scale,
+            # Where each landmark role's joint was aimed, as an offset from
+            # the keypoint: the shoulder deliberately does not land on the
+            # acromion. A caller checking the fit has to add this back, or it
+            # is measuring against a point no bone was ever sent to.
+            "shift": landmark_shift(rest * scale, roles, points_cm,
+                                    rest_points),
             "bones": {name: (Q[i], q[i])
                       for i, name in enumerate(mesh["joint_names"])}}
 

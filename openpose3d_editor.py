@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.34.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.35.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -1921,7 +1921,8 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
         # direction - there is no keypoint on the skull to aim at.
         rest = build_rest_points(figure.body)
         solution = mesh_backend.solve_pose(mesh, points, mesh.get("roles"),
-                                           rest_points=rest)
+                                           rest_points=rest,
+                                           stature=figure.body.get("stature"))
         pieces = [(mesh_backend.skin_with(mesh, solution), mesh["faces"])]
         for asset in assets:
             # assets ride the body's own solution, so they cannot drift
