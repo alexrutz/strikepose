@@ -285,8 +285,49 @@ for preset in BODY_PRESETS:
         rest_points=build_rest_points(skeleton.body),
         stature=skeleton.body.get("stature"))["shift"]
     pulls.append((preset, float(np.linalg.norm(shift.get("l_shoulder", 0.0)))))
+# A landmark offset says where a joint SITS, never how long the bone leaving
+# it is - this project's oldest invariant, arriving somewhere new. Applied
+# whole, the shoulder's offset moved the joint 6 cm down the arm while the
+# elbow keypoint stayed put, so the humerus had to span a gap 6 cm shorter
+# than it is: 18% of an adult's upper arm and 54% of the child's, which came
+# out of the depth map as visibly deformed elbows. It shipped, because every
+# check here was on the shoulder and none was on the arm hanging off it.
+square, squashed = ("none", 0.0), ("none", 0.0)
+for preset in BODY_PRESETS:
+    mesh = bank[preset]
+    skeleton = Skeleton(preset_params(preset))
+    points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
+    solved = mesh_backend.solve_pose(
+        mesh, points, mesh["roles"],
+        rest_points=build_rest_points(skeleton.body),
+        stature=skeleton.body.get("stature"))
+    names, roles = mesh["joint_names"], mesh["roles"]
+    at = lambda role: solved["bones"][names[roles[role]]][1]
+    rested = mesh["rest_position"] * solved["scale"]
+    for role, bone in mesh_backend.LANDMARK_JOINTS.items():
+        if bone is None or role not in roles or role not in solved["shift"]:
+            continue
+        along = np.asarray(points[bone], float) - np.asarray(points[role],
+                                                             float)
+        along = along / max(1e-9, float(np.linalg.norm(along)))
+        leak = abs(float(np.dot(solved["shift"][role], along)))
+        if leak > square[1]:
+            square = ("%s %s by %.2f cm" % (preset, role, leak), leak)
+        was = float(np.linalg.norm(rested[roles[bone]] - rested[roles[role]]))
+        now = float(np.linalg.norm(at(bone) - at(role)))
+        gap = abs(now / max(1e-9, was) - 1.0)
+        if gap > squashed[1]:
+            squashed = ("%s %s->%s (%.1f vs %.1f cm)"
+                        % (preset, role, bone, now, was), gap)
+
+check("a landmark offset never points along the bone it feeds", square[1] < 0.01,
+      "worst %s" % square[0])
+check("so no landmark bone is squashed to reach its keypoint",
+      squashed[1] < 0.12, "worst %s off by %.0f%%"
+      % (squashed[0], 100.0 * squashed[1]))
+
 check("the shoulder is held off its keypoint, by a few centimetres",
-      all(2.0 < v < 14.0 for _p, v in pulls),
+      all(1.0 < v < 9.0 for _p, v in pulls),
       ", ".join("%s %.1f cm" % (p.split(",")[0], v) for p, v in pulls[:4]))
 
 # The mesh must not be torn doing it: a sliding subtree leaves a seam, so

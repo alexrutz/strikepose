@@ -81,19 +81,30 @@ ROLL_PARENT = {"l_shoulder": "l_collar", "r_shoulder": "r_collar",
                "l_knee": "l_hip", "r_knee": "r_hip"}
 
 # Roles whose keypoint is a surface landmark rather than the joint centre the
-# rig rotates about, so the rig keeps its own rest offset from the keypoint
-# instead of being dragged onto it. The shoulder is the clear case: OpenPose's
-# is the acromion, on top of the shoulder, and the arm swings from the
-# glenohumeral joint below and inboard of it. Elbow, wrist, knee and ankle
-# keypoints are joint centres already and must NOT be in here - the whole
-# point of sliding them is that they are where the pose says the joint is.
-# `neck` is the second: OpenPose has no neck of its own and infers one as the
-# MIDPOINT OF THE SHOULDERS, a point out in the middle of the upper chest,
-# while a rig's neck bone starts at the top of the thorax. Dragging one onto
-# the other pulled the whole head down with it - 6.5 cm on an average man, who
-# then measured 168.8 cm instead of 175 with every keypoint landing exactly
-# where it was asked to.
-LANDMARK_JOINTS = ("l_shoulder", "r_shoulder", "neck")
+# rig rotates about, mapped to the bone whose length the correction may not
+# change. Elbow, wrist, knee and ankle keypoints are joint centres already and
+# must NOT be in here - the point of sliding them is that they are where the
+# pose says the joint is.
+#
+# The named bone is the whole subtlety. A landmark offset is a statement about
+# where a joint SITS, never about how long the bone leaving it is - which is
+# this project's oldest invariant, arriving somewhere new. Applied whole, the
+# shoulder's offset moves the joint 6 cm down the arm while the elbow keypoint
+# stays put, so the humerus has to span a gap 6 cm shorter than it is: 18% of
+# an adult's upper arm and 54% of the child's, which came out of the depth map
+# as visibly deformed elbows. So the component along the bone is dropped and
+# the rest - which is what moves a shoulder inboard, and what "too broad" was -
+# is kept. Across a 28 cm arm, sliding the joint 1.6 cm inboard costs half a
+# millimetre of length.
+#
+# The neck names no bone, because there the offset IS along the torso and is
+# the whole point: OpenPose has no neck and infers one as the MIDPOINT OF THE
+# SHOULDERS, out in the middle of the upper chest, where a rig's neck bone
+# starts at the top of the thorax. Dragging one onto the other pulls the whole
+# head down with it, and every adult in the set finished 3 to 6 cm short of
+# its own stature - an average man measured 168.8 cm instead of 175.
+LANDMARK_JOINTS = {"l_shoulder": "l_elbow", "r_shoulder": "r_elbow",
+                   "neck": None}
 
 COMPONENT = {5120: "b", 5121: "B", 5122: "h", 5123: "H", 5125: "I", 5126: "f"}
 COMPONENT_SIZE = {"b": 1, "B": 1, "h": 2, "H": 2, "I": 4, "f": 4}
@@ -569,11 +580,22 @@ def landmark_shift(rest_position, roles, points, rest_points):
     except (KeyError, TypeError, ValueError):
         return {}
     out = {}
-    for role in LANDMARK_JOINTS:
+    for role, keeps_length in LANDMARK_JOINTS.items():
         if role not in roles or role not in rest_points:
             continue
-        out[role] = carry @ ((rig_at(role) - rig_hips)
-                             - into_rig @ (rest_at(role) - kp_hips))
+        offset = carry @ ((rig_at(role) - rig_hips)
+                          - into_rig @ (rest_at(role) - kp_hips))
+        # Take out the part along the bone this joint feeds, so the correction
+        # moves the joint without resizing it. Measured on the keypoints, in
+        # the pose as it stands: an arm raised over the head wants a different
+        # direction taken out than one hanging down.
+        if keeps_length and keeps_length in points:
+            bone = now_at(keeps_length) - now_at(role)
+            length = float(np.linalg.norm(bone))
+            if length > 1e-6:
+                bone = bone / length
+                offset = offset - bone * float(np.dot(offset, bone))
+        out[role] = offset
     return out
 
 

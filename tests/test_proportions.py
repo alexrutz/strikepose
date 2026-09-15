@@ -211,3 +211,38 @@ check("the web prototype carries presets at all", found >= 5,
 
 print("\nALL PASS" if ok else "\nFAILURES PRESENT")
 sys.exit(0 if ok else 1)
+
+
+# -- the child row is measured, not inherited ------------------------------
+#
+# ANSUR is a survey of soldiers, so the child cannot be measured the same way.
+# It is the male row times the adult-to-child shape change taken off the body
+# set's own rigs, which tools/child_ratios.py computes. This reads it back, so
+# the table and the measurement cannot drift apart - the same arrangement the
+# web preset table has, and for the same reason: the last version of this
+# preset was the male row at 122 cm with its legs cut by a tenth, and nothing
+# compared it with anything.
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "tools"))
+    import bodies_lib
+    import child_ratios
+    measured, _adult, _child = child_ratios.child_row()
+except Exception as problem:                       # no body set on this box
+    print("SKIP the child row against the rigs it came from: %s" % problem)
+else:
+    row = ANSUR["child"]
+    worst = ("none", 0.0)
+    for key in ("shoulder_height", "hip_height", "knee_height",
+                "ankle_height", "shoulder_w"):
+        gap = abs(row[key] - measured[key])
+        if gap > worst[1]:
+            worst = ("%s (%.4f vs %.4f)" % (key, row[key], measured[key]), gap)
+    check("the child row still matches the rigs it was measured from",
+          worst[1] < 0.0005, "worst %s" % worst[0])
+    # and it has to actually differ from the male row, or it is the old bug
+    check("and it is not just the male row again",
+          abs(row["shoulder_w"] - ANSUR["male"]["shoulder_w"]) > 0.01
+          and abs(row["hip_height"] - ANSUR["male"]["hip_height"]) > 0.005,
+          "shoulder_w %.4f vs %.4f" % (row["shoulder_w"],
+                                       ANSUR["male"]["shoulder_w"]))

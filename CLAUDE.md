@@ -283,20 +283,36 @@ the same point.** OpenPose's shoulder is the acromion - the bony corner on
 *top* of the shoulder, which is what the COCO format and the ANSUR table both
 mean by it - while the bone an arm swings from starts at the glenohumeral
 joint, below it and well inboard. Its neck is not a neck at all: COCO has none,
-so it is inferred as the *midpoint of the shoulders*, a point out in the middle
-of the upper chest, where a rig's neck bone starts at the top of the thorax.
-Sliding a rig joint onto either of those drags the body with it - the shoulder
-line up and outward, the whole head down. `mesh_backend.LANDMARK_JOINTS` names
-them, and `landmark_shift` holds each one at the offset the rig itself has at
-rest: measured from the hip midpoint and rotated into a common frame on both
-sides, because the rig's coordinates and the editor's share neither an origin
-nor a heading and a raw difference of the two positions is dominated by that -
-which threw the shoulders further out than leaving them alone did. Then the
-torso's own rotation carries it into the pose, so a figure that has turned does
-not count the torso twice. At rest the correction is exactly the rig's own
-anatomy, the same argument the neck rotation makes. Elbow, wrist, knee and
-ankle keypoints *are* joint centres and must never be in that list: the point
-of sliding them is that they are where the pose says the joint is.
+so it is inferred as the *midpoint of the shoulders*, out in the middle of the
+upper chest, where a rig's neck bone starts at the top of the thorax. Sliding a
+rig joint onto either drags the body with it - the shoulder line up and
+outward, the whole head down. `mesh_backend.LANDMARK_JOINTS` names them and
+`landmark_shift` holds each at the offset the rig itself has at rest, measured
+from the hip midpoint and rotated into a common frame on both sides, because
+the rig's coordinates and the editor's share neither an origin nor a heading
+and a raw difference of positions is dominated by that - which threw the
+shoulders further out than leaving them alone did. Elbow, wrist, knee and ankle
+keypoints *are* joint centres and must never be in that list.
+
+**A landmark offset says where a joint sits, never how long the bone leaving
+it is.** That is this project's oldest invariant arriving somewhere new, and
+ignoring it cost a release. Applied whole, the shoulder's offset moves the
+joint 6 cm down the arm while the elbow keypoint stays where it is, so the
+humerus has to span a gap 6 cm shorter than it is: 18% of an adult's upper arm
+and 54% of the child's, which came out of the depth map as visibly deformed
+elbows. So `LANDMARK_JOINTS` maps each role to the bone it feeds and the
+component along that bone is dropped, measured on the keypoints in the pose as
+it stands - an arm raised over the head wants a different direction taken out
+than one hanging down. What is left is what moves a shoulder inboard, and
+inboard is what "too broad" was: across a 28 cm arm, sliding the joint 1.6 cm
+in costs half a millimetre of length. The neck names no bone, because there the
+offset *is* along the torso and is the whole point.
+
+The lesson underneath is duller and worth more. Every check written for that
+change was on the shoulder - where it sat, how wide it was, how proud it stood
+- and not one was on the arm hanging off it, so a fix that halved a child's
+upper arm passed a green suite and shipped. When a change moves a joint, test
+the bones on *both* sides of it.
 
 **A rig is sized by the figure's stature, never by a span between two
 landmarks.** This divided the keypoints' shoulder-to-hip distance by the rig's
@@ -306,22 +322,34 @@ trochanter against a glenohumeral-to-femoral-head - so the whole rig came up
 been aimed. The per-segment scaling then spent six passes dragging the limbs
 back down, and what it could not reach stayed inflated: shoulders 4 cm high and
 4.5 cm broad on an average man, 5.6 and 6.4 on a woman, and a child 8 cm too
-tall with its shoulders 21 cm high and half again too wide. That is the
-"shoulders up around the ears" every export had, and it read worst on the women
-and worst of all on the child because the error scales with how far the rig's
-joints sit inside its own landmarks. `solve_pose` takes `stature` and sizes the
-rig by it against its own rest height; a body set built for these presets is
-authored at the figure's stature, so the rig is left the size it was drawn.
-Without one it falls back to the span, which is all an outside rig can offer.
+tall with its shoulders 21 cm high and half again too wide. `solve_pose` takes
+`stature` and sizes the rig by it against its own rest height; a body set built
+for these presets is authored at the figure's stature, so the rig is left the
+size it was drawn. Without one it falls back to the span, which is all an
+outside rig can offer.
 
-Two things say it stayed fixed. The fit is now *exact* - every mapped joint
-lands on the point it was sent to and every segment matches its keypoints to
-0.00 cm, where the best before was 1.2 cm - so the sentinel in that test starts
-at -1.0, or a perfect fit reports as "none measured". And the rigged body now
-fills the same frame as the swept anatomy to within a tenth. The old detail
-test passed on the strength of the bug: a body a sixth too big for its own
-skeleton covers more of the picture and carries more edge with it, so
-normalise that measure per covered pixel or it is measuring size, not surface.
+Two things say the sizing stayed fixed. The fit is *exact* - every mapped joint
+lands on the point it was sent to and every segment matches to 0.00 cm, where
+the best before was 1.2 cm - so the sentinel in that test starts at -1.0, or a
+perfect fit reports as "none measured". And the rigged body now fills the same
+frame as the swept anatomy to within a tenth. The old detail test passed on the
+strength of the bug: a body a sixth too big for its own skeleton covers more of
+the picture and carries more edge with it, so normalise that measure per
+covered pixel or it is measuring size, not surface.
+
+**There is no child in ANSUR, so the child row is measured against the body
+set's own rigs.** It is the male row times the adult-to-child shape change,
+which `tools/child_ratios.py` computes from the Anny adult and the Anny child -
+both built from the same WHO-calibrated model, so the ratio between them is
+sound even where neither absolute is, because the landmark disagreement sits on
+both sides of it and cancels. `tests/test_proportions.py` reads it back, the
+same arrangement the web preset table has. What it replaced was the male row at
+122 cm with `leg_ratio` 0.9 - a 70% scale soldier with its legs cut, which a
+child is not. Its shoulders came out 14.4 cm half-width against the 11.8 its own
+rig has, 22% too broad, and the leg_ratio put the hip at 56.3 cm where the rig
+puts it at 63.0, so the torso ran 8 cm long. Only the ratio is taken from the
+rig and never the absolute: the rig's shoulder is the glenohumeral joint and
+the table's is the acromion.
 
 **A rig is fitted to the figure segment by segment, never dragged onto it.**
 One number - the ratio of the two shoulder-to-hip spans - cannot match a torso
@@ -547,12 +575,13 @@ a build.
 4. Wrists are never rotated; there is no keypoint for them. Ankles are only
    levelled, not aimed - a foot taking weight goes flat, but nothing turns it
    in or out.
-5. The child preset disagrees with its own rig about where the shoulders are,
-   by 12.5 cm of `landmark_shift` against 4.8-6.9 on the adults, and a fitted
-   child comes out 116 cm against the 122 the preset claims where the adults
-   land within 2 cm. ANSUR has no child, so that preset is inherited and
-   unverified - the rig is the more likely one to be right, and the numbers
-   to check it against are a real measurement problem, not a code one.
+5. The editor splits the arm with ANSUR's acromion-radiale against
+   radiale-stylion, a ratio of 1.25, where the rigs have 1.05 to 1.20. The
+   surface measure starts at the acromion and so overstates the humerus by the
+   drop to the joint. A fitted upper arm comes out 5% long and a forearm 2-14%
+   short, which is a step in girth at the elbow, and closing it means changing
+   the split - and with it every exported child and adult skeleton. Worth
+   doing, with the rigs as the reference.
 5. The web prototype duplicates the maths in JavaScript. It is tested
    independently (`node web/test.mjs`) and will drift from the Python. Two
    things no longer can: the preset table is generated from `preset_params`

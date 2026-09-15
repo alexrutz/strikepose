@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.35.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.36.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -233,6 +233,36 @@ ANSUR = {
         "waist_t": 0.569,               # her narrowest point sits higher
         "stature_ref": 162.85,
     },
+    # There is no child in ANSUR - it is a survey of soldiers - so this one
+    # cannot be measured the same way. What it can be is the adult male row
+    # times the shape change from an adult to a child, and that change is
+    # measurable: the body set carries an Anny adult and an Anny child built
+    # from the same WHO-calibrated model, so the ratio of their rest rigs says
+    # how a seven-year-old differs from a man. tools/child_ratios.py prints
+    # them and tests/test_proportions.py checks these against it.
+    #
+    # What it replaces was the male row at 122 cm with leg_ratio 0.9, which is
+    # a 70% scale soldier with its legs cut - and a child is not that. Its
+    # shoulders came out 14.4 cm half-width against the 11.8 its own rig has,
+    # 22% too broad, and leg_ratio dropped the hip to 56.3 cm where the rig
+    # puts it at 63.0. The fitted body wore the difference.
+    "child": {
+        "shoulder_height": 0.7943,      # male 0.8203 x 0.968 measured
+        "hip_height": 0.5022,           # x 0.979
+        "knee_height": 0.2616,          # x 0.934
+        "ankle_height": 0.0416,         # x 1.002
+        "shoulder_w": 0.1043,           # x 0.881 - the big one
+        "hip_w": 0.0500,
+        "hand": 0.1101,
+        "span": 1.0330,
+        "upper_arm": 0.1909,
+        "forearm": 0.1525,
+        "ear_drop": 13.11 / 175.62,
+        "head": 1.0,
+        "jaw": 1.0,
+        "waist_t": 0.593,
+        "stature_ref": 175.62,
+    },
 }
 
 # A head is not a scaled copy of the body it sits on. Fitting log head size on
@@ -267,7 +297,7 @@ def derive_proportions(stature, sex="male", leg_ratio=1.0):
     height have the same skeleton and differ in girth, so the body types share
     these numbers and override only the cross-sections.
     """
-    m = ANSUR["female" if sex == "female" else "male"]
+    m = ANSUR.get(sex) or ANSUR["male"]
     shoulder_half = stature * m["shoulder_w"]
     hand = m["hand"] * stature
     half_span = 0.5 * stature * m["span"]
@@ -391,7 +421,7 @@ BODY_PRESETS = {
         "glute": (7.8, 5.6, 6.6, 1.02, 7.2),
     },
     "Child, about 7": {
-        "stature": 122, "sex": "male", "leg_ratio": 0.9,
+        "stature": 122, "sex": "child", "leg_ratio": 1.0,
         "chest": (9.19, 8.83), "waist": (10.0, 7.6), "pelvis": (10.6, 8.0),
         "arm_girth": 0.62, "forearm_girth": 0.64,
         "thigh_girth": 0.66, "calf_girth": 0.66,

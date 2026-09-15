@@ -47,8 +47,8 @@ export const PRESETS = {
                       th:37.7, ca:40.1, head:0.93,
                       chest:[14.20,13.14], waist:[11.8,9.0], pelvis:[19.4,13.0],
                       girth:1.0, bust:true},
-  "Child, about 7":   {sw:14.4, sd:0.0, hw:6.1, tl:43.8, ua:19.5, fa:15.6,
-                      th:25.6, ca:26.2, head:0.88,
+  "Child, about 7":   {sw:12.7, sd:0.0, hw:6.1, tl:35.6, ua:20.5, fa:16.4,
+                      th:29.4, ca:26.8, head:0.91,
                       chest:[9.19,8.83], waist:[10.0,7.6], pelvis:[10.6,8.0],
                       girth:0.65},
 };
