@@ -183,6 +183,29 @@ check("and a cylinder still comes out round", abs(ratio - math.pi / 4.0) < 0.03,
       "covers %.3f of the box around it, pi/4 is %.3f"
       % (ratio, math.pi / 4.0))
 
+# -- the viewport shows the rig the export is made of ----------------------
+#
+# The editor used to draw only the eighteen keypoints, which is the thing you
+# drag and not the thing that comes out: the depth map is made from the body's
+# own 104-bone armature, posed by joint angle. Two different pictures, and only
+# one of them was on screen.
+check("the native rig is on by default, the swept preview is not",
+      app.show_rig and not app.show_body,
+      "rig %s body %s" % (app.show_rig, app.show_body))
+bones = app.rig_bones(0)
+check("and the rig it draws is the real one, hands and all",
+      len(bones) > 90, "%d bones" % len(bones))
+
+elbow = KEYPOINT_NAMES.index("l_elbow")
+before = [tuple(b[1]) for b in app.rig_bones(0)]
+was = list(app.figures[0].points[elbow])
+app.figures[0].points[elbow] = [was[0] + 12.0, was[1] - 8.0, was[2] + 4.0]
+after = [tuple(b[1]) for b in app.rig_bones(0)]
+app.figures[0].points[elbow] = was
+moved = sum(1 for a, b in zip(before, after) if a != b)
+check("and it follows the keypoints it is posed by",
+      moved > 3, "%d of %d bones moved" % (moved, len(after)))
+
 # -- hair and clothes ------------------------------------------------------
 import wearables
 app.props = []

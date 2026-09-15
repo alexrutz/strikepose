@@ -309,6 +309,19 @@ two centimetres above where the format puts it and the shoulder line the same
 distance below measured acromial height - one constant, wrong against both the
 survey and the format.
 
+**The viewport draws the rig, because the rig is what comes out.** The editor
+showed only the eighteen keypoints - the thing you drag - while the export was
+made from the body's own 104-bone armature, so what was on screen and what came
+out of the file were two different pictures and nothing said so. `draw_rig`
+puts the armature on the canvas, posed exactly as the export poses it, and the
+keypoint limbs thin down to the handles they are. `rig_bones` caches on the
+pose, because a drag redraws several times a second.
+
+The swept body preview defaults off now that there is something better to look
+at. It stays, on B, because it is the only shading that survives a drag at
+sixty frames a second - but it is the approximation, not the export, and its
+status line says so. The real thing is P.
+
 **The rig is posed, not fitted, and the keypoints are read back off it.** A
 depth map is a picture of a body, and the body is the rig's. Fitting inverted
 that: every bone was aimed at a keypoint, then slid onto it and scaled until it

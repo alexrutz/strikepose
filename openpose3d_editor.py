@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.39.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.40.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -2353,7 +2353,11 @@ class EditorApp:
         self._ortho_sig = None
         self._ortho_time = 0.0
         self._palettes = {}
-        self.show_body = True
+        # The rig is what the export is made of, so it is what the viewport
+        # shows. The swept body is the fast approximation underneath it and
+        # defaults off now that there is something better to look at.
+        self.show_rig = True
+        self.show_body = False
         self._parts_cache = {}
         self._parts_sig = None
         self.show_grid = True
@@ -2730,7 +2734,8 @@ class EditorApp:
                        ("Bottom", lambda: self.set_view("bottom"))],
                 cols=3, small=True)
         switch(body, "Extra views (O)", "show_ortho")
-        switch(body, "Body preview (B)", "show_body")
+        switch(body, "Native rig (K)", "show_rig")
+        switch(body, "Swept preview (B)", "show_body")
         switch(body, "Floor grid (G)", "show_grid")
         switch(body, "Joint names (N)", "show_labels")
         switch(body, "Depth shading (D)", "depth_shading")
@@ -3132,8 +3137,13 @@ class EditorApp:
 
     def toggle_body(self):
         self.set_flag("show_body", not self.show_body)
-        self.status.set("Body preview on: shading approximates the depth map."
-                        if self.show_body else "Body preview off.")
+        self.status.set("Swept preview on: the fast approximation, not the "
+                        "export." if self.show_body else "Swept preview off.")
+
+    def toggle_rig(self):
+        self.set_flag("show_rig", not self.show_rig)
+        self.status.set("Native rig on: the armature the depth map is made "
+                        "from." if self.show_rig else "Native rig off.")
 
     def toggle(self, attr):
         self.set_flag(attr, not getattr(self, attr))
@@ -3187,6 +3197,61 @@ class EditorApp:
                 run.extend((sx, sy))
             if len(run) >= 4:
                 canvas.create_line(*run, fill=colour, dash=(5, 4))
+
+    def rig_bones(self, figure):
+        """The posed rig's bones for one figure, as world segments.
+
+        This is the armature the depth map is actually made from - Anny's own
+        104 bones, posed by joint angle - rather than the eighteen keypoints
+        that say which way to point them. They are two different things and
+        the editor used to draw only the second, so what you dragged and what
+        came out of the export were never the same picture.
+
+        Cached on the pose, because a drag redraws several times a second and
+        solving is numpy over a hundred bones.
+        """
+        import bodies_lib
+        key = (figure, tuple(tuple(p) for p in self.figures[figure].points))
+        if getattr(self, "_rig_key", None) == key:
+            return self._rig_cache
+        self._rig_key = key
+        self._rig_cache = []
+        try:
+            mesh = bodies_lib.for_figures([self.figures[figure]])[0]
+            if mesh is not None:
+                _solution, _points = pose_body(self.figures[figure], mesh)
+                names = mesh["joint_names"]
+                parents = mesh["parents"]
+                at = lambda j: _solution["bones"][names[j]][1]
+                self._rig_cache = [(at(int(parents[j])), at(j))
+                                   for j in range(len(names))
+                                   if int(parents[j]) >= 0]
+        except Exception:
+            self._rig_cache = []            # no body set, or a rig that will
+        return self._rig_cache              # not map: fall back to keypoints
+
+    def draw_rig(self, camera, canvas, compact=False):
+        """The native armature, drawn back to front with the figure."""
+        segments = []
+        for f in range(len(self.figures)):
+            for a, b in self.rig_bones(f):
+                pa, pb = camera.project(a), camera.project(b)
+                segments.append(((pa[2] + pb[2]) / 2.0, pa, pb, f))
+        if not segments:
+            return False
+        depths = [d for d, _a, _b, _f in segments]
+        lo, hi = min(depths), max(depths)
+        span = max(1e-6, hi - lo)
+        for mid, pa, pb, f in sorted(segments, key=lambda t: -t[0]):
+            near = 1.0 - 0.55 * ((mid - lo) / span)
+            grey = int(70 + 150 * near)
+            if f != self.active:
+                grey = int(grey * 0.75)
+            canvas.create_line(pa[0], pa[1], pb[0], pb[1],
+                               fill="#%02x%02x%02x" % (grey, grey,
+                                                       min(255, grey + 12)),
+                               width=1 if compact else 2, capstyle="round")
+        return True
 
     def draw_body(self, camera=None, canvas=None, coarse=False):
         """Figures and objects, one depth sort across the lot.
@@ -3555,6 +3620,7 @@ class EditorApp:
             "3": lambda: self.set_view("right"), "4": lambda: self.set_view("left"),
             "5": lambda: self.set_view("top"), "6": lambda: self.set_view("bottom"),
             "b": self.toggle_body,
+            "k": self.toggle_rig,       # r is taken by reset_pose
             "tab": self.next_figure, "0": self.frame_all,
             "bracketleft": lambda: self.rotate_figure(-1, "y"),
             "bracketright": lambda: self.rotate_figure(1, "y"),
@@ -4098,7 +4164,8 @@ class EditorApp:
         return (tuple(tuple(f.points) for f in self.figures),
                 tuple(tuple(f.visible) for f in self.figures),
                 tuple(tuple(f.anchors) for f in self.figures),
-                self.active, self.selected, self.show_body, self._thickness())
+                self.active, self.selected, self.show_body, self.show_rig,
+                self._thickness())
 
     def redraw(self, force_ortho=False):
         self.draw_scene(self.main_view)
@@ -4141,6 +4208,7 @@ class EditorApp:
             self.draw_frame()
         if self.show_body:
             self.draw_body(camera, c, coarse=compact)
+        rig_drawn = self.show_rig and self.draw_rig(camera, c, compact)
 
         if self.skeleton.hinged:
             a, b = self.skeleton.anchors
@@ -4181,10 +4249,14 @@ class EditorApp:
             factor = 1.0 - 0.5 * ((mid - lo) / span) if self.depth_shading else 1.0
             if f != self.active:
                 factor *= 0.92          # dim, but not enough to hide the tint
+            # With the rig on screen the OpenPose limbs are the handles you
+            # drag, not the subject, so they thin down out of its way.
+            thick = ((2 if compact else 3) if rig_drawn
+                     else (3 if compact else 7) if self.show_body
+                     else (5 if compact else 9))
             c.create_line(screen[a][0], screen[a][1], screen[b][0], screen[b][1],
                           fill=self.shade(self.figure_palette(f)[i], factor),
-                          width=(3 if compact else 7) if self.show_body
-                          else (5 if compact else 9), capstyle="round")
+                          width=thick, capstyle="round")
 
         joints = [(screen[i][2], f, i) for f, screen in enumerate(screens)
                   for i in range(len(KEYPOINT_NAMES))]
