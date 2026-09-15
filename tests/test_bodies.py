@@ -151,61 +151,66 @@ check("and the body does not come through it",
       "%d of %d pixels, %.1f%%" % (behind, int(both.sum()),
                                    100.0 * behind / max(1, int(both.sum()))))
 
-# A garment clears the rigged body by its OWN thickness, not by a flat
-# centimetre. With one figure for all of them an afro came out at the same
-# depth as a crew cut, a helmet as a bare head and a coat as a t-shirt: every
-# thick garment there is rendered as bare skin, and since the silhouette still
-# grew the PNG looked plausible, which is why nothing caught it.
+# -- clothes are real meshes now ------------------------------------------
 #
-# Reproduce the bug rather than measure a proxy for it. A pixel count of how
-# far a thick garment stands proud is a proxy, and it moved the moment the
-# anatomy underneath it was corrected - it read a helmet as 40 pixels against
-# the bug's 29, which is not a test. Flattening every standoff to the old
-# centimetre and asking whether the picture changes is the thing itself.
-import wearables
+# `wearables` builds a garment out of the body's own swept profile. That still
+# draws the viewport, and it is an approximation: what a rigged export wears
+# is the CC0 MakeHuman library, fitted to each body by tools/make_wearables.py
+# and skinned to its armature. So the thickness checks that used to live here
+# moved to the swept path, where the sweep still is, and what is checked on
+# the rigged path is that the real mesh arrives and that the body does not
+# come through it.
+import garments_lib
 
-def head_of(image, band=0.22):
-    grey = np.asarray(image, float)
-    return grey[:int(band * grey.shape[0])]
+have = garments_lib.available()
+check("the garment library is on disk", len(have) >= 12,
+      "%d garments" % len(have))
+missing = [(slot, name) for slot in garments_lib.CATALOGUE
+           for name in garments_lib.CATALOGUE[slot]
+           if not garments_lib.named(slot, name)]
+check("and every garment it names is one of them", not missing,
+      str(missing[:3]))
 
-
-def dressed_head(outfit):
-    worn.outfit = dict(outfit)
-    return head_of(editor.rigged_depth_image([(worn, mesh, ())], camera, rect,
-                                             384, 576))
-
-
-honest = wearables.layers
-try:
-    flat = []
-    for slot, name in (("hair", "afro"), ("hair", "curly"),
-                       ("headgear", "helmet"), ("top", "coat")):
-        wearables.layers = honest
-        right = dressed_head({slot: name})
-        # exactly the old bug: one standoff for every garment there is
-        wearables.layers = (lambda *a, **k:
-                            [(s, (1.0 if v is not None else None), p)
-                             for s, v, p in honest(*a, **k)])
-        wrong = dressed_head({slot: name})
-        moved = int((np.abs(right - wrong) > 2.0).sum())
-        flat.append(("%s/%s" % (slot, name), moved))
-finally:
-    wearables.layers = honest
-    worn.outfit = {}
-
-check("a garment's own thickness is what it clears the rigged body by",
-      all(n > 150 for _g, n in flat),
-      ", ".join("%s %d px" % (g, n) for g, n in flat))
-
-# and it still has to reach the frame at all
-worn.outfit = {"top": "coat"}
-coated = int((np.asarray(editor.rigged_depth_image(
+worn.outfit = {}
+bare_px = int((np.asarray(editor.rigged_depth_image(
     [(worn, mesh, ())], camera, rect, 384, 576), float) > 0).sum())
-worn.outfit = {"top": "t_shirt"}
-teed = int((np.asarray(editor.rigged_depth_image(
-    [(worn, mesh, ())], camera, rect, 384, 576), float) > 0).sum())
-check("and a coat is bulkier in the frame than a t-shirt",
-      coated > teed * 1.05, "%d px against %d" % (coated, teed))
+for slot, name in (("top", "long_sleeve"), ("bottom", "trousers"),
+                   ("shoes", "shoes"), ("hair", "bob")):
+    worn.outfit = {slot: name}
+    grey = np.asarray(editor.rigged_depth_image(
+        [(worn, mesh, ())], camera, rect, 384, 576), float)
+    check("a real %s reaches the rigged depth map" % name,
+          int((grey > 0).sum()) > bare_px + 200,
+          "%d px against %d bare" % (int((grey > 0).sum()), bare_px))
+worn.outfit = {}
+
+# The body must not come through what it is wearing. MakeHuman ships the list
+# of body vertices a garment stands in for; without it a shirt sits a
+# millimetre off a chest and the chest wins the z-test, so the garment is
+# simply absent wherever it matters most.
+worn.outfit = {"top": "long_sleeve", "bottom": "trousers"}
+dressed = np.asarray(editor.rigged_depth_image(
+    [(worn, mesh, ())], camera, rect, 384, 576), float)
+worn.outfit = {}
+bare = np.asarray(editor.rigged_depth_image(
+    [(worn, mesh, ())], camera, rect, 384, 576), float)
+both = (bare > 0) & (dressed > 0)
+behind = int((dressed[both] < bare[both] - 0.5).sum())
+check("and the body does not come through it",
+      behind < 0.02 * int(both.sum()),
+      "%d of %d pixels" % (behind, int(both.sum())))
+
+# -- the swept garments, on the path that still uses them ------------------
+sweep = lambda outfit: (setattr(worn, "outfit", dict(outfit)),
+                        np.asarray(editor.anatomy_depth_image(
+                            [worn], camera, rect, 384, 576), float))[1]
+for slot, thin, thick in (("hair", "shaved", "afro"),
+                          ("headgear", "none", "helmet")):
+    lean = sweep({slot: thin})[:int(0.22 * 576)]
+    bulky = sweep({slot: thick})[:int(0.22 * 576)]
+    check("a swept %s is thicker than a %s" % (thick, thin),
+          int((bulky > 0).sum()) > int((lean > 0).sum()) + 40,
+          "%d px against %d" % (int((bulky > 0).sum()), int((lean > 0).sum())))
 worn.outfit = {}
 
 # -- a rig is fitted segment by segment, not dragged -----------------------

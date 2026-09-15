@@ -228,6 +228,37 @@ someone's back - `_box_z` exists, and the corners are most of what says
 "pack". A hat brim is round: giving the reach to the depth alone and 45% of it
 to the width put a diving board on a walking figure in a sun hat.
 
+**A rigged export wears real meshes, and only real meshes.** `wearables`
+builds a garment out of the body's own swept profile; that draws the viewport
+at sixty frames a second and it is an approximation. What goes into a
+conditioning image is the CC0 MakeHuman garment library, fitted to every body
+by `tools/make_wearables.py` and skinned to its armature, so `skin_with` drives
+it from the body's own solution. The two are never mixed on one figure: a
+swept scarf next to a fitted coat reads as a slab hanging off the chest,
+because the eye goes straight to the join. A slot the library has nothing for
+is not worn on that path, and `garments_lib.describe()` says which those are.
+
+**A `.mhclo` is exact against the mesh it names and meaningless against any
+other.** It describes a garment as, per vertex, three vertices of MakeHuman's
+`hm08`, barycentric weights and an offset. Anny has 13718 vertices to hm08's
+13380 and shares 1967 triangles of 26756, so fitting by index puts most of a
+hairstyle roughly on the head - which looks like a fixable glitch - and throws
+the rest across the room. It is not fixable by patching outliers. The garment
+is fitted to `base.obj`, where the indices mean what they say, and carried onto
+the Anny body geometrically: each garment vertex is described by which
+base-body vertices it sits over and how far out along their normals, and
+rebuilt from that description over the Anny surface. What makes it sound is
+that the two are the same human shape in the same rest pose at the same
+stature, not that they share any numbering.
+
+**A garment hides the body under it.** MakeHuman ships `delete_verts` for
+exactly this, and without it a shirt sits a millimetre off a chest and the
+chest wins the z-test, so the garment is absent wherever it matters most.
+Carried across by the same geometric map the vertices are, then eroded by a
+ring: the deletion list is in the base mesh's numbering and its boundary lands
+a vertex or two off, and a body face dropped just past a hem is a black slit
+with nothing over it.
+
 **Objects reach the depth map, never the pose map.** A chair drawn into an
 OpenPose image is read as a limb. `render_scene` and the editor's exports keep
 them apart, and both suites assert the pose PNG is byte-identical with and
@@ -598,12 +629,11 @@ a build.
 4. Wrists are never rotated; there is no keypoint for them. Ankles are only
    levelled, not aimed - a foot taking weight goes flat, but nothing turns it
    in or out.
-5. Anny's mesh does not share MakeHuman's hm08 vertex ordering - 1967 of
-   26756 triangles in common - so the CC0 MakeHuman garment library cannot be
-   fitted to these bodies by its `.mhclo` indices, which is what that format
-   is for. It needs a geometric transfer: fit the garment to `base.obj` by
-   index, where it is exact, then shrink-wrap from the base body onto the
-   Anny body. Until that exists, `wearables` is the swept approximation.
+5. The garment library covers hair, tops, bottoms and shoes; `over`
+   (apron, cape, backpack, scarf) and most headgear have no mesh behind them
+   yet, so those slots are silently not worn on a rigged export. The packs
+   have hats and more besides - `tools/make_wearables.py --list` shows the
+   fifty-odd available - it is a matter of building and vendoring them.
 5. The web prototype duplicates the maths in JavaScript. It is tested
    independently (`node web/test.mjs`) and will drift from the Python. Two
    things no longer can: the preset table is generated from `preset_params`

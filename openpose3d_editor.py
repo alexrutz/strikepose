@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.37.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.38.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -2004,7 +2004,20 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
         solution = mesh_backend.solve_pose(mesh, points, mesh.get("roles"),
                                            rest_points=rest,
                                            stature=figure.body.get("stature"))
+        # Real garments, where the library has one. `wearables` builds a
+        # garment out of the body's own swept profile, which is right for the
+        # viewport and an approximation everywhere else; these are the CC0
+        # MakeHuman meshes, fitted to this very body by
+        # tools/make_wearables.py and skinned to its armature, so they ride
+        # the solution above rather than being solved again.
+        import garments_lib
+        preset = (figure.body or {}).get("preset")
+        worn, mesh = (garments_lib.dress(figure, preset, mesh) if preset
+                      else ([], mesh))
         pieces = [(mesh_backend.skin_with(mesh, solution), mesh["faces"])]
+        for cloth in worn:
+            pieces.append((mesh_backend.skin_with(cloth, solution),
+                           cloth["faces"]))
         for asset in assets:
             # assets ride the body's own solution, so they cannot drift
             pieces.append((mesh_backend.skin_with(asset, solution),
@@ -2018,39 +2031,13 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=()):
                  + camera.height / 2.0 - y0) * s,
                 rel @ np.asarray(fwd) * k])
             np.minimum(zbuf, rasterize_depth(px, faces, out_w, out_h), out=zbuf)
-    # Clothes and hair. `wearables` carries no meshes: it clips and pads the
-    # body's own *swept* profile, and that profile is thinner than the rigged
-    # mesh wherever the two disagree - a chest, a shoulder - so a coat dropped
-    # straight into the buffer comes out with the body poking through it.
-    #
-    # Cloth lies on the surface, so say that instead of padding harder: where a
-    # garment covers the body it clears whatever the rig put there by its own
-    # thickness, and then follows the rigged shape rather than the
-    # approximation it was cut from. By its *own* thickness, per layer: one
-    # figure for all of them was a flat centimetre, which is right for a
-    # t-shirt and flattens a five-centimetre afro onto the skull, a helmet
-    # into the head and a coat into the chest. Every thick garment there is
-    # came out of a rigged export looking like bare skin.
-    #
-    # Where a layer reaches past the body - a hem, a fall of hair, a hat brim,
-    # a rucksack - it carries no standoff and keeps its own depth, because
-    # there is nothing under it. Pushing those forward instead drags a
-    # ponytail round to the front of the face.
-    body = zbuf.copy()
-    for figure, mesh, _assets in jobs:
-        if mesh is None or not getattr(figure, "outfit", None):
-            continue
-        import wearables
-        segments, frame = body_segments(figure)
-        for _slot, standoff, part in wearables.layers(figure, segments,
-                                                      frame, 1.0):
-            over = depth_buffer([[to_camera_space(part, camera, rect, out_w)]],
-                                out_w, out_h)
-            if standoff is not None:
-                on_body = np.isfinite(over) & np.isfinite(body)
-                over[on_body] = np.minimum(over[on_body],
-                                           body[on_body] - standoff * k)
-            np.minimum(zbuf, over, out=zbuf)
+    # Clothes and hair are real meshes on this path, added above with the
+    # body. `wearables`' swept garments do not come along: they are the body's
+    # own profile clipped and padded, which is the right thing for a viewport
+    # at sixty frames a second and an approximation next to a fitted mesh -
+    # and mixing the two is worse than either, because the eye reads the join.
+    # A slot the garment library has nothing for is simply not worn here;
+    # `garments_lib.describe()` says which those are.
     if len(props):
         # the triangle rasteriser and the analytic one write the same units, so
         # the objects simply join the buffer and the nearer surface wins
