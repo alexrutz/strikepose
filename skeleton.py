@@ -122,6 +122,61 @@ def reroot(anchor):
     return _REROOT_CACHE[anchor]
 
 
+# Hands and feet, which eighteen keypoints cannot describe.
+#
+# The last keypoint on each chain is the wrist and the ankle, so a hand rides
+# its forearm and a foot rides its shin and nothing in the format says which
+# way either is turned. Two angles each cover what matters in a silhouette;
+# the limits are the joint's own range, because unlike the randomiser - which
+# goes past anatomy on purpose, to reach the awkward geometry - these are for
+# putting a hand somewhere a hand goes.
+#
+# Signs are named from the figure's own point of view and mean the same thing
+# on both sides, so they compose after a `turn` the way every other command
+# does. Measured on the body set rather than assumed, because a rig's own
+# axes come out mirrored and a control whose +30 pointed the left toe in and
+# the right toe out is a control nobody can use:
+#
+#   hand bend  +  flexion - the hand curls towards its own palm
+#   hand turn  +  pronation - with the arm at rest, the palm rolls back
+#   foot lift  +  the toes come up towards the shin
+#   foot turn  +  the toes point outward, away from the other foot
+EXTREMITIES = ("r_hand", "l_hand", "r_foot", "l_foot")
+
+EXTREMITY_ANGLES = {
+    "hand": (("bend", -70.0, 80.0),      # extension .. flexion
+             ("turn", -90.0, 90.0)),     # supination .. pronation
+    "foot": (("lift", -50.0, 25.0),      # toes down .. toes up
+             ("turn", -35.0, 35.0)),     # toe in .. toe out
+}
+
+
+def clean_extremities(raw):
+    """A user's hand and foot angles, clamped and with the rubbish dropped.
+
+    Same contract `wearables.clean` has for an outfit: whatever comes in from
+    a scene file, a slider or a local model, what comes out is something the
+    solver can apply. A pair that is all zeros is dropped, so an untouched
+    figure carries nothing and the rig keeps exactly the hand it was authored
+    with.
+    """
+    out = {}
+    for name in EXTREMITIES:
+        pair = (raw or {}).get(name)
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        limits = EXTREMITY_ANGLES[name.split("_")[1]]
+        angles = []
+        for value, (_label, low, high) in zip(pair, limits):
+            try:
+                angles.append(max(low, min(high, float(value))))
+            except (TypeError, ValueError):
+                angles.append(0.0)
+        if any(abs(a) > 1e-9 for a in angles):
+            out[name] = tuple(angles)
+    return out
+
+
 GIRDLE = (2, 5, 8, 11)      # shoulders and hips, re-seated on preset change
 MIRROR_PAIRS = [(2, 5), (3, 6), (4, 7), (8, 11), (9, 12), (10, 13), (14, 15), (16, 17)]
 for _a, _b in MIRROR_PAIRS:
@@ -147,6 +202,14 @@ class Skeleton:
         # module needs nothing from wearables at import time - wearables
         # imports the geometry helpers from this one.
         self.outfit = {}
+        # How the hands and feet are turned. OpenPose has no keypoint past the
+        # wrist or the ankle, so nothing about a pose can say which way a palm
+        # faces or whether a toe points in - the rig's hand rides its forearm
+        # and its foot rides its shin, and that is all eighteen keypoints can
+        # ever determine. These are the two angles each that say the rest, set
+        # by hand rather than inferred, and they are applied as rotations
+        # about the joint so no bone changes length.
+        self.extremities = {}
 
     @staticmethod
     def torso_frame(pts):
@@ -461,7 +524,8 @@ class Skeleton:
     def snapshot(self):
         return (list(self.points), list(self.visible), dict(self.lengths),
                 dict(self.body), self.body_scale, list(self.anchors),
-                list(self.assets), dict(self.outfit))
+                list(self.assets), dict(self.outfit),
+                dict(self.extremities))
 
     def restore(self, snap):
         self.points, self.visible = list(snap[0]), list(snap[1])
@@ -475,3 +539,5 @@ class Skeleton:
             self.assets = list(snap[6])
         if len(snap) > 7:
             self.outfit = dict(snap[7])
+        if len(snap) > 8:
+            self.extremities = dict(snap[8])

@@ -525,8 +525,100 @@ def _limb_direction(kp, role, target):
     return np.asarray(kp(target), float) - np.asarray(kp(start), float)
 
 
+def limb_frame(joint, parents, rest_position, outward):
+    """(along, across, up) for a hand or a foot, from the rig's own children.
+
+    Read off the bones rather than matched by name, so it works on any rig.
+    `along` is the direction from the joint to the middle of its children -
+    down the palm, or out along the toes. The other two come from the widest
+    spread among those children once their common direction is taken out: the
+    metacarpals span the palm and the toes span the ball of the foot.
+
+    The signs of that spread are arbitrary - it is whichever pair of children
+    `argmax` happened to return, and it comes out mirrored on the two sides -
+    so the frame is CANONICALISED before it is used: `up` is turned to agree
+    with the rig's rest pose, meaning the back of the hand and the top of the
+    foot, and `across` is rebuilt from it. Without that, +30 degrees of turn
+    pointed the left toe inward and the right toe outward, which is a control
+    nobody can use.
+
+    Returns None where the joint has no children to read - a rig whose hand is
+    a single bone with no fingers says nothing about which way its palm faces,
+    and guessing would be worse than leaving it alone.
+    """
+    kids = [i for i in range(len(parents)) if parents[i] == joint]
+    if len(kids) < 2:
+        return None
+    offsets = np.asarray([rest_position[i] - rest_position[joint]
+                          for i in kids], float)
+    along = unit(offsets.mean(axis=0))
+    if np.linalg.norm(along) < 1e-9:
+        return None
+    flat = offsets - np.outer(offsets @ along, along)
+    # the two children furthest apart across the bone, which is the span the
+    # part is widest in: index knuckle to little knuckle, big toe to little
+    span = flat[:, None, :] - flat[None, :, :]
+    a, b = np.unravel_index(np.argmax((span ** 2).sum(axis=2)), span.shape[:2])
+    across = flat[a] - flat[b]
+    if np.linalg.norm(across) < 1e-9:   # children all in a line with the bone
+        across = np.cross(along, np.eye(3)[int(np.argmin(np.abs(along)))])
+    up = unit(np.cross(along, unit(across)))
+    if np.linalg.norm(up) < 1e-9:
+        return None
+    if float(up @ outward) < 0.0:
+        up = -up
+    return along, unit(np.cross(up, along)), up
+
+
+def turn_extremities(local, Q, parents, roles, rest_position, extremities):
+    """Rotate each hand and foot by the angles the user set for it.
+
+    Applied last, on top of everything the keypoints determined, because it is
+    the part they cannot determine: the wrist and the ankle are the last
+    keypoints on their chains, so which way a palm faces and whether a toe
+    points in are simply not in the pose. Rotations about the joint, so the
+    fingers and toes come along and no bone changes length.
+    """
+    for name, angles in (extremities or {}).items():
+        side, part = name.split("_")
+        role = side + ("_wrist" if part == "hand" else "_ankle")
+        j = roles.get(role)
+        if j is None:
+            continue
+        # Which way "up" is for this part, in the rig's own rest pose: the
+        # top of a foot points at the sky, and the back of a hand points away
+        # from the body, which is outward and so mirrored between the sides.
+        # +X is the figure's LEFT, as everywhere else here.
+        outward = (np.array([0.0, 1.0, 0.0]) if part == "foot"
+                   else np.array([1.0 if side == "l" else -1.0, 0.0, 0.0]))
+        frame = limb_frame(j, parents, rest_position, outward)
+        if frame is None:
+            continue
+        along, across, up = (unit(Q[j] @ v) for v in frame)
+        # A hand bends about the axis across its palm and rolls about its own
+        # length; a foot lifts about the axis across the ball and turns about
+        # the one standing up through it. Taken from the POSED frame, so both
+        # compose with the arm or leg the way a command in the figure's own
+        # frame does. The signs are set so that a positive angle means the
+        # same thing on both sides and the thing the vocabulary says it does -
+        # measured, not assumed, because a canonical frame still leaves the
+        # handedness of each rotation to be pinned down.
+        # `across` comes out canonical already, because it is rebuilt from a
+        # canonicalised `up`; `along` and `up` still mirror between the sides.
+        mirror = 1.0 if side == "l" else -1.0
+        if part == "hand":
+            first, second = across, along * mirror
+        else:
+            first, second = -across, up * mirror
+        turn = (matrix_from_axis_angle(first * math.radians(angles[0]))
+                @ matrix_from_axis_angle(second * math.radians(angles[1])))
+        p = parents[j]
+        above = Q[p] if p >= 0 else np.eye(3)
+        local[j] = above.T @ turn @ above @ local[j]
+
+
 def pose_globals(rest_position, parents, roles, points, rest_orient=None,
-                 rest_points=None):
+                 rest_points=None, extremities=None):
     """Global rotation and position per bone: the rig, posed by the keypoints.
 
     Same closed-form aim used for SMPL-X, expressed purely in global terms so
@@ -778,6 +870,14 @@ def pose_globals(rest_position, parents, roles, points, rest_orient=None,
         propagate()
         recentre()
 
+    # Hands and feet, last, because they are the part the keypoints cannot
+    # reach: the wrist and the ankle end their chains. Everything above has
+    # already been settled by the pose, and these turn what is left.
+    if extremities:
+        turn_extremities(local, Q, parents, roles, rest_position, extremities)
+        propagate()
+        recentre()
+
     return np.array(Q), q
 
 
@@ -822,7 +922,8 @@ def skin_mesh(mesh, Q, q):
     return out
 
 
-def pose_rig(mesh, points_cm, roles=None, rest_points=None, stature=None):
+def pose_rig(mesh, points_cm, roles=None, rest_points=None, stature=None,
+             extremities=None):
     """Pose the body's OWN rig, rather than fitting it to the keypoints.
 
     A pose is a set of joint ANGLES, and
@@ -863,7 +964,7 @@ def pose_rig(mesh, points_cm, roles=None, rest_points=None, stature=None):
         scale = kp_span / max(1e-9, rig_span)
     Q, q = pose_globals(rest * scale, mesh["parents"], roles, points_cm,
                         rest_orient=mesh["rest_global"][:, :3, :3],
-                        rest_points=rest_points)
+                        rest_points=rest_points, extremities=extremities)
     return {"scale": scale,
             "bones": {name: (Q[i], q[i])
                       for i, name in enumerate(mesh["joint_names"])}}

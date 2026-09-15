@@ -567,9 +567,42 @@ A floor should fade OUT, and fading out means reaching the background, which
 is below `far` by definition. So the ground gets its own falloff, and it gets
 to go all the way to black - which is also the truthful answer, since
 disparity really does go to zero at the horizon. `GROUND_FADE` halves its
-brightness every 22 cm and `GROUND_BRIGHT` starts it at 0.48 of full white, so
+brightness every 22 cm and `GROUND_BRIGHT` starts it at 0.60 of full white, so
 it is a pool of ground around the feet reaching about the bottom fifth of the
 frame, under the figure rather than competing with it.
+
+**A hand and a foot are SET, never inferred.** The wrist and the ankle are the
+last keypoints on their chains, so nothing in a pose says which way a palm
+faces or whether a toe points in - a rig's hand rides its forearm and its foot
+rides its shin, and that is the whole of what eighteen keypoints can
+determine. `Skeleton.extremities` carries two angles each, put there by a
+slider or by a `hand`/`foot` command, and `mesh_backend.turn_extremities`
+applies them last, after everything the keypoints did settle. Rotations about
+the joint, so the fingers and toes come along and no bone changes length: the
+selftest asserts nothing above the wrist or the ankle moves at all.
+
+**Their frame is read off the rig, and then canonicalised.**
+`mesh_backend.limb_frame` takes the joint's own children - the metacarpals
+span a palm, the toes span the ball of a foot - so it needs no bone names and
+works on any rig. But the sign of that spread is arbitrary, whichever pair
+`argmax` returned, and it comes out mirrored between the sides: +30 degrees of
+turn pointed the left toe inward and the right toe outward, which is a control
+nobody can use. So `up` is turned to agree with the rig's rest pose - the back
+of the hand, the top of the foot - and `across` rebuilt from it.
+
+Even canonical axes leave the handedness of each rotation open, so the four
+signs were MEASURED on the body set rather than reasoned about, and the
+selftest measures them again: a positive turn moves both toes outward by the
+same 7.6 cm, a positive lift raises them, a positive bend curls the hand
+towards its own palm, and a positive hand turn is pronation.
+
+**A tk Scale fires its `command` from the event loop, not from the
+assignment.** So a guard raised and cleared inside the method that sets the
+sliders is already down when the callbacks arrive, and they then stamp those
+values onto whatever the control points at *now*. That is how switching from
+the feet to a hand used to write the feet's angles onto the hand, and how an
+undo came back with the wrong ones. The guard has to stay up until the queue
+has drained - `after_idle`.
 
 **The export shape is one table, and changing it re-frames.** `exporting.ASPECTS`
 names the ratios worth having and `parse_size` accepts either spelling, so the
@@ -773,9 +806,10 @@ a build.
    out most cleanly.
 3. Depth export is CPU rasterisation. Live depth would want the geometry on the
    GPU rather than the analytic rasteriser ported.
-4. Wrists are never rotated; there is no keypoint for them. Ankles are only
-   levelled, not aimed - a foot taking weight goes flat, but nothing turns it
-   in or out.
+4. Hands and feet are set by hand, which is the only way they can be set, but
+   only two angles each: a wrist's side-to-side deviation and a foot's roll
+   are not in the vocabulary. Nothing is inferred from context either - a
+   figure whose palm is flat on a table still has to be told so.
 5. The garment vocabulary was cut back to what the library can actually put
    on a figure: the `over` slot (apron, cape, backpack, scarf) and eleven
    presets with no mesh behind them are gone rather than silently absent from

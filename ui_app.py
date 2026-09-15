@@ -56,10 +56,11 @@ from raster import (depth_to_grey, inside_polygon, render_depth,
                     silhouette_quads, solid_quads)
 from scenefile import (scene_from_dict, scene_load, scene_objects,
                        scene_to_dict)
-from skeleton import (ADJACENCY, CHILDREN, COLORS, FIGURE_BODY_TINTS,
-                      FIGURE_STYLES, GIRDLE, KEYPOINT_NAMES, LIMB_SEQ,
-                      MIRROR_OF, MIRROR_PAIRS, PARENT, PROP_TINT, ROOT,
-                      Skeleton, reroot)
+from skeleton import (ADJACENCY, CHILDREN, COLORS, EXTREMITY_ANGLES,
+                      FIGURE_BODY_TINTS, FIGURE_STYLES, GIRDLE,
+                      KEYPOINT_NAMES, LIMB_SEQ, MIRROR_OF, MIRROR_PAIRS,
+                      PARENT, PROP_TINT, ROOT, Skeleton, clean_extremities,
+                      reroot)
 from vecmath import (any_perpendicular, matvec, rotation_between, vadd, vcross,
                      vdot, vlen, vmul, vnorm, vsub)
 from version import VERSION
@@ -94,9 +95,25 @@ ORTHO_COLUMNS = 2
 # because there is nothing for "custom" to mean until someone types one.
 CUSTOM_ASPECT = "Custom"
 
+# What the hand-and-foot sliders can be pointed at. "Both" first for each,
+# because a figure standing on two feet usually wants them doing the same
+# thing and setting one and then the other is the same answer typed twice.
+PART_TARGETS = ("Both hands", "Right hand", "Left hand",
+                "Both feet", "Right foot", "Left foot")
+
+
+def part_sides(target):
+    """(the extremity names a target covers, "hand" or "foot")."""
+    part = "foot" if "foot" in target.lower() or "feet" in target.lower() \
+        else "hand"
+    if target.lower().startswith("both"):
+        return ("r_" + part, "l_" + part), part
+    return (("r_" if "right" in target.lower() else "l_") + part,), part
+
 SECTION_TABS = {
     "Prompt": "Pose",
     "Randomize": "Pose",
+    "Hands and feet": "Pose",
     "Edit": "Pose",
     "Turn figure": "Pose",
     "Body": "Figure",
@@ -210,6 +227,13 @@ class EditorApp:
         self.prompt_status = tk.StringVar(
             value="Describe a pose and press Enter. Needs a local model "
                   "running; falls back to keywords without one.")
+        # Which hand or foot the two sliders are driving, and their values.
+        self.part_target = tk.StringVar(value=PART_TARGETS[0])
+        self.part_angles = (tk.DoubleVar(value=0.0), tk.DoubleVar(value=0.0))
+        self.part_status = tk.StringVar(
+            value="Eighteen keypoints stop at the wrist and the ankle; these "
+                  "two angles each are the rest.")
+        self._part_sync = False
         self.random_parts = {
             part: tk.BooleanVar(value=part in randomize.DEFAULT_PARTS)
             for part in randomize.PART_ORDER}
@@ -668,6 +692,43 @@ class EditorApp:
                        ("Mirror (M)", self.mirror)])
         buttons(body, [("Restore proportions", self.restore_proportions)], cols=1)
 
+        # ---- hands and feet -----------------------------------------------
+        #
+        # Sliders rather than a drag, because there is nothing to drag. The
+        # wrist and the ankle are the last keypoints on their chains, so a
+        # hand and a foot have no handle out past them to take hold of - the
+        # two angles each ARE the whole of what a pose cannot say about them.
+        body = section("Hands and feet")
+        pick = tk.OptionMenu(body, self.part_target, *PART_TARGETS,
+                             command=lambda _v: self.show_part())
+        pick.configure(bg=CONTROL, fg=FG, relief="flat", bd=0, anchor="w",
+                       highlightthickness=0, activebackground=HOVER,
+                       activeforeground=FG, padx=10, pady=4, cursor="hand2",
+                       font=("TkDefaultFont", 9))
+        pick["menu"].configure(bg=PANEL, fg=FG, relief="flat", bd=0,
+                               activebackground=HOVER, activeforeground=FG)
+        pick.pack(fill="x", padx=12, pady=1)
+        self.part_sliders = []
+        for which in (0, 1):
+            label = tk.Label(body, text="", bg=PANEL, fg=MUTED, anchor="w",
+                             font=("TkDefaultFont", 8))
+            label.pack(fill="x", padx=13, pady=(3, 0))
+            slider = tk.Scale(body, from_=-90.0, to=90.0, resolution=1.0,
+                              orient="horizontal", variable=self.part_angles[which],
+                              bg=CONTROL, fg=FG, troughcolor=BG,
+                              activebackground=ACCENT, highlightthickness=0,
+                              bd=0, relief="flat", sliderrelief="flat",
+                              showvalue=True, sliderlength=20, width=10,
+                              font=("TkDefaultFont", 7),
+                              command=lambda _v: self.set_part())
+            slider.pack(fill="x", padx=12, pady=(0, 2))
+            self.part_sliders.append((label, slider))
+        buttons(body, [("Straighten", self.reset_part),
+                       ("All back", self.reset_all_parts)])
+        tk.Label(body, textvariable=self.part_status, bg=PANEL, fg=MUTED,
+                 anchor="w", justify="left", wraplength=210,
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
+
         # ---- edit ---------------------------------------------------------
         body = section("Edit")
         switch(body, "Symmetric editing (S)", "symmetry")
@@ -857,6 +918,7 @@ class EditorApp:
         self.canvas.pack(side="left", fill="both", expand=True)
         self.main_view = Viewport(self.canvas, self.camera, "main")
         self.show_tab(TAB_ORDER[0])
+        self.show_part()
         # Frame the figure once the window has a real size. Without this the
         # editor opens on whatever zoom the Camera defaults to, which left the
         # figure at about 60% of the height of its own export frame - a small
@@ -1782,6 +1844,67 @@ class EditorApp:
         self.skeleton.mirror_x()
         self.redraw()
         self.status.set("Pose mirrored.")
+
+    def show_part(self):
+        """Point the two sliders at whatever the menu names.
+
+        Reads the figure rather than remembering: the sliders are a view of
+        the figure's own angles, so undo, a loaded scene and the other side of
+        a "both" all show up in them without anything having to be told.
+        """
+        names, part = part_sides(self.part_target.get())
+        held = clean_extremities(getattr(self.skeleton, "extremities", None))
+        angles = held.get(names[0]) or (0.0, 0.0)
+        # A tk Scale's `command` is DEFERRED - it fires from the event loop,
+        # not from the assignment - so a flag cleared at the end of this
+        # method is already down by the time the callbacks arrive, and they
+        # then stamp these values onto whatever the menu points at now. That
+        # is how switching target used to overwrite the new target with the
+        # old one's angles, and how an undo came back with its hands wrong.
+        # The flag has to stay up until the queue has drained.
+        self._part_sync = True
+        for i, (label, slider) in enumerate(self.part_sliders):
+            name, low, high = EXTREMITY_ANGLES[part][i]
+            label.configure(text=name.title())
+            slider.configure(from_=low, to=high)
+            self.part_angles[i].set(round(float(angles[i]), 1))
+        self.root.after_idle(self._part_settled)
+
+    def _part_settled(self):
+        self._part_sync = False
+
+    def set_part(self):
+        """Write the sliders onto the figure and redraw."""
+        if self._part_sync:
+            return
+        names, _part = part_sides(self.part_target.get())
+        held = dict(clean_extremities(getattr(self.skeleton, "extremities",
+                                              None)))
+        for name in names:
+            held[name] = (float(self.part_angles[0].get()),
+                          float(self.part_angles[1].get()))
+        self.skeleton.extremities = clean_extremities(held)
+        self.redraw()
+
+    def reset_part(self):
+        """Put the chosen hand or foot back where the rig authored it."""
+        self.push_undo()
+        names, _part = part_sides(self.part_target.get())
+        held = dict(clean_extremities(getattr(self.skeleton, "extremities",
+                                              None)))
+        for name in names:
+            held.pop(name, None)
+        self.skeleton.extremities = held
+        self.show_part()
+        self.redraw()
+        self.status.set("%s straightened." % self.part_target.get())
+
+    def reset_all_parts(self):
+        self.push_undo()
+        self.skeleton.extremities = {}
+        self.show_part()
+        self.redraw()
+        self.status.set("Every hand and foot back to the rig's own.")
 
     def chosen_random_parts(self):
         return tuple(part for part in randomize.PART_ORDER

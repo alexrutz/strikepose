@@ -54,7 +54,8 @@ import everyday
 import props as props_module
 import wearables
 from openpose3d_editor import (
-    BODY_PRESETS, DEFAULT_PRESET, KEYPOINT_NAMES, VERSION, Camera, Skeleton,
+    BODY_PRESETS, DEFAULT_PRESET, EXTREMITY_ANGLES, KEYPOINT_NAMES, VERSION,
+    Camera, Skeleton, clean_extremities,
     anatomy_depth_image, body_frame, carry_chain, frame_rect, frame_scene,
     inside_polygon, parse_size, pose_image,
     rigged_depth_image, silhouette_points,
@@ -252,8 +253,10 @@ ANCHORS = {
     "overhead": ("head", "bottom"),
 }
 
-OPS = ("stance", "point", "bend", "turn", "lean", "look", "hide", "place",
-       "wear", "outfit")
+OPS = ("stance", "point", "bend", "turn", "lean", "look", "hand", "foot",
+       "hide", "place", "wear", "outfit")
+
+SIDES = ("left", "right", "both")
 
 # Every wearable, flattened: a model does far better picking one name out of a
 # list than picking a slot and then a name that has to belong to it. The slot
@@ -300,6 +303,11 @@ def command_schema():
             "size": {"type": "number"},
             "wears": {"type": "string", "enum": WEARABLE_NAMES},
             "outfit": {"type": "string", "enum": OUTFIT_NAMES},
+            # hand and foot: the two angles each that the keypoints cannot say
+            "side": {"type": "string", "enum": list(SIDES)},
+            "bend": {"type": "number"},
+            "lift": {"type": "number"},
+            "turn": {"type": "number"},
         },
         "required": ["op"],
     }
@@ -342,6 +350,10 @@ Commands, applied in order:
   {"op":"turn","direction":DIR,"degrees":N}    rotate the WHOLE figure
   {"op":"lean","direction":DIR,"degrees":N}    tip the upper body at the waist
   {"op":"look","direction":DIR}                where the head looks
+  {"op":"hand","side":SIDE,"bend":N,"turn":N}  + curls the palm in, + rolls
+                                              it to face backward
+  {"op":"foot","side":SIDE,"lift":N,"turn":N}  + lifts the toes, + points them
+                                              outward
   {"op":"hide","target":JOINT_OR_LIMB}         mark it off-frame or occluded
   {"op":"place","shape":SHAPE,"at":ANCHOR,"distance":CM,"size":N,"degrees":N}
                                               put an object in the scene
@@ -692,6 +704,29 @@ def apply_command(skeleton, command, props=None, depth=0, defer=None):
             axis = up
         skeleton.rotate_about_axis(skeleton.subtree(INDEX["nose"]),
                                    skeleton.points[neck], vnorm(axis), angle)
+        return None
+
+    if op in ("hand", "foot"):
+        # The one thing eighteen keypoints cannot say. The wrist and the ankle
+        # end their chains, so nothing in a pose reports which way a palm
+        # faces or whether a toe points in, and a model has to be able to say
+        # it in words or it cannot be said at all.
+        side = str(command.get("side") or target or "both").lower()
+        if side not in SIDES:
+            return "%s needs a side: left, right or both, not %r" % (op, side)
+        names = EXTREMITY_ANGLES[op]
+        angles = []
+        for label, low, high in names:
+            try:
+                angles.append(max(low, min(high, float(
+                    command.get(label, command.get("degrees", 0.0)) or 0.0))))
+            except (TypeError, ValueError):
+                return "%s %s should be a number" % (op, label)
+        held = dict(clean_extremities(getattr(skeleton, "extremities", None)))
+        for letter in (("r", "l") if side == "both"
+                       else ("l" if side == "left" else "r",)):
+            held["%s_%s" % (letter, op)] = tuple(angles)
+        skeleton.extremities = clean_extremities(held)
         return None
 
     if op == "hide":
@@ -1972,6 +2007,81 @@ def _selftest():
                sum(1 for v in empty.tobytes() if v))
     check("but does reach the depth map", covered[0] > covered[1] * 1.5,
           "%d px vs %d" % covered)
+
+    # -- hands and feet ---------------------------------------------------
+    #
+    # The one thing eighteen keypoints cannot say, so the only way it can be
+    # said is by someone saying it. What has to hold: the angles reach the
+    # rig, they turn nothing above the wrist or the ankle, and a positive
+    # angle means the same thing on the left as on the right - a rig's own
+    # axes come out mirrored, and a control whose +30 pointed one toe in and
+    # the other out is a control nobody can use.
+    import mesh_backend as _mb
+    import bodies_lib as _bl
+    body = _bl.load(required=False).get("Male, average")
+    if body is not None:
+        hands = Skeleton(preset_params("Male, average"))
+        kp = {n: hands.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
+        rest_pts = __import__("anthro").build_rest_points(hands.body)
+        stature = hands.body["stature"]
+        plain = _mb.pose_rig(body, kp, rest_points=rest_pts, stature=stature)
+
+        def solve(extra):
+            return _mb.pose_rig(body, kp, rest_points=rest_pts,
+                                stature=stature, extremities=extra)
+
+        def tip(sol, joint, child):
+            return sol["bones"][child][1] - sol["bones"][joint][1]
+
+        moved = solve({"l_hand": (50.0, 0.0), "l_foot": (0.0, 30.0)})
+        above = max(vlen(vsub(tuple(moved["bones"][n][1]),
+                              tuple(plain["bones"][n][1])))
+                    for n in body["joint_names"]
+                    if not any(k in n.lower() for k in
+                               ("finger", "metacarp", "toe", "wrist", "foot")))
+        check("turning a hand or a foot moves nothing above it",
+              above < 1e-9, "worst %.2e cm" % above)
+        fingers = vlen(vsub(tuple(moved["bones"]["finger3-3.L"][1]),
+                            tuple(plain["bones"]["finger3-3.L"][1])))
+        check("but does carry the fingers with it", fingers > 5.0,
+              "%.1f cm" % fingers)
+
+        # Same angle, both sides, mirrored: the toe has to go the same way
+        # relative to the body, which is outward on a positive turn.
+        out = {}
+        for side in ("l", "r"):
+            sol = solve({"%s_foot" % side: (0.0, 30.0)})
+            joint, toe = "foot.%s" % side.upper(), "toe3-1.%s" % side.upper()
+            away = (tip(sol, joint, toe) - tip(plain, joint, toe))[0]
+            out[side] = away * (1.0 if side == "l" else -1.0)
+        check("and a positive turn points BOTH toes outward",
+              out["l"] > 1.0 and out["r"] > 1.0
+              and abs(out["l"] - out["r"]) < 0.5,
+              "left %+.1f cm, right %+.1f cm outward" % (out["l"], out["r"]))
+        lifted = solve({"l_foot": (20.0, 0.0)})
+        rise = (tip(lifted, "foot.L", "toe3-1.L")
+                - tip(plain, "foot.L", "toe3-1.L"))[1]
+        check("and a positive lift raises the toes", rise > 1.0,
+              "%+.1f cm up" % rise)
+
+    # The command vocabulary reaches it, and a bad side is skipped rather
+    # than fatal, like every other command.
+    talker = Skeleton(preset_params("Male, average"))
+    notes = apply_commands(talker, [
+        {"op": "hand", "side": "both", "bend": 40, "turn": -20},
+        {"op": "foot", "side": "left", "lift": 15, "turn": 25},
+        {"op": "hand", "side": "sideways", "bend": 10}], [])
+    check("a model can set a hand and a foot in words",
+          talker.extremities.get("r_hand") == (40.0, -20.0)
+          and talker.extremities.get("l_foot") == (15.0, 25.0),
+          str(talker.extremities))
+    check("and a side nobody has is skipped, not fatal",
+          len(notes) == 1 and "side" in notes[0], str(notes))
+    wild = Skeleton(preset_params("Male, average"))
+    apply_commands(wild, [{"op": "foot", "side": "both", "lift": 900}], [])
+    check("and an angle past the joint's range is clamped to it",
+          wild.extremities["l_foot"][0] == EXTREMITY_ANGLES["foot"][0][2],
+          str(wild.extremities))
 
     # -- the ground -------------------------------------------------------
     #

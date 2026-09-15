@@ -62,10 +62,11 @@ from anthro import (ANSUR, BASE_BODY, BODY_PRESETS, DEFAULT_PRESET,
                     HEAD_EXPONENT, REST_POSE, build_rest_points,
                     derive_proportions, merge_body, preset_params)
 from camera import Camera
-from skeleton import (ADJACENCY, CHILDREN, COLORS, FIGURE_BODY_TINTS,
+from skeleton import (ADJACENCY, CHILDREN, COLORS, EXTREMITIES,
+                      EXTREMITY_ANGLES, FIGURE_BODY_TINTS,
                       FIGURE_STYLES, GIRDLE, KEYPOINT_NAMES, LIMB_SEQ,
                       MIRROR_OF, MIRROR_PAIRS, PARENT, PROP_TINT, ROOT,
-                      Skeleton, reroot)
+                      Skeleton, clean_extremities, reroot)
 from posemap import (ellipse_polygon, render_openpose, resolution_stickwidth)
 from anatomy import (P_CALF, P_FOOT, P_FOREARM, P_HAND, P_HEAD, P_NECK,
                      P_THIGH, P_UPPER_ARM, _blob, _tube, body_parts,

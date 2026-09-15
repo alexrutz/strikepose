@@ -26,7 +26,7 @@ from anatomy import body_parts
 from anthro import build_rest_points
 from posemap import render_openpose, resolution_stickwidth
 from raster import depth_buffer, depth_to_grey, grade_scene, render_depth
-from skeleton import KEYPOINT_NAMES, Skeleton
+from skeleton import KEYPOINT_NAMES, Skeleton, clean_extremities
 from vecmath import vadd, vcross, vdot, vlen, vmul, vnorm, vsub
 
 INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
@@ -186,7 +186,7 @@ GROUND_THICK = 3.0
 # brightest thing in the picture, which is true - it is nearest - and wrong
 # for a conditioning image, where the subject should lead.
 GROUND_FADE = 22.0
-GROUND_BRIGHT = 0.48
+GROUND_BRIGHT = 0.60
 
 
 def ground_level(figures):
@@ -308,7 +308,9 @@ def pose_body(figure, mesh):
                                             for i, name
                                             in enumerate(KEYPOINT_NAMES)},
                                      mesh.get("roles"), rest_points=rest,
-                                     stature=stature)
+                                     stature=stature,
+                                     extremities=clean_extremities(
+                                         getattr(figure, "extremities", None)))
     riders = mesh_backend.keypoint_riders(mesh, rest, mesh.get("roles"),
                                           stature=stature)
     return solution, mesh_backend.keypoints_of(solution, riders, mesh)

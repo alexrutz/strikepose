@@ -268,6 +268,28 @@ so it reads as the ground the person is on rather than a room filling the
 frame. The figure is graded over its own depth range, exactly as it is with no
 floor at all, so adding the ground never costs the subject any modelling.
 
+## Hands and feet
+
+OpenPose stops at the wrist and the ankle, so nothing in a pose says which way
+a palm faces or whether a toe points in - the rig's hand rides the forearm and
+its foot rides the shin. The **Hands and feet** panel on the Pose tab sets the
+rest: pick a hand, a foot, or both of either, and two sliders do it.
+
+    bend   the hand curls towards its own palm
+    turn   with the arm at rest, the palm rolls back
+    lift   the toes come up towards the shin
+    turn   the toes point outward, away from the other foot
+
+A positive angle means the same thing on the left as on the right, and the
+range of each slider is the joint's own, so a wrist cannot be bent somewhere a
+wrist does not go. The prompt route can set them too:
+
+    {"op": "hand", "side": "both", "bend": 40, "turn": -20}
+    {"op": "foot", "side": "left", "lift": 15, "turn": 25}
+
+They save with the scene, ride the undo stack, and show in the viewport as
+well as the export.
+
 ## The export shape
 
 The **Export** tab picks the shape first and the pixels second: 2:3 and 3:4

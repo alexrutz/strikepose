@@ -12,7 +12,8 @@ import props as props_module
 
 from anthro import (DEFAULT_PRESET, REST_POSE, merge_body,
                     preset_params)
-from skeleton import KEYPOINT_NAMES, LIMB_SEQ, Skeleton
+from skeleton import (KEYPOINT_NAMES, LIMB_SEQ, Skeleton,
+                      clean_extremities)
 from vecmath import vlen, vsub
 
 
@@ -39,6 +40,12 @@ def scene_to_dict(figures, camera, points_list, out_w, out_h, props=()):
             "visible": list(skeleton.visible),
             "assets": list(getattr(skeleton, "assets", [])),
             "outfit": dict(getattr(skeleton, "outfit", {}) or {}),
+            # Hands and feet: not in the keypoints, so not recoverable from
+            # them either - a scene that dropped these would come back with
+            # every palm and toe at the rig's own default.
+            "extremities": {name: list(pair) for name, pair
+                            in (getattr(skeleton, "extremities", {})
+                                or {}).items()},
             "body": {k: v for k, v in skeleton.body.items()},
             "body_scale": skeleton.body_scale,
         })
@@ -87,6 +94,7 @@ def scene_load(data, camera):
                         skeleton, camera)
         skeleton.assets = list(entry.get("assets", []))
         skeleton.outfit = dict(entry.get("outfit") or {})
+        skeleton.extremities = clean_extremities(entry.get("extremities"))
         figures.append(skeleton)
     return figures or [Skeleton()]
 

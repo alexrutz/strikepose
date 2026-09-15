@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 
 from anthro import BASE_BODY, merge_body
-from skeleton import KEYPOINT_NAMES
+from skeleton import KEYPOINT_NAMES, clean_extremities
 from vecmath import (any_perpendicular, matvec, rotation_between, vadd,
                      vcross, vdot, vlen, vmul, vnorm, vsub)
 
@@ -210,6 +210,10 @@ def body_segments(skeleton, respect_visibility=True):
     if B is None or "deltoid" not in B:      # scene from an older version
         B = merge_body(B)
         skeleton.body = B
+    # Hand and foot angles, if the figure carries any. Cleaned here rather
+    # than trusted, so a scene file or a local model cannot bend a wrist
+    # somewhere a wrist does not go.
+    turned = clean_extremities(getattr(skeleton, "extremities", None))
 
     def pt(n):
         return P[ids[n]]
@@ -266,9 +270,17 @@ def body_segments(skeleton, respect_visibility=True):
             add(sd + "_forearm", pt(el), pt(wr), fore, P_FOREARM,
                 girth[1], girth[1])
         if vis(wr, el):
-            # the hand runs on along the forearm, so it shares its frame: the
-            # palm keeps facing the way it does with the arm hanging
+            # The hand runs on along the forearm, so it shares its frame: the
+            # palm keeps facing the way it does with the arm hanging. Where
+            # the figure carries hand angles - which eighteen keypoints cannot
+            # give and someone had to set - the sweep is turned by them too,
+            # so the viewport shows what the export will render rather than a
+            # different hand.
             d = vnorm(vsub(pt(wr), pt(el)))
+            bend, roll = turned.get(sd + "_hand", (0.0, 0.0))
+            if bend or roll:
+                d = _spin(_spin(d, fore[1], math.radians(-bend)),
+                          d, math.radians(roll))
             add(sd + "_hand", pt(wr), vadd(pt(wr), vmul(d, 17.0 * B["hand"])),
                 fore, P_HAND, B["hand"], B["hand"])
         if vis(hp, kn):
@@ -279,8 +291,17 @@ def body_segments(skeleton, respect_visibility=True):
         if vis(an):
             drop = vnorm(vsub(pt(an), pt(kn))) if vis(kn) else down
             sole = vadd(pt(an), vmul(drop, 3.2 * B["foot"]))
-            heel = vadd(sole, vmul(facing, -6.0 * B["foot"]))
-            toe = vadd(sole, vmul(facing, 19.0 * B["foot"]))
+            ahead = facing
+            lift, splay = turned.get(sd + "_foot", (0.0, 0.0))
+            if lift or splay:
+                # out from the midline is the figure's own side, mirrored, so
+                # a positive splay points both toes away from each other
+                ahead = _spin(_spin(ahead, vcross(ahead, up_t),
+                                    math.radians(-lift)),
+                              up_t, math.radians(splay)
+                              * (1.0 if sd == "l" else -1.0))
+            heel = vadd(sole, vmul(ahead, -6.0 * B["foot"]))
+            toe = vadd(sole, vmul(ahead, 19.0 * B["foot"]))
             # the foot turns off the shin, so its thickness stays across the
             # sole however the leg is posed
             add(sd + "_foot", heel, toe, calf, P_FOOT, B["foot"], B["foot"])
@@ -325,6 +346,14 @@ def sweep(segment, coarsen=1.0):
                  coarsen=coarsen,
                  round_start=segment.get("round_start", True),
                  round_end=segment.get("round_end", True))
+
+
+def _spin(v, axis, angle):
+    """Rodrigues: `v` turned about a unit `axis` by `angle` radians."""
+    axis = vnorm(axis)
+    c, s = math.cos(angle), math.sin(angle)
+    return vadd(vadd(vmul(v, c), vmul(vcross(axis, v), s)),
+                vmul(axis, vdot(axis, v) * (1.0 - c)))
 
 
 def body_parts(skeleton, thickness=1.0, respect_visibility=True, coarsen=1.0):
