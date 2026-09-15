@@ -27,7 +27,7 @@ Run:  python3 openpose3d_editor.py
 
 from __future__ import annotations
 
-VERSION = "1.36.0"          # shown in the title bar, the HUD and on startup
+VERSION = "1.37.0"          # shown in the title bar, the HUD and on startup
 
 import base64
 import colorsys
@@ -206,6 +206,11 @@ ANSUR = {
         "ankle_height": 0.0415,         # lateral malleolus height
         "shoulder_w": 0.1184,           # biacromial breadth / 2
         "hip_w": 0.0500,                # femoral heads; see below
+        "neck_rise": 0.0377,          # the neck bone starts this far
+                                    # above the shoulder midpoint
+        "gh_w": 0.1094,               # glenohumeral half-width
+        "gh_drop": 0.0222,            # acromion down to that joint
+        "arm_split": 0.5124,          # humerus / (humerus + forearm)
         "hand": 0.1101,                 # hand length
         "span": 1.0330,                 # fingertip to fingertip
         "upper_arm": 0.1909,            # acromion-radiale
@@ -223,6 +228,11 @@ ANSUR = {
         "ankle_height": 0.0385,
         "shoulder_w": 0.1122,
         "hip_w": 0.0535,
+        "neck_rise": 0.0265,          # the neck bone starts this far
+                                    # above the shoulder midpoint
+        "gh_w": 0.0982,               # glenohumeral half-width
+        "gh_drop": 0.0279,            # acromion down to that joint
+        "arm_split": 0.5451,          # humerus / (humerus + forearm)
         "hand": 0.1112,
         "span": 1.0195,
         "upper_arm": 0.1911,
@@ -253,6 +263,11 @@ ANSUR = {
         "ankle_height": 0.0416,         # x 1.002
         "shoulder_w": 0.1043,           # x 0.881 - the big one
         "hip_w": 0.0500,
+        "neck_rise": 0.0386,          # the neck bone starts this far
+                                    # above the shoulder midpoint
+        "gh_w": 0.0964,               # glenohumeral half-width
+        "gh_drop": 0.0215,            # acromion down to that joint
+        "arm_split": 0.5231,          # humerus / (humerus + forearm)
         "hand": 0.1101,
         "span": 1.0330,
         "upper_arm": 0.1909,
@@ -284,12 +299,24 @@ HEAD_EXPONENT = 0.25
 # ratio they already had, 0.0535 / 0.0500 = 1.070, so the relationship is right
 # even where the absolute is inherited.
 
-# The arm still does not chain. Acromion-radiale plus radiale-stylion plus a
-# hand is 0.343 of stature, which on a 175 cm figure is a 194 cm span against a
-# measured 181. Surface segments are taken on a bent arm and do not add along a
-# straight one. So the arm is closed on the span, and the published upper arm
-# to forearm ratio decides the split - which lands the fingertip 0.400 of
-# stature from the acromion against 0.398 measured, so the closure is sound.
+# The arm hangs from the JOINT, not from the keypoint. This closed it on the
+# span from the acromion and split it by the published acromion-radiale to
+# radiale-stylion ratio, and both halves of that are wrong in the same way:
+# acromion-radiale is measured from the bony corner on top of the shoulder,
+# which is 0.022 of stature above and 0.009 inboard of the glenohumeral joint
+# the arm actually swings from. Hanging the arm from the acromion put the
+# elbow keypoint 4 cm high, and splitting by a surface ratio of 1.25 where the
+# real bones are 1.05 to 1.20 put it further out still. A rig fitted to those
+# keypoints then had to choose between the shoulder line and the humerus: hold
+# the shoulder where the body's own rig has it and the humerus is crushed by a
+# fifth, or let the shoulder ride up to the acromion and every figure stands
+# there with its shoulders round its ears. Both shipped, one after the other.
+#
+# Measured from the joint, it closes: gh_w + humerus + forearm + hand is 0.5172
+# of stature against the measured half-span of 0.5165, a tenth of a percent, on
+# the body set's own adult male rig. So the span still closes the arm - it is
+# the one number measured directly along a straight arm - but from gh_w, and
+# the split comes from the rigs. tools/child_ratios.py prints all of them.
 def derive_proportions(stature, sex="male", leg_ratio=1.0):
     """Skeleton measurements for a given height.
 
@@ -301,8 +328,9 @@ def derive_proportions(stature, sex="male", leg_ratio=1.0):
     shoulder_half = stature * m["shoulder_w"]
     hand = m["hand"] * stature
     half_span = 0.5 * stature * m["span"]
-    arm = max(10.0, half_span - shoulder_half - hand)
-    forearm = arm / (1.0 + m["upper_arm"] / m["forearm"])
+    # from the glenohumeral joint, not the acromion keypoint: see above
+    arm = max(10.0, half_span - stature * m["gh_w"] - hand)
+    forearm = arm * (1.0 - m["arm_split"])
     # thigh and shank are differences of measured heights, so they close on the
     # floor: thigh + shank + ankle height is hip height by construction
     thigh = (m["hip_height"] - m["knee_height"]) * stature * leg_ratio
@@ -319,6 +347,12 @@ def derive_proportions(stature, sex="male", leg_ratio=1.0):
         # measured acromial height. The keys stays so scenes saved with a drop
         # still load.
         "shoulder_drop": 0.0,
+        # where the arm actually swings from, so the rest pose can hang it
+        # there and a rig fitted to it keeps both its shoulder line and its
+        # humerus
+        "gh_w": stature * m["gh_w"],
+        "gh_drop": stature * m["gh_drop"],
+        "neck_rise": stature * m["neck_rise"],
         "hip_w": stature * m["hip_w"],                          # femoral heads
         "torso_len": (m["shoulder_height"]
                       - m["hip_height"] * leg_ratio) * stature,
@@ -481,17 +515,34 @@ def build_rest_points(body):
     nose_up = body.get("nose_up", 16.0 * h)
     ear_up = body.get("ear_up", 19.0 * h)
     pts = {"neck": (0.0, 0.0, 0.0),
-           "nose": (0.0, nose_up, 5.0 * h)}
+           "nose": (0.0, nose_up, 5.0 * h),
+           # Not a keypoint either. OpenPose's neck is the midpoint of the
+           # shoulders, out in the middle of the upper chest; a neck bone
+           # starts at the top of the thorax, 4 to 7 cm above it. Without
+           # this the rig's neck is dragged down onto the chest and takes the
+           # head with it, which reads as a figure with no neck at all.
+           "neck_joint": (0.0, body.get("neck_rise", 0.0), 0.0)}
     for side, sx in (("r", -1.0), ("l", 1.0)):
         pts[side + "_eye"] = (sx * 3.0 * h, ear_up + 1.0 * h, 7.0 * h)
         pts[side + "_ear"] = (sx * 7.5 * h, ear_up, 1.0 * h)
+        # The shoulder KEYPOINT is the acromion, which is what OpenPose wants.
+        # The arm hangs from the glenohumeral joint below and inboard of it, so
+        # the elbow lands where a rig's elbow is rather than 4 cm above it.
         sh = (sx * sw, -sd, 0.0)
-        el = (sh[0] + sx * 0.141 * ua, sh[1] - 0.990 * ua, 0.0)
+        gh = (sx * body.get("gh_w", sw), -sd - body.get("gh_drop", 0.0), 0.0)
+        el = (gh[0] + sx * 0.141 * ua, gh[1] - 0.990 * ua, 0.0)
         wr = (el[0] + sx * 0.077 * fa, el[1] - 0.997 * fa, 2.0)
         hp = (sx * hw, -tl, 0.0)
         kn = (hp[0] + sx * 0.023 * th, hp[1] - 0.9997 * th, 0.0)
         an = (kn[0], kn[1] - 0.9976 * ca, kn[2] - 0.0697 * ca)
         pts[side + "_shoulder"], pts[side + "_elbow"], pts[side + "_wrist"] = sh, el, wr
+        # Not a keypoint - OpenPose has no such thing - but the rig fitter
+        # needs it, and this is the only place that knows it. Carried as an
+        # extra entry rather than derived over there from a rig whose torso
+        # may not be this figure's: measured that way the offset came out
+        # 6.5 cm where the anthropometry says 3.9, and the extra 2.6 was a
+        # disagreement about torso length being charged to the humerus.
+        pts[side + "_gh"] = gh
         pts[side + "_hip"], pts[side + "_knee"], pts[side + "_ankle"] = hp, kn, an
     return pts
 

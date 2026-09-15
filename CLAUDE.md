@@ -295,24 +295,47 @@ shoulders further out than leaving them alone did. Elbow, wrist, knee and ankle
 keypoints *are* joint centres and must never be in that list.
 
 **A landmark offset says where a joint sits, never how long the bone leaving
-it is.** That is this project's oldest invariant arriving somewhere new, and
-ignoring it cost a release. Applied whole, the shoulder's offset moves the
-joint 6 cm down the arm while the elbow keypoint stays where it is, so the
-humerus has to span a gap 6 cm shorter than it is: 18% of an adult's upper arm
-and 54% of the child's, which came out of the depth map as visibly deformed
-elbows. So `LANDMARK_JOINTS` maps each role to the bone it feeds and the
-component along that bone is dropped, measured on the keypoints in the pose as
-it stands - an arm raised over the head wants a different direction taken out
-than one hanging down. What is left is what moves a shoulder inboard, and
-inboard is what "too broad" was: across a 28 cm arm, sliding the joint 1.6 cm
-in costs half a millimetre of length. The neck names no bone, because there the
-offset *is* along the torso and is the whole point.
+it is.** Two releases went out getting this wrong in opposite directions.
+Applied whole against keypoints that hang the arm from the acromion, the
+shoulder's offset moves the joint 6 cm down the arm while the elbow keypoint
+stays put, so the humerus spans a gap 6 cm shorter than it is: 18% of an
+adult's upper arm and 54% of the child's. Masking the offset along the bone
+keeps the humerus and throws away the correction that lowers the shoulder
+line, so every figure stands with its shoulders round its ears. Neither is a
+fix, because both are working around keypoints that are wrong.
 
-The lesson underneath is duller and worth more. Every check written for that
-change was on the shoulder - where it sat, how wide it was, how proud it stood
-- and not one was on the arm hanging off it, so a fix that halved a child's
-upper arm passed a green suite and shipped. When a change moves a joint, test
-the bones on *both* sides of it.
+**So the arm hangs from the joint.** `derive_proportions` closes the arm on the
+measured span from `gh_w`, the glenohumeral half-width, and splits it by
+`arm_split` taken from the rigs - not from the acromion with ANSUR's
+acromion-radiale ratio, which starts at a bony corner 0.022 of stature above
+and 0.009 inboard of the joint and overstates the humerus by the difference.
+Measured from the joint it closes to a tenth of a percent: gh_w + humerus +
+forearm + hand is 0.5172 of stature against a measured half-span of 0.5165 on
+the adult male rig. `build_rest_points` then carries `l_gh`/`r_gh` and
+`neck_joint` alongside the eighteen keypoints - not keypoints, OpenPose has no
+such thing, but the only place that knows where those joints are - and
+`mesh_backend.LANDMARK_SOURCE` reads them. The offset is then that figure's own
+anthropometry, so moving the rig's shoulder onto it lands the joint exactly a
+humerus away from the elbow keypoint and nothing is stretched to reach.
+
+Derived from the rig instead, as `landmark_shift` still must for a rig whose
+figure says nothing, the offset came out 6.5 cm where the anthropometry says
+3.9: the extra 2.6 is whatever the rig and the preset disagree about between
+the hip and the shoulder, and every centimetre of it lands on the humerus.
+
+With both declared, the shoulder line sits within 0.007 of the body's height of
+where the rig author put it - against 0.027 before any of this - every figure
+finishes within 1.5 cm of its stature, and no arm bone is off the rig's own by
+more than 7%.
+
+The lesson underneath is duller and worth more. Every check written for the
+first attempt was on the shoulder - where it sat, how wide it was, how proud it
+stood - and not one was on the arm hanging off it, so a fix that halved a
+child's upper arm passed a green suite and shipped. The second attempt was
+measured the same way and left the shoulders visibly high, and the number
+saying so was in the output at the time. When a change moves a joint, test the
+bones on *both* sides of it, and look at the picture at a magnification where
+you could see the thing you are claiming to have fixed.
 
 **A rig is sized by the figure's stature, never by a span between two
 landmarks.** This divided the keypoints' shoulder-to-hip distance by the rig's
@@ -575,13 +598,12 @@ a build.
 4. Wrists are never rotated; there is no keypoint for them. Ankles are only
    levelled, not aimed - a foot taking weight goes flat, but nothing turns it
    in or out.
-5. The editor splits the arm with ANSUR's acromion-radiale against
-   radiale-stylion, a ratio of 1.25, where the rigs have 1.05 to 1.20. The
-   surface measure starts at the acromion and so overstates the humerus by the
-   drop to the joint. A fitted upper arm comes out 5% long and a forearm 2-14%
-   short, which is a step in girth at the elbow, and closing it means changing
-   the split - and with it every exported child and adult skeleton. Worth
-   doing, with the rigs as the reference.
+5. Anny's mesh does not share MakeHuman's hm08 vertex ordering - 1967 of
+   26756 triangles in common - so the CC0 MakeHuman garment library cannot be
+   fitted to these bodies by its `.mhclo` indices, which is what that format
+   is for. It needs a geometric transfer: fit the garment to `base.obj` by
+   index, where it is exact, then shrink-wrap from the base body onto the
+   Anny body. Until that exists, `wearables` is the swept approximation.
 5. The web prototype duplicates the maths in JavaScript. It is tested
    independently (`node web/test.mjs`) and will drift from the Python. Two
    things no longer can: the preset table is generated from `preset_params`

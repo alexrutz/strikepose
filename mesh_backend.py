@@ -81,30 +81,32 @@ ROLL_PARENT = {"l_shoulder": "l_collar", "r_shoulder": "r_collar",
                "l_knee": "l_hip", "r_knee": "r_hip"}
 
 # Roles whose keypoint is a surface landmark rather than the joint centre the
-# rig rotates about, mapped to the bone whose length the correction may not
-# change. Elbow, wrist, knee and ankle keypoints are joint centres already and
+# rig rotates about, mapped to the bone that must not change length as a
+# result. Elbow, wrist, knee and ankle keypoints are joint centres already and
 # must NOT be in here - the point of sliding them is that they are where the
 # pose says the joint is.
 #
-# The named bone is the whole subtlety. A landmark offset is a statement about
-# where a joint SITS, never about how long the bone leaving it is - which is
-# this project's oldest invariant, arriving somewhere new. Applied whole, the
-# shoulder's offset moves the joint 6 cm down the arm while the elbow keypoint
-# stays put, so the humerus has to span a gap 6 cm shorter than it is: 18% of
-# an adult's upper arm and 54% of the child's, which came out of the depth map
-# as visibly deformed elbows. So the component along the bone is dropped and
-# the rest - which is what moves a shoulder inboard, and what "too broad" was -
-# is kept. Across a 28 cm arm, sliding the joint 1.6 cm inboard costs half a
-# millimetre of length.
-#
-# The neck names no bone, because there the offset IS along the torso and is
-# the whole point: OpenPose has no neck and infers one as the MIDPOINT OF THE
-# SHOULDERS, out in the middle of the upper chest, where a rig's neck bone
-# starts at the top of the thorax. Dragging one onto the other pulls the whole
-# head down with it, and every adult in the set finished 3 to 6 cm short of
-# its own stature - an average man measured 168.8 cm instead of 175.
+# The named bone is not masked out of the offset; it is what the tests watch.
+# A landmark offset says where a joint SITS and never how long the bone leaving
+# it is, and the honest way to hold both is for the keypoints to be right:
+# `derive_proportions` hangs the arm from the glenohumeral joint, so moving the
+# rig's shoulder there lands it exactly the humerus away from the elbow
+# keypoint. Masking the offset along the bone instead - which is what this did
+# for one release - keeps the humerus but throws away the correction that
+# lowers the shoulder line, and every figure stands with its shoulders round
+# its ears. Fix the data, keep the test.
 LANDMARK_JOINTS = {"l_shoulder": "l_elbow", "r_shoulder": "r_elbow",
                    "neck": None}
+
+# Where a role's real joint is, when the figure can say so itself. The editor
+# hangs the arm from the glenohumeral joint and carries it in `rest_points`
+# under this name, so the offset is that figure's own anthropometry and
+# nothing else. Deriving it instead from the rig's joint against the keypoint,
+# which is what the neck below still has to do, drags in whatever the rig and
+# the preset disagree about between the hip and the shoulder - 2.6 cm of it on
+# an average man - and every centimetre of that lands on the humerus.
+LANDMARK_SOURCE = {"l_shoulder": "l_gh", "r_shoulder": "r_gh",
+                   "neck": "neck_joint"}
 
 COMPONENT = {5120: "b", 5121: "B", 5122: "h", 5123: "H", 5125: "I", 5126: "f"}
 COMPONENT_SIZE = {"b": 1, "B": 1, "h": 2, "H": 2, "I": 4, "f": 4}
@@ -580,22 +582,17 @@ def landmark_shift(rest_position, roles, points, rest_points):
     except (KeyError, TypeError, ValueError):
         return {}
     out = {}
-    for role, keeps_length in LANDMARK_JOINTS.items():
+    to_pose = now_frame @ kp_frame.T          # rest keypoints into the pose
+    for role in LANDMARK_JOINTS:
         if role not in roles or role not in rest_points:
             continue
-        offset = carry @ ((rig_at(role) - rig_hips)
-                          - into_rig @ (rest_at(role) - kp_hips))
-        # Take out the part along the bone this joint feeds, so the correction
-        # moves the joint without resizing it. Measured on the keypoints, in
-        # the pose as it stands: an arm raised over the head wants a different
-        # direction taken out than one hanging down.
-        if keeps_length and keeps_length in points:
-            bone = now_at(keeps_length) - now_at(role)
-            length = float(np.linalg.norm(bone))
-            if length > 1e-6:
-                bone = bone / length
-                offset = offset - bone * float(np.dot(offset, bone))
-        out[role] = offset
+        told = LANDMARK_SOURCE.get(role)
+        if told and told in rest_points:
+            # the figure's own answer, in its own frame
+            out[role] = to_pose @ (rest_at(told) - rest_at(role))
+        else:
+            out[role] = carry @ ((rig_at(role) - rig_hips)
+                                 - into_rig @ (rest_at(role) - kp_hips))
     return out
 
 

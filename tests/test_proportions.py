@@ -93,10 +93,17 @@ for sex, ref in REFERENCE.items():
     def at(name):
         return points[name]
 
-    span = 2.0 * (body["shoulder_w"] + body["upper_arm"] + body["forearm"]
+    # Measured on the figure that comes out, not by adding table entries: the
+    # arm hangs from the glenohumeral joint, not from the acromion keypoint,
+    # and adding shoulder_w to the segments counts the 0.9 cm between them as
+    # arm. That is how a sum can close while the elbow sits 4 cm high.
+    span = 2.0 * (abs(at("l_gh")[0]) + body["upper_arm"] + body["forearm"]
                   + table["hand"] * stature)
     close(span / stature, ref["span"], 0.004,
           "the arm span closes on the measured span")
+    # and the shoulder keypoint is still the acromion, outboard of that joint
+    close(2.0 * abs(at("l_shoulder")[0]) / stature, ref["biacromial_breadth"],
+          0.002, "while the shoulder keypoint stays at the acromion")
 
     floor = at("l_ankle")[1] - table["ankle_height"] * stature
     hip = at("l_hip")[1] - floor

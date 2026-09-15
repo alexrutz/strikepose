@@ -292,7 +292,7 @@ for preset in BODY_PRESETS:
 # than it is: 18% of an adult's upper arm and 54% of the child's, which came
 # out of the depth map as visibly deformed elbows. It shipped, because every
 # check here was on the shoulder and none was on the arm hanging off it.
-square, squashed = ("none", 0.0), ("none", 0.0)
+squashed = ("none", 0.0)
 for preset in BODY_PRESETS:
     mesh = bank[preset]
     skeleton = Skeleton(preset_params(preset))
@@ -307,12 +307,6 @@ for preset in BODY_PRESETS:
     for role, bone in mesh_backend.LANDMARK_JOINTS.items():
         if bone is None or role not in roles or role not in solved["shift"]:
             continue
-        along = np.asarray(points[bone], float) - np.asarray(points[role],
-                                                             float)
-        along = along / max(1e-9, float(np.linalg.norm(along)))
-        leak = abs(float(np.dot(solved["shift"][role], along)))
-        if leak > square[1]:
-            square = ("%s %s by %.2f cm" % (preset, role, leak), leak)
         was = float(np.linalg.norm(rested[roles[bone]] - rested[roles[role]]))
         now = float(np.linalg.norm(at(bone) - at(role)))
         gap = abs(now / max(1e-9, was) - 1.0)
@@ -320,11 +314,33 @@ for preset in BODY_PRESETS:
             squashed = ("%s %s->%s (%.1f vs %.1f cm)"
                         % (preset, role, bone, now, was), gap)
 
-check("a landmark offset never points along the bone it feeds", square[1] < 0.01,
-      "worst %s" % square[0])
-check("so no landmark bone is squashed to reach its keypoint",
+# The offset may point along the bone - the acromion sits almost straight
+# above the glenohumeral joint, so on a hanging arm it mostly does. What it
+# may not do is change the bone's length, and the honest way to hold both is
+# for the keypoints to be right: the rest pose hangs the arm from the
+# glenohumeral joint, so moving the rig's shoulder there lands it exactly the
+# humerus away from the elbow keypoint. Masking the offset along the bone
+# instead keeps the humerus and throws away the correction that lowers the
+# shoulder line - which is what shipped, with every figure's shoulders round
+# its ears. So this checks the length, not the direction.
+check("no landmark bone is squashed or stretched to reach its keypoint",
       squashed[1] < 0.12, "worst %s off by %.0f%%"
       % (squashed[0], 100.0 * squashed[1]))
+
+# and the reason it is not: the rest pose puts the arm's origin at the joint,
+# inboard of and below the shoulder keypoint
+gaps = []
+for preset in BODY_PRESETS:
+    rest = build_rest_points(Skeleton(preset_params(preset)).body)
+    if "l_gh" not in rest:
+        gaps.append("%s has no l_gh" % preset)
+        continue
+    inboard = abs(rest["l_shoulder"][0]) - abs(rest["l_gh"][0])
+    below = rest["l_shoulder"][1] - rest["l_gh"][1]
+    if not (0.4 < inboard < 6.0 and 1.5 < below < 8.0):
+        gaps.append("%s in %.1f down %.1f" % (preset, inboard, below))
+check("the arm hangs from the joint, not from the shoulder keypoint",
+      not gaps, str(gaps[:3]))
 
 check("the shoulder is held off its keypoint, by a few centimetres",
       all(1.0 < v < 9.0 for _p, v in pulls),

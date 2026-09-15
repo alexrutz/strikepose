@@ -31,23 +31,28 @@ for (const [a, b] of [[2,5],[3,6],[4,7],[8,11],[9,12],[10,13],[14,15],[16,17]]) 
 // fails if the two drift apart - which they had, by a third of the
 // child's torso, before anything compared them.
 export const PRESETS = {
-  "Male, average":    {sw:20.7, sd:0.0, hw:8.8, tl:53.8, ua:28.0, fa:22.4,
+  "Male, average":    {sw:20.7, sd:0.0, hw:8.8, tl:53.8, ua:26.6, fa:25.3,
+                      gw:19.1, gd:3.9, nr:6.6,
                       th:40.8, ca:41.7, head:1.00,
                       chest:[14.47,12.69], waist:[14.0,10.4], pelvis:[17.0,12.0],
                       girth:1},
-  "Female, average":  {sw:18.2, sd:0.0, hw:8.7, tl:48.7, ua:26.1, fa:20.3,
-                      th:37.7, ca:40.1, head:0.93,
+  "Female, average":  {sw:18.2, sd:0.0, hw:8.7, tl:48.7, ua:26.5, fa:22.1,
+                      gw:15.9, gd:4.5, nr:4.3,
+                      th:37.7, ca:40.1, head:0.95,
                       chest:[13.46,12.37], waist:[12.2,9.0], pelvis:[17.6,12.0],
                       girth:0.88, bust:true},
-  "Male, athletic":   {sw:21.1, sd:0.0, hw:8.9, tl:54.7, ua:28.5, fa:22.8,
-                      th:41.5, ca:42.4, head:1.02,
+  "Male, athletic":   {sw:21.1, sd:0.0, hw:8.9, tl:54.7, ua:27.1, fa:25.8,
+                      gw:19.5, gd:4.0, nr:6.7,
+                      th:41.5, ca:42.4, head:1.00,
                       chest:[15.32,13.46], waist:[13.4,10.0], pelvis:[16.4,11.6],
                       girth:1.15},
-  "Female, curvy":    {sw:18.2, sd:0.0, hw:8.7, tl:48.7, ua:26.1, fa:20.3,
-                      th:37.7, ca:40.1, head:0.93,
+  "Female, curvy":    {sw:18.2, sd:0.0, hw:8.7, tl:48.7, ua:26.5, fa:22.1,
+                      gw:15.9, gd:4.5, nr:4.3,
+                      th:37.7, ca:40.1, head:0.95,
                       chest:[14.20,13.14], waist:[11.8,9.0], pelvis:[19.4,13.0],
                       girth:1.0, bust:true},
-  "Child, about 7":   {sw:12.7, sd:0.0, hw:6.1, tl:35.6, ua:20.5, fa:16.4,
+  "Child, about 7":   {sw:12.7, sd:0.0, hw:6.1, tl:35.6, ua:19.8, fa:18.0,
+                      gw:11.8, gd:2.6, nr:4.7,
                       th:29.4, ca:26.8, head:0.91,
                       chest:[9.19,8.83], waist:[10.0,7.6], pelvis:[10.6,8.0],
                       girth:0.65},
@@ -121,8 +126,11 @@ function restPoints(preset) {
   for (const [side, sx] of [["r", -1], ["l", 1]]) {
     pts[side+"_eye"] = [sx*3*h, 20*h, 7*h];
     pts[side+"_ear"] = [sx*7.5*h, 19*h, 1*h];
+    // The shoulder keypoint is the acromion; the arm hangs from the
+    // glenohumeral joint below and inboard of it, as it does in the Python.
     const sh = [sx*p.sw, -p.sd, 0];
-    const el = [sh[0] + sx*0.141*p.ua, sh[1] - 0.99*p.ua, 0];
+    const gh = [sx*(p.gw ?? p.sw), -p.sd - (p.gd ?? 0), 0];
+    const el = [gh[0] + sx*0.141*p.ua, gh[1] - 0.99*p.ua, 0];
     const wr = [el[0] + sx*0.077*p.fa, el[1] - 0.997*p.fa, 2];
     const hp = [sx*p.hw, -p.tl, 0];
     const kn = [hp[0] + sx*0.023*p.th, hp[1] - 0.9997*p.th, 0];
