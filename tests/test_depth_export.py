@@ -2,6 +2,9 @@ import os, sys, math; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out")
 os.makedirs(OUT, exist_ok=True)
 
+import os as _os, tempfile as _tempfile
+_os.environ["STRIKEPOSE_SETTINGS"] = _os.path.join(
+    _tempfile.mkdtemp(), "settings.json")
 import tkinter as tk
 from openpose3d_editor import EditorApp, KEYPOINT_NAMES
 root = tk.Tk(); root.geometry("1180x800")

@@ -16,6 +16,9 @@ OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "out")
 os.makedirs(OUT, exist_ok=True)
 
+import os as _os, tempfile as _tempfile
+_os.environ["STRIKEPOSE_SETTINGS"] = _os.path.join(
+    _tempfile.mkdtemp(), "settings.json")
 import tkinter as tk
 import numpy as np
 import props

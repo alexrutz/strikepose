@@ -1,5 +1,8 @@
 import os, sys, math
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os as _os, tempfile as _tempfile
+_os.environ["STRIKEPOSE_SETTINGS"] = _os.path.join(
+    _tempfile.mkdtemp(), "settings.json")
 import tkinter as tk
 from openpose3d_editor import EditorApp, KEYPOINT_NAMES, LIMB_SEQ, vlen, vsub
 from ui_app import TAB_ORDER

@@ -1669,26 +1669,36 @@ DEFAULT_ENDPOINTS = [
 class Sampling:
     """What the model is asked to do with its probabilities, in one place.
 
-    The defaults are Qwen3's own published recommendation for THINKING mode -
-    temperature 0.6, top_p 0.95, top_k 20, min_p 0 - rather than something
-    picked here. What they replaced was a hard-coded temperature of 0.3 and
-    nothing else, which is a poor setting for any reasoning model and has no
-    answer at all for a runtime that wants top_k.
+    The defaults are Qwen3.8-27B's own published numbers for THINKING mode -
+    temperature 1.0, top_p 0.95, top_k 20, min_p 0 - rather than something
+    picked here. Note the temperature: Qwen3.8 asks for 1.0 where Qwen3 asked
+    for 0.6, and this file had 0.6 until someone said which model they were
+    actually running. Before that it was a hard-coded 0.3 with no top_k, no
+    min_p and no way to change any of it.
 
-    `reasoning` is "high", "medium", "low" or "off". Ollama takes it as the
-    top-level `think` field, which accepts a bool or one of those words;
-    everything OpenAI-compatible takes `chat_template_kwargs.enable_thinking`,
-    and some servers also read `reasoning_effort`. All three are sent, because
-    a server that does not know a field ignores it, and a server that does is
-    the one we wanted to reach.
+    `reasoning` is "xhigh", "medium", "low" or "off", and THOSE THREE NAMES
+    ARE THE WHOLE LIST. Qwen3.8's chat template accepts exactly low, medium
+    and xhigh and raises on anything else - llama.cpp will happily forward
+    "high", "minimal" or "max" and the template then errors out, which looks
+    like a server fault rather than a bad argument. "high" was this file's
+    default until that was checked.
+
+    Ollama takes the level as the top-level `think` field; OpenAI-compatible
+    servers take `chat_template_kwargs`, which is where `enable_thinking` and
+    `reasoning_effort` both belong. Sending `reasoning_effort` at the top
+    level as well is harmless on servers that ignore it and is what some
+    older builds read.
     """
+
+    # The only effort levels Qwen3.8's template will accept.
+    EFFORTS = ("xhigh", "medium", "low")
 
     FIELDS = ("temperature", "top_p", "top_k", "min_p", "presence_penalty",
               "repeat_penalty", "max_tokens", "seed", "reasoning")
 
-    def __init__(self, temperature=0.6, top_p=0.95, top_k=20, min_p=0.0,
+    def __init__(self, temperature=1.0, top_p=0.95, top_k=20, min_p=0.0,
                  presence_penalty=0.0, repeat_penalty=1.0, max_tokens=None,
-                 seed=None, reasoning="high"):
+                 seed=None, reasoning="xhigh"):
         self.temperature = float(temperature)
         self.top_p = float(top_p)
         self.top_k = int(top_k)
@@ -1711,6 +1721,16 @@ class Sampling:
     @property
     def thinking(self):
         return self.reasoning not in ("off", "none", "false", "0", "")
+
+    @property
+    def effort(self):
+        """The effort level, snapped to one the template will take.
+
+        Anything unrecognised becomes the deepest rather than being passed
+        through: a typo that errors the whole request is worse than a level
+        that is one step off what was meant.
+        """
+        return self.reasoning if self.reasoning in self.EFFORTS else "xhigh"
 
     def ollama_options(self):
         out = {"temperature": self.temperature, "top_p": self.top_p,
@@ -1741,10 +1761,11 @@ class Sampling:
 
 
 # Qwen publishes one set of numbers for thinking and a different set for
-# answering without it, and the gap is not small - temperature 0.6 against
-# 0.7, top_p 0.95 against 0.8. The extraction pass below runs with thinking
-# off, so it gets the second set rather than the first.
-NON_THINKING = {"temperature": 0.7, "top_p": 0.8}
+# answering without it, and the gap is not small: 1.0 / 0.95 against
+# 0.7 / 0.80, and a presence penalty of 1.5 that the thinking half does not
+# want at all. The extraction pass runs with thinking off, so it gets the
+# second set.
+NON_THINKING = {"temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5}
 
 
 class LocalLLM:
@@ -1817,11 +1838,7 @@ class LocalLLM:
         if self.backend == "ollama":
             base = {"model": model, "messages": messages, "stream": False,
                     "options": sampling.ollama_options()}
-            if sampling.thinking:
-                base["think"] = (True if sampling.reasoning == "on"
-                                 else sampling.reasoning)
-            else:
-                base["think"] = False
+            base["think"] = sampling.effort if sampling.thinking else False
             out = []
             if schema:
                 out.append(dict(base, format=schema))
@@ -1837,10 +1854,11 @@ class LocalLLM:
         base = dict({"model": model, "messages": messages, "stream": False},
                     **sampling.openai_body())
         if sampling.thinking:
-            base["chat_template_kwargs"] = {"enable_thinking": True}
-            base["reasoning_effort"] = (
-                sampling.reasoning if sampling.reasoning in
-                ("high", "medium", "low") else "high")
+            # Both live in chat_template_kwargs for Qwen3.8; the top-level
+            # copy is for older builds that read it there.
+            base["chat_template_kwargs"] = {"enable_thinking": True,
+                                            "reasoning_effort": sampling.effort}
+            base["reasoning_effort"] = sampling.effort
         else:
             base["chat_template_kwargs"] = {"enable_thinking": False}
         out = []

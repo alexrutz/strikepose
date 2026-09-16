@@ -174,8 +174,33 @@ writes down what was already decided. `top_k` and `min_p` are sent even to
 OpenAI-compatible servers, which have no such fields in the spec and read them
 anyway.
 
-Reasoning defaults to **high**. Turning it off makes one call instead of two:
+Reasoning defaults to **xhigh**. Turning it off makes one call instead of two:
 much faster and noticeably worse.
+
+### Settings survive a fresh clone
+
+Everything on the Model and Sampling sections is kept in
+`../strikepose-settings.json` - **beside** the application directory, not
+inside it, so `rm -rf strikepose && git clone ...` does not take the address
+of your model server with it. `$STRIKEPOSE_SETTINGS` moves the file. It is
+written 0600 when it holds an API key, and a value you hand-edit into
+nonsense is dropped rather than taking the rest of the file with it.
+
+### Notes for Qwen3.8-27B
+
+The defaults are this model's own published numbers, which are **not** Qwen3's:
+temperature 1.0 when thinking (Qwen3 asked for 0.6), 0.7 / 0.80 with a
+presence penalty of 1.5 when not.
+
+Its chat template accepts exactly `low`, `medium` and `xhigh` for the effort
+level and raises on anything else - including the `high` that reads as the
+obvious one. llama.cpp forwards it anyway, so the error surfaces as a template
+fault rather than a bad argument. Anything unrecognised is snapped to `xhigh`
+here rather than passed through.
+
+Serve it with `--jinja` so the embedded template is used. Context is 262144
+native. MTP speeds generation up without changing what comes out, so it needs
+nothing from this end.
 
 ### It checks what it built, with a ruler
 

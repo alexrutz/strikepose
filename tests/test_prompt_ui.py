@@ -5,6 +5,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import settings
+import os as _os, tempfile as _tempfile
+_os.environ["STRIKEPOSE_SETTINGS"] = _os.path.join(
+    _tempfile.mkdtemp(), "settings.json")
 import tkinter as tk
 from openpose3d_editor import EditorApp, LIMB_SEQ, vdot, vlen, vnorm, vsub
 
@@ -38,13 +42,50 @@ check("and an API key box that does not show the key",
 check("sampling is configurable, reasoning included",
       set(app.sampling_vars) >= {"reasoning", "temperature", "top_p", "top_k"},
       str(sorted(app.sampling_vars)))
-check("and reasoning is ON by default",
-      app.sampling_vars["reasoning"].get() == "high",
+check("and reasoning is ON by default, at a level the template takes",
+      app.sampling_vars["reasoning"].get() == "xhigh",
       app.sampling_vars["reasoning"].get())
-check("at Qwen3's published thinking numbers",
-      abs(app.sampling_vars["temperature"].get() - 0.6) < 1e-9
+check("at Qwen3.8's published thinking numbers",
+      abs(app.sampling_vars["temperature"].get() - 1.0) < 1e-9
       and abs(app.sampling_vars["top_p"].get() - 0.95) < 1e-9
       and app.sampling_vars["top_k"].get() == 20)
+check("settings live outside the checkout, so a clean clone keeps them",
+      not settings.path().startswith(settings.app_dir() + os.sep),
+      settings.path())
+
+# Typing in the prompt must not fire the single-key shortcuts.
+#
+# This is the bug that made the box unusable: the guard tested `isinstance`
+# against `(tk.Entry, tk.Spinbox)`, the prompt became a `tk.Text`, and every
+# letter typed into it also ran a shortcut - "b" toggled the preview, "r"
+# reset the pose, "x" randomised it. Checked by typing a sentence made
+# entirely of shortcut letters.
+app.prompt_box.focus_set()
+root.update()
+watched = (app.show_body, app.show_fine, app.symmetry, app.show_grid,
+           app.show_labels, len(app.undo_stack), list(app.skeleton.points))
+for ch in "a person bending, relaxed. dv nmgsopkx 123456":
+    root.event_generate("<Key>", keysym=ch if ch.isalnum() else "space")
+root.update()
+now = (app.show_body, app.show_fine, app.symmetry, app.show_grid,
+       app.show_labels, len(app.undo_stack), list(app.skeleton.points))
+check("typing in the prompt fires no shortcuts",
+      watched[:6] == now[:6]
+      and all(vlen(vsub(a, b)) < 1e-12 for a, b in zip(watched[6], now[6])),
+      "body %s->%s grid %s->%s undo %d->%d"
+      % (watched[0], now[0], watched[3], now[3], watched[5], now[5]))
+check("and the guard covers every widget that takes typing",
+      {"Entry", "Text", "Spinbox"} <= set(app.TYPING_WIDGETS))
+
+# but they still work where they are meant to
+app.canvas.focus_set()
+root.update()
+was = app.show_body
+root.event_generate("<Key>", keysym="b")
+root.update()
+check("and they still work with the canvas focused", app.show_body != was)
+app.set_flag("show_body", was)
+app.prompt_box.delete("1.0", "end")
 
 lengths = dict(app.skeleton.lengths)
 before = list(app.skeleton.points)

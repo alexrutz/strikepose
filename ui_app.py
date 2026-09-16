@@ -58,6 +58,7 @@ from raster import (depth_to_grey, inside_polygon, render_depth,
                     silhouette_quads, solid_quads)
 from scenefile import (scene_from_dict, scene_load, scene_objects,
                        scene_to_dict)
+import settings
 import rigpose
 
 FINE_BONES = ("finger", "metacarpal", "toe", "eye", "jaw", "tongue",
@@ -241,13 +242,18 @@ class EditorApp:
         # pose right - the prompt - should never be more than a keystroke
         # away, and the things you set once - host, key, sampler - should be
         # out of the way but not out of reach.
+        # Loaded from ../strikepose-settings.json - outside the checkout, so
+        # a clean clone does not take the address of your model server with
+        # it. The environment still wins, for a one-off run.
+        self.settings = settings.load()
+        kept = lambda key, env: os.environ.get(env) or self.settings[key]
         self.prompt_host = tk.StringVar(
-            value=os.environ.get("STRIKEPOSE_LLM_HOST", ""))
+            value=kept("llm_host", "STRIKEPOSE_LLM_HOST"))
         self.prompt_model = tk.StringVar(
-            value=os.environ.get("STRIKEPOSE_LLM_MODEL", ""))
-        self.prompt_backend = tk.StringVar(value="auto")
+            value=kept("llm_model", "STRIKEPOSE_LLM_MODEL"))
+        self.prompt_backend = tk.StringVar(value=self.settings["llm_backend"])
         self.prompt_key = tk.StringVar(
-            value=os.environ.get("STRIKEPOSE_LLM_KEY", ""))
+            value=kept("llm_key", "STRIKEPOSE_LLM_KEY"))
         self.prompt_status = tk.StringVar(
             value="Describe a pose. Ctrl+Enter, or / from anywhere.")
         self.prompt_busy = False
@@ -255,22 +261,25 @@ class EditorApp:
         self.prompt_report = None
         self.prompt_generation = 0
         self.model_status = tk.StringVar(value="")
+        self.settings_status = tk.StringVar(
+            value="Settings: " + settings.describe())
 
         # Qwen3's own published numbers for THINKING mode. They are not a
         # guess and they are not the same as its non-thinking numbers, which
         # the extraction pass uses instead.
         self.sampling_vars = {
-            "reasoning": tk.StringVar(value="high"),
-            "temperature": tk.DoubleVar(value=0.6),
-            "top_p": tk.DoubleVar(value=0.95),
-            "top_k": tk.IntVar(value=20),
-            "min_p": tk.DoubleVar(value=0.0),
-            "presence_penalty": tk.DoubleVar(value=0.0),
-            "max_tokens": tk.StringVar(value=""),
-            "seed": tk.StringVar(value=""),
+            "reasoning": tk.StringVar(value=self.settings["reasoning"]),
+            "temperature": tk.DoubleVar(value=self.settings["temperature"]),
+            "top_p": tk.DoubleVar(value=self.settings["top_p"]),
+            "top_k": tk.IntVar(value=self.settings["top_k"]),
+            "min_p": tk.DoubleVar(value=self.settings["min_p"]),
+            "presence_penalty": tk.DoubleVar(
+                value=self.settings["presence_penalty"]),
+            "max_tokens": tk.StringVar(value=self.settings["max_tokens"]),
+            "seed": tk.StringVar(value=self.settings["seed"]),
         }
-        self.prompt_passes = tk.IntVar(value=2)
-        self.prompt_timeout = tk.IntVar(value=600)
+        self.prompt_passes = tk.IntVar(value=self.settings["llm_passes"])
+        self.prompt_timeout = tk.IntVar(value=self.settings["llm_timeout"])
 
         self.random_parts = {
             part: tk.BooleanVar(value=part in randomize.DEFAULT_PARTS)
@@ -663,8 +672,11 @@ class EditorApp:
 
         # ---- sampling ------------------------------------------------------
         body = section("Sampling", tab="Pose")
+        # xhigh, medium, low - and nothing else. Qwen3.8's chat template
+        # raises on any other name, including the "high" that reads as the
+        # obvious one.
         choice(body, "Reasoning", self.sampling_vars["reasoning"],
-               ("high", "medium", "low", "off"))
+               ("xhigh", "medium", "low", "off"))
         for label, key in (("Temperature", "temperature"), ("Top-p", "top_p"),
                            ("Top-k", "top_k"), ("Min-p", "min_p"),
                            ("Presence penalty", "presence_penalty"),
@@ -672,13 +684,17 @@ class EditorApp:
             field(body, label, self.sampling_vars[key], width=7)
         field(body, "Self-check passes", self.prompt_passes, width=7)
         field(body, "Timeout (s)", self.prompt_timeout, width=7)
-        buttons(body, [("Qwen thinking defaults", self.reset_sampling)],
-                cols=1, small=True)
+        buttons(body, [("Qwen3.8 defaults", self.reset_sampling),
+                       ("Save now", self.save_settings)], cols=2,
+                small=True)
+        tk.Label(body, textvariable=self.settings_status, bg=PANEL, fg=MUTED,
+                 anchor="w", justify="left", wraplength=210,
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 0))
         tk.Label(body,
-                 text="Defaults are Qwen3's published thinking-mode numbers. "
-                      "Reasoning off is much faster and noticeably worse. "
-                      "Each self-check pass measures what was built and asks "
-                      "the model to fix it.",
+                 text="Qwen3.8 asks for temperature 1.0 when thinking, and "
+                      "its template takes only xhigh, medium and low - "
+                      "\"high\" errors. Settings are kept beside the app "
+                      "folder, so a fresh clone does not lose them.",
                  bg=PANEL, fg=MUTED, anchor="w", justify="left",
                  wraplength=210,
                  font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
@@ -1191,10 +1207,20 @@ class EditorApp:
         c.bind("<MouseWheel>", self.on_wheel)
         c.bind("<Button-4>", lambda e: self.on_wheel(e, 1))
         c.bind("<Button-5>", lambda e: self.on_wheel(e, -1))
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Saved when a box is left as well as on exit, so a crash or a kill
+        # does not cost the address you just typed.
+        for var in [self.prompt_host, self.prompt_model, self.prompt_key,
+                    self.prompt_backend] + list(self.sampling_vars.values()):
+            var.trace_add("write", lambda *_a: self._settings_dirty())
         self.root.bind("<Key>", self.on_key)
-        self.root.bind("<Control-z>", lambda e: self.undo())
-        # Tab would otherwise move focus between the panel's widgets
-        self.root.bind("<Tab>", lambda e: (self.next_figure(), "break")[1])
+        self.root.bind("<Control-z>", lambda e: None if self._typing()
+                       else self.undo())
+        # Tab would otherwise move focus between the panel's widgets - but
+        # inside a text box it is a tab, and inside an entry it should still
+        # move on.
+        self.root.bind("<Tab>", lambda e: None if self._typing()
+                       else (self.next_figure(), "break")[1])
         self.root.bind("<Control-Tab>", lambda e: self.next_tab(1))
 
     # -- helpers -----------------------------------------------------------
@@ -1266,13 +1292,77 @@ class EditorApp:
         import pose_agent
         return pose_agent.discover(**connection)
 
+    def current_settings(self):
+        """What is worth keeping, read off the controls."""
+        out = dict(self.settings)
+        out.update({
+            "llm_host": self.prompt_host.get().strip(),
+            "llm_model": self.prompt_model.get().strip(),
+            "llm_backend": self.prompt_backend.get(),
+            "llm_key": self.prompt_key.get().strip(),
+        })
+        for key, var in self.sampling_vars.items():
+            try:
+                out[key] = var.get()
+            except tk.TclError:           # a half-typed number in the box
+                pass
+        for key, var in (("llm_passes", self.prompt_passes),
+                         ("llm_timeout", self.prompt_timeout)):
+            try:
+                out[key] = int(var.get())
+            except (tk.TclError, ValueError):
+                pass
+        try:
+            out["export_w"], out["export_h"] = self._sizes()
+        except Exception:
+            pass
+        out["preset"] = self.skeleton.body.get("preset", "")
+        return out
+
+    def save_settings(self, _event=None):
+        """Write them out. Never fatal: a read-only parent directory is a
+        reason to carry on without saved settings, not to stop working."""
+        self.settings = self.current_settings()
+        written = settings.save(self.settings)
+        self.settings_status.set(
+            "Saved to " + written if written
+            else "Could not write " + settings.path())
+        return written
+
+    def _settings_dirty(self, _event=None):
+        """Coalesce a burst of edits into one write.
+
+        A `trace_add` on a StringVar fires per keystroke, and writing the file
+        on every letter of a hostname is both pointless and a good way to be
+        mid-write when something goes wrong. `after` collapses it to one save
+        once the typing stops.
+        """
+        if getattr(self, "_settings_timer", None) is not None:
+            try:
+                self.root.after_cancel(self._settings_timer)
+            except tk.TclError:
+                pass
+        self._settings_timer = self.root.after(1200, self._save_settings_quietly)
+
+    def _save_settings_quietly(self):
+        try:
+            self.settings = self.current_settings()
+            settings.save(self.settings)
+        except Exception:
+            pass
+
+    def on_close(self):
+        self._save_settings_quietly()
+        self.root.destroy()
+
     def reset_sampling(self):
-        for key, value in (("reasoning", "high"), ("temperature", 0.6),
+        for key, value in (("reasoning", "xhigh"), ("temperature", 1.0),
                            ("top_p", 0.95), ("top_k", 20), ("min_p", 0.0),
                            ("presence_penalty", 0.0), ("max_tokens", ""),
                            ("seed", "")):
             self.sampling_vars[key].set(value)
-        self.prompt_status.set("Back to Qwen3's thinking-mode numbers.")
+        self.save_settings()
+        self.prompt_status.set("Back to Qwen3.8's thinking-mode numbers.")
 
     def refresh_models(self):
         """Ask the server what it has loaded, on a thread like everything else
@@ -1338,6 +1428,30 @@ class EditorApp:
         view.pack(fill="both", expand=True)
         view.insert("1.0", ("\n\n" + "-" * 60 + "\n\n").join(parts))
         view.configure(state="disabled")
+
+    # Widget classes that consume a keystroke. Checked by CLASS NAME, not by
+    # isinstance against a tuple of types: this guard was written when the
+    # prompt was a one-line `tk.Entry`, the box became a `tk.Text`, and the
+    # tuple silently stopped covering it - so every letter typed into the
+    # prompt also fired a single-key shortcut. "b" toggled the preview, "r"
+    # reset the pose, "x" randomised it, and the box was unusable.
+    #
+    # A name list covers ttk's widgets too, which an isinstance check against
+    # the `tk` classes never did, and it fails toward "this takes typing"
+    # rather than toward "fire the shortcut".
+    TYPING_WIDGETS = frozenset((
+        "Entry", "Text", "Spinbox", "Listbox",
+        "TEntry", "TSpinbox", "TCombobox", "ScrolledText"))
+
+    def _typing(self):
+        """Is the keyboard currently going into something that wants text?"""
+        try:
+            focused = self.root.focus_get()
+        except KeyError:                  # focus on a widget Tk cannot name
+            return True
+        if focused is None:
+            return False
+        return focused.winfo_class() in self.TYPING_WIDGETS
 
     def focus_prompt(self, _event=None):
         self.show_tab("Pose")
@@ -2049,7 +2163,7 @@ class EditorApp:
         self.redraw()
 
     def on_key(self, event):
-        if isinstance(self.root.focus_get(), (tk.Entry, tk.Spinbox)):
+        if self._typing():
             return
         key = event.keysym.lower()
         actions = {

@@ -1,4 +1,7 @@
 import os, sys, math, json, os, tempfile, time; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os as _os, tempfile as _tempfile
+_os.environ["STRIKEPOSE_SETTINGS"] = _os.path.join(
+    _tempfile.mkdtemp(), "settings.json")
 import tkinter as tk
 import numpy as np
 from openpose3d_editor import *

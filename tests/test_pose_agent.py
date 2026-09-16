@@ -149,11 +149,21 @@ check("it reasons before it answers", len(free_calls) >= 1 and schema_calls,
 check("the reasoning call asks for thinking",
       (free_calls[0].get("chat_template_kwargs") or {}).get("enable_thinking")
       is True, str(free_calls[0].get("chat_template_kwargs")))
+# Qwen3.8's template takes exactly low, medium and xhigh and RAISES on any
+# other name - llama.cpp forwards "high" happily and the template then errors,
+# which reads as a server fault rather than a bad argument.
+check("at an effort level the template will accept",
+      (free_calls[0].get("chat_template_kwargs") or {}).get("reasoning_effort")
+      in pose_agent.Sampling.EFFORTS,
+      str(free_calls[0].get("chat_template_kwargs")))
+check("and a level it will not is snapped to one it will",
+      pose_agent.Sampling(reasoning="high").effort == "xhigh"
+      and pose_agent.Sampling(reasoning="max").effort == "xhigh")
 check("and the extraction call asks for none",
       (schema_calls[0].get("chat_template_kwargs") or {}).get("enable_thinking")
       is False, str(schema_calls[0].get("chat_template_kwargs")))
 check("each half gets its own sampler settings",
-      abs(free_calls[0]["temperature"] - 0.6) < 1e-9
+      abs(free_calls[0]["temperature"] - 1.0) < 1e-9
       and abs(schema_calls[0]["temperature"] - 0.7) < 1e-9
       and abs(schema_calls[0]["top_p"] - 0.8) < 1e-9,
       "thinking %.2f, writing %.2f" % (free_calls[0]["temperature"],

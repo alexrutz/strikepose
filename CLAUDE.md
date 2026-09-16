@@ -171,6 +171,51 @@ command; a stance name is picked at most once and saves it ten guesses, so the
 catalogue can be long. The system prompt lists them grouped rather than as one
 line of 84.
 
+**A single-key shortcut must ask what has focus, and ask by CLASS.** The guard
+was `isinstance(focus_get(), (tk.Entry, tk.Spinbox))`, written when the prompt
+was a one-line Entry. The prompt became a `tk.Text`, the tuple silently
+stopped covering it, and every letter typed into the box also fired a
+shortcut: "b" toggled the preview, "r" reset the pose, "x" randomised it. The
+box was unusable and the suite was green, because nothing typed into a widget
+and then looked at the rest of the app.
+
+`_typing()` checks `winfo_class()` against a name list, which covers ttk's
+widgets too - an isinstance check against the `tk` classes never did - and
+fails toward "this takes typing" rather than toward "fire the shortcut".
+Ctrl+Z and Tab go through it as well; both mean something different inside a
+text box. `tests/test_prompt_ui.py` types a sentence made entirely of shortcut
+letters and asserts nothing else moved.
+
+**Settings live OUTSIDE the checkout.** `settings.py` writes
+`../strikepose-settings.json`, beside the application directory rather than
+in it, because the whole point is surviving `rm -rf strikepose && git clone`.
+Anything inside the repo is by definition what a clean clone throws away, and
+the address of a model server on another machine is the last thing anyone
+wants to type twice. `$STRIKEPOSE_SETTINGS` moves it.
+
+Written atomically through a temporary file and a rename, because a
+half-written settings file is worse than none - it parses as far as the
+truncation and then does not. Written 0600 when it holds an API key. Read
+defensively: a value of the wrong type is dropped and the rest of the file
+kept, because this is the one file a user WILL hand-edit. An unwritable
+parent directory is a reason to carry on without saved settings, never a
+reason to refuse to start.
+
+**The model is Qwen3.8, and its effort levels are a trap.** The chat template
+accepts exactly `low`, `medium` and `xhigh` and RAISES on anything else.
+llama.cpp forwards `high`, `minimal` and `max` quite happily, so the failure
+surfaces as a template error that reads like a server fault rather than a bad
+argument - and `high` was this program's default until somebody said which
+model they were running. `Sampling.EFFORTS` is the list and `Sampling.effort`
+snaps anything else to `xhigh`.
+
+Its sampler numbers are not Qwen3's either: thinking wants temperature **1.0**
+(against Qwen3's 0.6) with top_p 0.95, top_k 20, min_p 0; the non-thinking
+half wants 0.7 / 0.80 and a presence penalty of 1.5. Both sets are published
+on the model card, and the gap between "the Qwen3 numbers" and "the Qwen3.8
+numbers" is large enough to matter. Its context is 262144 native and the
+server needs `--jinja` for the embedded template.
+
 **A schema and reasoning cannot both be on, so they are two calls.** A JSON
 grammar forces the first token to be `{`, so a model constrained from the
 start has committed to an answer before it has considered anything; and
