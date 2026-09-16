@@ -2,4 +2,4 @@
 # Everything below unlocks an optional feature.
 pillow>=10          # PNG export
 numpy>=1.24         # depth maps
-# torch, smplx     # only for the SMPL-X depth source
+# anny             # only to BUILD the body set: tools/make_bodies.py

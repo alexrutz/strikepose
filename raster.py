@@ -375,6 +375,64 @@ def render_depth(groups, width, height, blend=0.0, near=255, far=45,
                          near, far, background)
 
 
+# The triangle z-buffer.
+#
+# The analytic rasteriser above solves oriented primitives - the swept anatomy
+# and the objects - and this solves real geometry: the posed body mesh, its
+# garments, anything skinned to the same armature. Both write the same units
+# into the same buffer, so the nearer surface wins wherever they meet.
+#
+def rasterize_depth(verts, faces, width, height, cull=True):
+    """Z-buffer a triangle mesh given in pixel space (x, y, z all in pixels).
+
+    Returns a float array of nearest depth per pixel, +inf where empty.
+    """
+    zbuf = np.full((height, width), np.inf)
+    v0, v1, v2 = verts[faces[:, 0]], verts[faces[:, 1]], verts[faces[:, 2]]
+    area = ((v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1])
+            - (v2[:, 0] - v0[:, 0]) * (v1[:, 1] - v0[:, 1]))
+    keep = np.abs(area) > 1e-12
+    if cull:
+        # winding and camera handedness both flip the sign of the screen-space
+        # area, so decide empirically: of the two groups, the front-facing one
+        # is the one whose triangles sit nearer the camera on average
+        neg = keep & (area < 0)
+        pos = keep & (area > 0)
+        mid = (v0[:, 2] + v1[:, 2] + v2[:, 2]) / 3.0
+        if neg.any() and pos.any():
+            keep &= neg if mid[neg].mean() < mid[pos].mean() else pos
+    idx = np.nonzero(keep)[0]
+
+    lo_x = np.maximum(np.floor(np.minimum(np.minimum(v0[:, 0], v1[:, 0]),
+                                          v2[:, 0])).astype(int), 0)
+    hi_x = np.minimum(np.ceil(np.maximum(np.maximum(v0[:, 0], v1[:, 0]),
+                                         v2[:, 0])).astype(int) + 1, width)
+    lo_y = np.maximum(np.floor(np.minimum(np.minimum(v0[:, 1], v1[:, 1]),
+                                          v2[:, 1])).astype(int), 0)
+    hi_y = np.minimum(np.ceil(np.maximum(np.maximum(v0[:, 1], v1[:, 1]),
+                                         v2[:, 1])).astype(int) + 1, height)
+
+    for t in idx:
+        x0, x1 = lo_x[t], hi_x[t]
+        y0, y1 = lo_y[t], hi_y[t]
+        if x0 >= x1 or y0 >= y1:
+            continue
+        a, b, c = v0[t], v1[t], v2[t]
+        inv = 1.0 / area[t]
+        ys, xs = np.mgrid[y0:y1, x0:x1]
+        xs = xs + 0.5
+        ys = ys + 0.5
+        w0 = ((b[0] - a[0]) * (ys - a[1]) - (xs - a[0]) * (b[1] - a[1])) * inv
+        w1 = ((xs - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (ys - a[1])) * inv
+        inside = (w0 >= 0.0) & (w1 >= 0.0) & (w0 + w1 <= 1.0)
+        if not inside.any():
+            continue
+        z = a[2] + w1 * (b[2] - a[2]) + w0 * (c[2] - a[2])
+        window = zbuf[y0:y1, x0:x1]
+        np.minimum(window, np.where(inside, z, np.inf), out=window)
+    return zbuf
+
+
 def depth_to_grey(zbuf, near=255, far=45, background=0):
     """Normalise a z-buffer to the ControlNet convention: nearest brightest,
     background black. Shared by every depth source, so a scene rendered from

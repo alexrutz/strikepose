@@ -11,9 +11,8 @@ pose and depth images for ControlNet. The layout:
   to be one 4300-line file is now `vecmath`, `anthro`, `camera`, `skeleton`,
   `posemap`, `anatomy`, `raster`, `exporting`, `scenefile`, `randomize` and
   `ui_app`; this re-exports all of them, so existing callers are untouched.
-- `mesh_backend.py` - loads a rigged GLB and poses its own armature. This is
-  where a depth export comes from; `smplx_backend.py` is the same job for an
-  SMPL-X model file.
+- `mesh_backend.py` - loads an Anny body and poses its own armature. This is
+  where a depth export comes from, and it is the only place one comes from.
 - `bodies_lib.py` / `bodies/` - the nine rigged bodies, one per preset, built
   by `tools/make_bodies.py`.
 - `garments_lib.py` / `garments/` - real CC0 MakeHuman garment meshes fitted
@@ -28,10 +27,9 @@ pose and depth images for ControlNet. The layout:
 ## Run the tests before and after every change
 
 ```
-./tests/run_all.sh                  # 27 checks; needs python3-tk and xvfb
+./tests/run_all.sh                  # 23 checks; needs python3-tk and xvfb
 python3 tests/test_core.py          # pure maths, no display needed
 python3 mesh_backend.py --selftest  # rigged mesh maths, no model files needed
-python3 smplx_backend.py --selftest # SMPL-X maths, no model files needed
 python3 randomize.py --selftest     # the randomizer, no display needed
 python3 tests/check_glb.py bodies/*.glb   # the body set itself, not in run_all
 ```
@@ -342,6 +340,38 @@ at. It stays, on B, because it is the only shading that survives a drag at
 sixty frames a second - but it is the approximation, not the export, and its
 status line says so. The real thing is P.
 
+**One rig, named, and nothing else.** `mesh_backend.ANNY_BONES` maps every
+role onto an exact bone name in the 104-bone MakeHuman skeleton that
+`tools/make_bodies.py` builds every body in `bodies/` on. All nine share one
+bone-name set, so the map is exact and a file that is not that skeleton fails
+`validate_roles` rather than being half-matched into a mangled limb.
+
+What this replaced was a table of name fragments - MakeHuman, Mixamo, Daz -
+matched longest-first against whatever a file carried, plus an SMPL-X backend,
+a hand-loaded `.glb` path, a mesh library and a roles file for rigs whose
+names were not recognised. That is the right shape for a program that takes
+any rig and the wrong one for a program whose depth export is a specific body
+set, and it cost accuracy on the rig that ships: a fragment match cannot fail
+loudly, and every solver decision had to hold for rigs nobody here had ever
+rendered.
+
+**A rig is sized by a unit conversion, because the body set is authored at
+each figure's stature.** `tools/make_bodies.py` bisects the height slider onto
+the preset's stature and all nine land on it exactly, so `pose_rig` without a
+stature multiplies metres by a hundred and stops.
+
+The fallback it replaced - the ratio of the keypoints' shoulder-to-hip span to
+the rig's own - was not merely unnecessary, it was hiding something. The
+self-test's mock rig was 1.60 m while the keypoints posing it described 175 cm,
+and the span scale silently cancelled that 9%. Authored at the same stature as
+its keypoints, the same rig's roll reset agrees with aiming to 3.66 degrees
+where it read 6.56 before. A rig the wrong size for the pose it is given has
+every joint landing where its own bone lengths did not intend, and everything
+measured against a rest reference drifts. `tests/check_glb.py` now builds each
+body's keypoints from that body's own preset for the same reason: the worst
+joint error across the nine went from 10.96 cm to 10.12, the worst on an adult
+from 10.96 to 5.49, and the worst skinning pinch from 14% to 8%.
+
 **The rig is posed, not fitted, and the keypoints are read back off it.** A
 depth map is a picture of a body, and the body is the rig's. Fitting inverted
 that: every bone was aimed at a keypoint, then slid onto it and scaled until it
@@ -642,12 +672,12 @@ solve an asset separately or it will drift from the body.
 - Aiming a bone is a minimal rotation, and there is none onto the direction
   exactly opposite where the bone started: the axis is undefined there and
   ill-conditioned near it. A rig whose arms rest out to the side therefore has
-  an unstable roll when an arm swings round to the far side of the body. No
-  solver of this shape avoids it; the roll reset makes it smaller (46 deg to
-  14 deg on CesiumMan), and `tests/check_glb.py` reports it rather than failing
-  when the jump is within 40 degrees of the reversal. A jump anywhere else is
-  a bug. On a rig with arms down at rest - MakeHuman, MPFB2 - the same sweep
-  steps 4 degrees and never jumps.
+  an unstable roll when an arm swings round to the far side of the body, and
+  no solver of this shape avoids it. Anny rests in an A-pose, so the reversal
+  is somewhere an arm rarely goes and the same sweep steps a few degrees -
+  which is one of the things committing to one rig buys. `tests/check_glb.py`
+  reports a jump rather than failing when it is within 40 degrees of the
+  reversal; a jump anywhere else is a bug.
 - A stack of tapering cylinders seen end-on shows every flat rim it has. A
   ponytail built with stations half a gap apart came out looking like a comb;
   `_cloth_tube` overlaps by 0.78 of the gap, as the body's own sweep does.
@@ -751,16 +781,13 @@ solve an asset separately or it will drift from the body.
   sliders, a Daz morph dial. Reading POSITION alone loads every figure in a
   set as the identical unshaped base mesh, and the giveaway is indirect: the
   rig *is* fitted to the shape, so it no longer matches the mesh it drives.
-  Five MPFB2 bodies came in as one 167 cm mannequin with five skeletons
-  stretching it, and the only symptom was a limb the skinning appeared to
-  pinch by a third. Node weights override the mesh's own, per the spec.
+  A body set came in as one 167 cm mannequin with nine skeletons stretching
+  it, and the only symptom was a limb the skinning appeared to pinch by a
+  third. Node weights override the mesh's own, per the spec.
 - A morph target is usually stored in a *sparse* accessor: no bufferView of
   its own, a base of zeros, and only the elements that moved. Skipping sparse
   reads such a target as no displacement at all, which looks exactly like a
   mesh that has no targets.
-- A model's joint array is longer than its parent array. SMPL-X returns 127
-  joints and 55 parents; the rest are landmarks posed by skinning. Iterate over
-  the parents.
 - Anny and MPFB2 build from the same MakeHuman assets and name the same
   slider `gender`, and they run it the opposite way: Anny's 0.0 is male, MPFB2's
   is female. Getting it backwards is silent - a complete, plausible body set
@@ -772,8 +799,9 @@ solve an asset separately or it will drift from the body.
   and renormalise; the fifth weight on a vertex that has one is worth well
   under a millimetre.
 - MakeHuman's base mesh carries helper geometry (skirt, tights, hair helper,
-  joint cubes) as loose shells. It reads as clothing in a depth map. Delete
-  helpers in MPFB2, or let the loader drop small shells.
+  joint cubes) as loose shells, and it reads as clothing in a depth map. The
+  loader drops small shells for that reason; `tools/make_bodies.py` should not
+  be emitting them in the first place.
 - Nothing moves the pelvis - posing is rotation - so how deep a squat reads is
   the gap between the hip and the feet, and a figure's floor is its own lowest
   foot rather than a plane in the scene. Dropping the thigh 45 degrees opens

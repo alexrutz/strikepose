@@ -33,29 +33,56 @@ import struct
 
 import numpy as np
 
-# Bone roles the retarget drives, and the name fragments seen in the wild.
-# MakeHuman/MPFB2's default rig, Mixamo and Daz all differ; matching is done on
-# lowercased names with separators stripped, longest pattern first.
-BONE_ALIASES = {
-    "hips": ["pelvis", "hips", "hip", "root", "spine05"],
-    "spine": ["spine01", "spine1", "spine", "abdomen"],
-    "chest": ["spine03", "spine2", "chest", "spine02"],
-    "neck": ["neck01", "neck", "neck1"],
-    "head": ["head"],
-    "l_collar": ["clavicle.l", "claviclel", "leftshoulder", "lcollar"],
-    "r_collar": ["clavicle.r", "clavicler", "rightshoulder", "rcollar"],
-    "l_shoulder": ["upperarm01.l", "upperarm.l", "leftarm", "lshldr", "upperarml"],
-    "r_shoulder": ["upperarm01.r", "upperarm.r", "rightarm", "rshldr", "upperarmr"],
-    "l_elbow": ["lowerarm01.l", "lowerarm.l", "leftforearm", "lforearm", "forearml"],
-    "r_elbow": ["lowerarm01.r", "lowerarm.r", "rightforearm", "rforearm", "forearmr"],
-    "l_wrist": ["wrist.l", "lefthand", "lhand", "handl"],
-    "r_wrist": ["wrist.r", "righthand", "rhand", "handr"],
-    "l_hip": ["upperleg01.l", "upperleg.l", "leftupleg", "lthigh", "thighl"],
-    "r_hip": ["upperleg01.r", "upperleg.r", "rightupleg", "rthigh", "thighr"],
-    "l_knee": ["lowerleg01.l", "lowerleg.l", "leftleg", "lshin", "shinl"],
-    "r_knee": ["lowerleg01.r", "lowerleg.r", "rightleg", "rshin", "shinr"],
-    "l_ankle": ["foot.l", "leftfoot", "lfoot", "footl"],
-    "r_ankle": ["foot.r", "rightfoot", "rfoot", "footr"],
+# The Anny rig, by name. Not matched, not guessed: this program poses one
+# armature and it is this one, the 104-bone MakeHuman skeleton every body in
+# `bodies/` is built on by `tools/make_bodies.py`. All nine share one bone-name
+# set, so the map is exact.
+#
+# What this replaced was a table of name fragments - MakeHuman, Mixamo, Daz -
+# matched longest-first against whatever a file happened to carry. That is the
+# right shape for a program that takes any rig, and the wrong one for a program
+# whose depth export is a specific body set: a fragment match cannot fail
+# loudly, it just picks a worse bone, and every solver decision downstream then
+# has to hold for rigs nobody here has ever rendered. Aiming a bone has no
+# minimal rotation onto exactly the reverse of where it started, so a rig whose
+# arms rest out to the side has an unstable roll that Anny's arms-down rest
+# pose simply does not have - and carrying both cost accuracy on the one that
+# ships.
+ANNY_BONES = {
+    "hips": "spine05",
+    "spine": "spine01",
+    "chest": "spine03",
+    "neck": "neck01",
+    "head": "head",
+    "l_collar": "clavicle.L",
+    "r_collar": "clavicle.R",
+    "l_shoulder": "upperarm01.L",
+    "r_shoulder": "upperarm01.R",
+    "l_elbow": "lowerarm01.L",
+    "r_elbow": "lowerarm01.R",
+    "l_wrist": "wrist.L",
+    "r_wrist": "wrist.R",
+    "l_hip": "upperleg01.L",
+    "r_hip": "upperleg01.R",
+    "l_knee": "lowerleg01.L",
+    "r_knee": "lowerleg01.R",
+    "l_ankle": "foot.L",
+    "r_ankle": "foot.R",
+}
+
+# The children that span a hand and a foot, for the frame `limb_frame` turns
+# them in. Named, for the same reason: the metacarpals really do span the palm
+# and the toes really do span the ball of the foot, and reading "whichever two
+# children `argmax` found furthest apart" off an arbitrary rig was a guess that
+# happened to land on these.
+# Anny is authored in metres; the editor works in centimetres.
+CM_PER_METRE = 100.0
+
+ANNY_SPANS = {
+    "l_wrist": ("metacarpal3.L", "metacarpal1.L", "metacarpal4.L"),
+    "r_wrist": ("metacarpal3.R", "metacarpal1.R", "metacarpal4.R"),
+    "l_ankle": ("toe3-1.L", "toe1-1.L", "toe5-1.L"),
+    "r_ankle": ("toe3-1.R", "toe1-1.R", "toe5-1.R"),
 }
 
 # role -> (child role, editor keypoint the child should land on)
@@ -451,34 +478,15 @@ def load_rigged_mesh(path, drop_loose=True):
 # bone mapping
 # ---------------------------------------------------------------------------
 
-def _canonical(name):
-    return "".join(c for c in name.lower() if c.isalnum() or c == ".")
-
-
 def resolve_bones(joint_names, overrides=None):
-    """Map roles onto bone indices by name. Longest alias first, so
-    'upperarm01.l' wins over a bare 'arm'."""
-    canon = [_canonical(n) for n in joint_names]
-    found = {}
-    for role, aliases in BONE_ALIASES.items():
-        if overrides and role in overrides:
-            name = _canonical(overrides[role])
-            if name in canon:
-                found[role] = canon.index(name)
-            continue
-        best = None
-        for alias in sorted(aliases, key=len, reverse=True):
-            for i, name in enumerate(canon):
-                if name == alias:
-                    best = (0, len(alias), i)
-                    break
-                if alias in name and best is None:
-                    best = (1, len(alias), i)
-            if best and best[0] == 0:
-                break
-        if best:
-            found[role] = best[2]
-    return found
+    """Role -> bone index for the Anny rig, by exact name.
+
+    `overrides` is accepted and ignored: it existed so an outside rig could be
+    mapped by hand, and there are no outside rigs.
+    """
+    where = {name: i for i, name in enumerate(joint_names)}
+    return {role: where[bone] for role, bone in ANNY_BONES.items()
+            if bone in where}
 
 
 REQUIRED_ROLES = ["hips", "neck", "l_shoulder", "r_shoulder", "l_elbow",
@@ -486,11 +494,12 @@ REQUIRED_ROLES = ["hips", "neck", "l_shoulder", "r_shoulder", "l_elbow",
 
 
 def validate_roles(mesh, roles):
-    """Check the mapping actually describes this rig.
+    """Check this really is the rig we pose.
 
-    Aiming a joint at a child only works if the child really hangs below it.
-    Without this a mis-matched name silently produces a mangled limb rather
-    than an error, which is far harder to diagnose.
+    Every bone named, and every aimed child actually below its parent. A file
+    that is not the Anny skeleton fails here rather than coming out as a
+    mangled limb, which is far harder to diagnose - and since the whole
+    program is built on one armature, "this is not it" is the useful answer.
     """
     parents = mesh["parents"]
     names = mesh["joint_names"]
@@ -525,43 +534,40 @@ def _limb_direction(kp, role, target):
     return np.asarray(kp(target), float) - np.asarray(kp(start), float)
 
 
-def limb_frame(joint, parents, rest_position, outward):
-    """(along, across, up) for a hand or a foot, from the rig's own children.
+def limb_frame(role, joint_names, rest_position, outward):
+    """(along, across, up) for a hand or a foot, from Anny's own bones.
 
-    Read off the bones rather than matched by name, so it works on any rig.
-    `along` is the direction from the joint to the middle of its children -
-    down the palm, or out along the toes. The other two come from the widest
-    spread among those children once their common direction is taken out: the
-    metacarpals span the palm and the toes span the ball of the foot.
+    `along` runs from the joint out to the middle finger's knuckle or the
+    middle toe; `across` spans the palm from the index knuckle to the little
+    one, or the ball of the foot from the big toe to the little one. Both are
+    named in `ANNY_SPANS`, because on this rig they are known.
 
-    The signs of that spread are arbitrary - it is whichever pair of children
-    `argmax` happened to return, and it comes out mirrored on the two sides -
-    so the frame is CANONICALISED before it is used: `up` is turned to agree
-    with the rig's rest pose, meaning the back of the hand and the top of the
-    foot, and `across` is rebuilt from it. Without that, +30 degrees of turn
-    pointed the left toe inward and the right toe outward, which is a control
-    nobody can use.
+    What this replaced read them off whatever children a joint happened to
+    have - the mean direction for `along`, and for `across` whichever pair
+    `argmax` found furthest apart. That works on any rig and is a guess on all
+    of them: the sign of the spread is arbitrary and comes out mirrored
+    between the sides, which is why +30 degrees of turn pointed the left toe
+    inward and the right toe outward until it was canonicalised. Named bones
+    need no canonicalising in the first place.
 
-    Returns None where the joint has no children to read - a rig whose hand is
-    a single bone with no fingers says nothing about which way its palm faces,
-    and guessing would be worse than leaving it alone.
+    `up` is still turned to agree with the rig's rest pose - the back of the
+    hand, the top of the foot - because `outward` mirrors and the cross
+    product with it does too.
+
+    Returns None where a bone is missing, which is how the self-test's rig -
+    a spine, four limbs and one toe each - declines to have its hands turned.
     """
-    kids = [i for i in range(len(parents)) if parents[i] == joint]
-    if len(kids) < 2:
+    span = ANNY_SPANS.get(role)
+    if span is None:
         return None
-    offsets = np.asarray([rest_position[i] - rest_position[joint]
-                          for i in kids], float)
-    along = unit(offsets.mean(axis=0))
-    if np.linalg.norm(along) < 1e-9:
+    where = {name: i for i, name in enumerate(joint_names)}
+    if not all(bone in where for bone in span):
         return None
-    flat = offsets - np.outer(offsets @ along, along)
-    # the two children furthest apart across the bone, which is the span the
-    # part is widest in: index knuckle to little knuckle, big toe to little
-    span = flat[:, None, :] - flat[None, :, :]
-    a, b = np.unravel_index(np.argmax((span ** 2).sum(axis=2)), span.shape[:2])
-    across = flat[a] - flat[b]
-    if np.linalg.norm(across) < 1e-9:   # children all in a line with the bone
-        across = np.cross(along, np.eye(3)[int(np.argmin(np.abs(along)))])
+    middle, first, last = (rest_position[where[b]] for b in span)
+    along = unit(middle - rest_position[where[ANNY_BONES[role]]])
+    across = last - first
+    if np.linalg.norm(along) < 1e-9 or np.linalg.norm(across) < 1e-9:
+        return None
     up = unit(np.cross(along, unit(across)))
     if np.linalg.norm(up) < 1e-9:
         return None
@@ -570,7 +576,8 @@ def limb_frame(joint, parents, rest_position, outward):
     return along, unit(np.cross(up, along)), up
 
 
-def turn_extremities(local, Q, parents, roles, rest_position, extremities):
+def turn_extremities(local, Q, parents, roles, rest_position, joint_names,
+                     extremities):
     """Rotate each hand and foot by the angles the user set for it.
 
     Applied last, on top of everything the keypoints determined, because it is
@@ -591,7 +598,7 @@ def turn_extremities(local, Q, parents, roles, rest_position, extremities):
         # +X is the figure's LEFT, as everywhere else here.
         outward = (np.array([0.0, 1.0, 0.0]) if part == "foot"
                    else np.array([1.0 if side == "l" else -1.0, 0.0, 0.0]))
-        frame = limb_frame(j, parents, rest_position, outward)
+        frame = limb_frame(role, joint_names, rest_position, outward)
         if frame is None:
             continue
         along, across, up = (unit(Q[j] @ v) for v in frame)
@@ -618,11 +625,11 @@ def turn_extremities(local, Q, parents, roles, rest_position, extremities):
 
 
 def pose_globals(rest_position, parents, roles, points, rest_orient=None,
-                 rest_points=None, extremities=None):
+                 rest_points=None, extremities=None, joint_names=()):
     """Global rotation and position per bone: the rig, posed by the keypoints.
 
-    Same closed-form aim used for SMPL-X, expressed purely in global terms so
-    it does not care what rest orientation the bones were authored with.
+    A closed-form aim expressed purely in global terms, so it does not care
+    what rest orientation the bones were authored with.
 
     Every bone is ROTATED; none is moved or resized. A bone is told which way
     to point, taken from the line between the two keypoints at its ends, and
@@ -874,7 +881,8 @@ def pose_globals(rest_position, parents, roles, points, rest_orient=None,
     # reach: the wrist and the ankle end their chains. Everything above has
     # already been settled by the pose, and these turn what is left.
     if extremities:
-        turn_extremities(local, Q, parents, roles, rest_position, extremities)
+        turn_extremities(local, Q, parents, roles, rest_position,
+                         joint_names, extremities)
         propagate()
         recentre()
 
@@ -944,27 +952,24 @@ def pose_rig(mesh, points_cm, roles=None, rest_points=None, stature=None,
         raise RuntimeError(
             "This rig does not map cleanly:\n  " + "\n  ".join(problems))
     rest = mesh["rest_position"]
-    if stature:
-        height = float(mesh["vertices"][:, 1].max()
-                       - mesh["vertices"][:, 1].min())
-        scale = float(stature) / max(1e-9, height)
-    else:
-        # No stature given - an outside rig, or a bare self-test. Size it on
-        # the torso, which both conventions describe and neither disagrees
-        # about much: hip midpoint up to the neck. One uniform scale, so no
-        # proportion moves. Leaving it at 1.0 would hand back a rig still in
-        # metres beside keypoints in centimetres, and every joint would sit a
-        # metre from the keypoint it was posed by.
-        at = lambda r: rest[roles[r]]
-        kp = lambda n: np.asarray(points_cm[n], float)
-        rig_span = float(np.linalg.norm(
-            at("neck") - 0.5 * (at("l_hip") + at("r_hip"))))
-        kp_span = float(np.linalg.norm(
-            kp("neck") - 0.5 * (kp("l_hip") + kp("r_hip"))))
-        scale = kp_span / max(1e-9, rig_span)
+    # Anny bodies are authored in METRES at the figure's own stature -
+    # `tools/make_bodies.py` bisects the height slider onto it, and all nine
+    # land on it exactly - so sizing the rig is a unit conversion and nothing
+    # more. Passing a stature scales to it anyway, which keeps the one case
+    # that is not a body from the set honest.
+    #
+    # What this replaced, for a rig with no figure behind it, was the ratio of
+    # the keypoints' shoulder-to-hip span to the rig's own. Those two spans do
+    # not measure the same thing - an acromion-to-trochanter against a
+    # glenohumeral-to-femoral-head - and the guess is not needed once there is
+    # only one rig and it is built to size.
+    height = float(mesh["vertices"][:, 1].max() - mesh["vertices"][:, 1].min())
+    scale = (float(stature) / max(1e-9, height) if stature
+             else CM_PER_METRE)
     Q, q = pose_globals(rest * scale, mesh["parents"], roles, points_cm,
                         rest_orient=mesh["rest_global"][:, :3, :3],
-                        rest_points=rest_points, extremities=extremities)
+                        rest_points=rest_points, extremities=extremities,
+                        joint_names=mesh["joint_names"])
     return {"scale": scale,
             "bones": {name: (Q[i], q[i])
                       for i, name in enumerate(mesh["joint_names"])}}
@@ -1078,73 +1083,9 @@ def load_assets(folder):
     return out
 
 
-def pose_mesh(mesh, points_cm, roles=None):
-    """Editor keypoints (centimetres) -> posed vertices in the same space."""
-    roles = roles or mesh.get("roles") or resolve_bones(mesh["joint_names"])
-    missing = [r for r in REQUIRED_ROLES if r not in roles]
-    if missing:
-        raise RuntimeError(
-            "Could not identify these bones by name: %s\\nRun "
-            "'python3 mesh_backend.py --inspect <file>' and supply a mapping."
-            % ", ".join(missing))
-
-    rest = mesh["rest_position"]
-    span_rig = float(np.linalg.norm(rest[roles["l_shoulder"]]
-                                    - rest[roles["l_hip"]]))
-    target = np.asarray(points_cm["l_shoulder"], float) - \
-        np.asarray(points_cm["l_hip"], float)
-    scale = float(np.linalg.norm(target)) / max(1e-9, span_rig)
-
-    scaled = dict(mesh)
-    scaled["rest_position"] = rest * scale
-    scaled["vertices"] = mesh["vertices"] * scale
-    grow = np.eye(4)
-    grow[:3, :3] *= scale
-    scaled["rest_global"] = mesh["rest_global"].copy()
-    scaled["rest_global"][:, :3, 3] *= scale
-    scaled["inverse_bind"] = np.array([np.linalg.inv(g) for g in
-                                       scaled["rest_global"]])
-
-    Q, q = pose_globals(scaled["rest_position"], mesh["parents"], roles,
-                        points_cm)
-    return skin_mesh(scaled, Q, q), mesh["faces"], scale
-
-
 # ---------------------------------------------------------------------------
-# inspection and self-test
+# self-test
 # ---------------------------------------------------------------------------
-
-def inspect(path):
-    mesh = load_rigged_mesh(path)
-    roles = resolve_bones(mesh["joint_names"])
-    print("%s\n  %d vertices, %d faces, %d bones"
-          % (os.path.basename(path), len(mesh["vertices"]),
-             len(mesh["faces"]), len(mesh["joint_names"])))
-    size = mesh["vertices"].max(axis=0) - mesh["vertices"].min(axis=0)
-    print("  bounding box: %.3f x %.3f x %.3f (units as exported)" % tuple(size))
-    print("\n  matched bones:")
-    for role in BONE_ALIASES:
-        if role in roles:
-            print("    %-12s -> %s" % (role, mesh["joint_names"][roles[role]]))
-    problems = validate_roles(mesh, roles)
-    if problems:
-        print("\n  PROBLEMS:")
-        for problem in problems:
-            print("    " + problem)
-    else:
-        print("\n  mapping is consistent with the rig hierarchy")
-    shells = mesh.get("shells")
-    if shells and len(shells) > 1:
-        print("\n  %d separate pieces of geometry: %s vertices" %
-              (len(shells), ", ".join(str(n) for n in shells)))
-        print("    MakeHuman helper geometry (skirt, tights, hair, joint cubes)"
-              "\n    shows up as extra pieces. Delete helpers in MPFB2 before"
-              "\n    exporting, or load with helpers dropped.")
-    print("\n  all bones:")
-    for i, name in enumerate(mesh["joint_names"]):
-        print("    %3d %s" % (i, name))
-    return 0 if not problems else 1
-
 
 def _write_test_glb(path, lift=0.0, morph=False):
     """A small rigged humanoid, so the loader and skinning can be tested with
@@ -1158,37 +1099,63 @@ def _write_test_glb(path, lift=0.0, morph=False):
     sliders. A loader that reads the base mesh alone gets neither.
     """
     bones = [
-        ("pelvis", -1, (0.0, 0.95, 0.0)),
+        ("spine05", -1, (0.0, 0.95, 0.0)),
         ("spine01", 0, (0.0, 1.05, 0.0)),
         ("spine03", 1, (0.0, 1.20, 0.0)),
         ("neck01", 2, (0.0, 1.40, 0.0)),
         ("head", 3, (0.0, 1.52, 0.0)),
+        # Arms hang down and out at about 45 degrees, as Anny's do. They used
+        # to stick straight out sideways, and that is the one rest pose this
+        # solver is worst on: aiming a bone is a minimal rotation and there is
+        # none onto exactly the reverse of where it started, so an arm resting
+        # at the horizon has an unstable roll the moment it swings past the
+        # body. The roll reset then disagreed with aiming by 21 degrees on a
+        # rig nobody here renders. Anny's A-pose has no such reversal.
         ("clavicle.L", 2, (0.04, 1.38, 0.0)),
         ("upperarm01.L", 5, (0.18, 1.38, 0.0)),
-        ("upperarm02.L", 6, (0.31, 1.38, 0.0)),      # twist bone
-        ("lowerarm01.L", 7, (0.45, 1.38, 0.0)),
-        ("lowerarm02.L", 8, (0.58, 1.38, 0.0)),      # twist bone
-        ("wrist.L", 9, (0.70, 1.38, 0.0)),
+        ("upperarm02.L", 6, (0.27, 1.29, 0.0)),      # twist bone
+        ("lowerarm01.L", 7, (0.36, 1.20, 0.0)),
+        ("lowerarm02.L", 8, (0.45, 1.11, 0.0)),      # twist bone
+        ("wrist.L", 9, (0.54, 1.02, 0.0)),
         ("clavicle.R", 2, (-0.04, 1.38, 0.0)),
         ("upperarm01.R", 11, (-0.18, 1.38, 0.0)),
-        ("upperarm02.R", 12, (-0.31, 1.38, 0.0)),
-        ("lowerarm01.R", 13, (-0.45, 1.38, 0.0)),
-        ("lowerarm02.R", 14, (-0.58, 1.38, 0.0)),
-        ("wrist.R", 15, (-0.70, 1.38, 0.0)),
+        ("upperarm02.R", 12, (-0.27, 1.29, 0.0)),
+        ("lowerarm01.R", 13, (-0.36, 1.20, 0.0)),
+        ("lowerarm02.R", 14, (-0.45, 1.11, 0.0)),
+        ("wrist.R", 15, (-0.54, 1.02, 0.0)),
         ("upperleg01.L", 0, (0.09, 0.92, 0.0)),
         ("upperleg02.L", 17, (0.10, 0.71, 0.0)),     # twist bone
         ("lowerleg01.L", 18, (0.10, 0.50, 0.0)),
         ("lowerleg02.L", 19, (0.10, 0.29, 0.0)),
         ("foot.L", 20, (0.10, 0.08, 0.0)),
-        ("toe.L", 21, (0.10, 0.02, 0.14)),          # so a foot has a pitch
+        ("toe3-1.L", 21, (0.10, 0.02, 0.14)),          # so a foot has a pitch
         ("upperleg01.R", 0, (-0.09, 0.92, 0.0)),
         ("upperleg02.R", 23, (-0.10, 0.71, 0.0)),
         ("lowerleg01.R", 24, (-0.10, 0.50, 0.0)),
         ("lowerleg02.R", 25, (-0.10, 0.29, 0.0)),
         ("foot.R", 26, (-0.10, 0.08, 0.0)),
-        ("toe.R", 27, (-0.10, 0.02, 0.14)),
+        ("toe3-1.R", 27, (-0.10, 0.02, 0.14)),
     ]
     verts, joints, weights, faces = [], [], [], []
+    # Authored at 1.75 m, the stature the synthetic keypoints this is posed by
+    # describe. That is the one thing a real body set guarantees -
+    # `tools/make_bodies.py` bisects every body onto its preset's stature, so
+    # all nine land on it exactly - and it is what makes sizing the rig a unit
+    # conversion rather than a guess.
+    #
+    # It matters more than it looks. At 1.60 m against 175 cm keypoints the
+    # roll reset disagreed with aiming by 21 degrees instead of 7. Nothing in
+    # the solver was wrong: a rig 9% too small for the pose it is given has
+    # every joint landing somewhere its own bone lengths did not intend, and
+    # the reset is measuring against a rest reference that no longer lines up.
+    # The old span-based scale happened to cancel it, which is exactly the
+    # kind of accident that hides in a fallback.
+    reach = (max(p[1] for _n, _p, p in bones)
+             - min(p[1] for _n, _p, p in bones))
+    grow = (1.75 - 2 * 0.05) / reach          # the blobs add 0.05 either end
+    bones = [(name, parent, (x * grow, y * grow, z * grow))
+             for name, parent, (x, y, z) in bones]
+
     for b, (_name, parent, pos) in enumerate(bones):
         cx, cy, cz = pos
         base = len(verts)
@@ -1329,9 +1296,13 @@ def _selftest():
           "%d verts, %d faces" % (len(mesh["vertices"]), len(mesh["faces"])))
     check("bones read with hierarchy", len(mesh["joint_names"]) == 29
           and mesh["parents"][0] == -1, "%d bones" % len(mesh["joint_names"]))
+    # The head is the top of the rig, and the body is authored 1.75 m tall
+    # with a 5 cm blob either end, so the head bone sits 5 cm below the crown.
     check("rest positions rebuilt from the node tree",
-          abs(mesh["rest_position"][4][1] - 1.52) < 1e-6,
-          "head at y=%.3f" % mesh["rest_position"][4][1])
+          abs(mesh["rest_position"][4][1]
+              - (mesh["vertices"][:, 1].max() - 0.05)) < 1e-6,
+          "head at y=%.3f, crown at %.3f"
+          % (mesh["rest_position"][4][1], mesh["vertices"][:, 1].max()))
     check("weights normalised",
           abs(mesh["skin_weights"].sum() - len(mesh["vertices"])) < 1e-6)
 
@@ -1375,14 +1346,21 @@ def _selftest():
     check("left/right not confused",
           mesh["joint_names"][roles["l_shoulder"]].endswith(".L")
           and mesh["joint_names"][roles["r_shoulder"]].endswith(".R"))
-    alt = resolve_bones(["Hips", "Spine", "Spine1", "Neck", "Head",
-                         "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand",
-                         "RightShoulder", "RightArm", "RightForeArm",
-                         "RightHand", "LeftUpLeg", "LeftLeg", "LeftFoot",
-                         "RightUpLeg", "RightLeg", "RightFoot"])
-    check("Mixamo rig names also matched",
-          all(r in alt for r in REQUIRED_ROLES),
-          "missing " + str([r for r in REQUIRED_ROLES if r not in alt]))
+    # A rig that is not this one is refused, rather than half-matched into a
+    # mangled limb. The names below are Mixamo's, which the alias table this
+    # replaced used to accept; a program that poses one armature is better off
+    # saying so than posing something it has never rendered.
+    foreign = resolve_bones(["Hips", "Spine", "Spine1", "Neck", "Head",
+                             "LeftShoulder", "LeftArm", "LeftForeArm",
+                             "LeftHand", "RightShoulder", "RightArm",
+                             "RightForeArm", "RightHand", "LeftUpLeg",
+                             "LeftLeg", "LeftFoot", "RightUpLeg", "RightLeg",
+                             "RightFoot"])
+    check("a rig that is not Anny's matches nothing at all", not foreign,
+          str(sorted(foreign)))
+    check("and every role the solver needs is named in ANNY_BONES",
+          all(r in ANNY_BONES for r in REQUIRED_ROLES),
+          str([r for r in REQUIRED_ROLES if r not in ANNY_BONES]))
 
     # pose it from a synthetic editor skeleton, in centimetres
     names = ["nose", "neck", "r_shoulder", "r_elbow", "r_wrist", "l_shoulder",
@@ -1397,9 +1375,10 @@ def _selftest():
            "r_hip": (-10, -52, 0), "l_hip": (10, -52, 0),
            "r_knee": (-11, -95, 0), "l_knee": (11, -95, 0),
            "r_ankle": (-11, -138, -3), "l_ankle": (11, -138, -3)}
-    verts, faces, scale = pose_mesh(mesh, pts)
-    check("rig auto-scaled from metres to the editor's centimetres",
-          80.0 < scale < 120.0, "scale %.1f" % scale)
+    solution = pose_rig(mesh, pts)
+    verts, scale = skin_with(mesh, solution), solution["scale"]
+    check("rig scaled from metres to the editor's centimetres",
+          abs(scale - CM_PER_METRE) < 1e-9, "scale %.1f" % scale)
 
     rest = mesh["rest_position"] * scale
     limbs = (("l_shoulder", "l_elbow"), ("r_shoulder", "r_elbow"),
@@ -1448,7 +1427,7 @@ def _selftest():
 
     # a bone bound 1:1 to its vertices must carry them exactly
     j = roles["l_elbow"]
-    verts, faces, scale = pose_mesh(mesh, pts)
+    verts = skin_with(mesh, pose_rig(mesh, pts))
     bound = np.nonzero(mesh["skin_joints"][:, 0] == j)[0]
     centre = verts[bound].mean(axis=0)
     check("skinned vertices follow their bone",
@@ -1480,28 +1459,26 @@ def _selftest():
     check("and its size follows the segment it belongs to",
           0.3 < grew < 3.0, "scaled %.3f against the rig's own" % grew)
 
-    try:
-        from smplx_backend import rasterize_depth
-        px = verts.copy()
-        px[:, 0] = px[:, 0] * 2 + 200
-        px[:, 1] = -px[:, 1] * 2 + 100
-        z = rasterize_depth(px, faces, 400, 400)
-        check("posed mesh rasterises", np.isfinite(z).any(),
-              "%d pixels covered" % int(np.isfinite(z).sum()))
-    except ImportError:
-        print("SKIP rasteriser check (smplx_backend.py not alongside)")
+    from raster import rasterize_depth
+    px = verts.copy()
+    px[:, 0] = px[:, 0] * 2 + 200
+    px[:, 1] = -px[:, 1] * 2 + 100
+    z = rasterize_depth(px, mesh["faces"], 400, 400)
+    check("posed mesh rasterises", np.isfinite(z).any(),
+          "%d pixels covered" % int(np.isfinite(z).sum()))
 
     # an asset on the same rig must follow the body's own solution
     asset = load_rigged_mesh(path, drop_loose=False)
     solution = pose_rig(mesh, pts)
     moved = skin_with(asset, solution)
-    body_verts, _f, _s = pose_mesh(mesh, pts)
+    body_verts = skin_with(mesh, solution)
     check("asset skinned by the body's solution lands on the body",
           float(np.abs(moved.mean(axis=0) - body_verts.mean(axis=0)).max()) < 30.0,
           "centres %.1f cm apart"
           % float(np.linalg.norm(moved.mean(axis=0) - body_verts.mean(axis=0))))
     partial = dict(asset)
-    keep = [i for i, n in enumerate(asset["joint_names"]) if n in ("head", "neck01")]
+    keep = [i for i, n in enumerate(asset["joint_names"])
+            if n in ("head", "neck01")]
     check("an asset rigged to a subset of bones still poses",
           len(skin_with(partial, solution)) == len(asset["vertices"]))
 
@@ -1552,7 +1529,7 @@ def _selftest():
     # because a kneeling figure's shins point backwards and a lying one's
     # sideways and neither is standing on anything.
     foot_i = mesh["joint_names"].index("foot.L")
-    toe = mesh["rest_position"][mesh["joint_names"].index("toe.L")]
+    toe = mesh["rest_position"][mesh["joint_names"].index("toe3-1.L")]
     rest_toe = unit(toe - mesh["rest_position"][foot_i])
 
     def foot_pitch(where):
@@ -1681,6 +1658,4 @@ if __name__ == "__main__":
     import sys
     if "--selftest" in sys.argv:
         raise SystemExit(_selftest())
-    if "--inspect" in sys.argv:
-        raise SystemExit(inspect(sys.argv[sys.argv.index("--inspect") + 1]))
     print(__doc__)

@@ -21,8 +21,8 @@ Looked for, in order:
 
 One .glb per body preset, named after it with spaces and commas turned into
 underscores - `female_curvy.glb`, `child_about_7.glb`. `tools/make_bodies.py`
-writes exactly that from Anny; an MPFB2 or SMPL-X export of the same names
-works as well, because the loader only needs an armature it can map.
+writes exactly that from Anny, and only from Anny: the depth path names the
+104 bones it poses, so a rig that is not Anny's matches nothing at all.
 """
 
 from __future__ import annotations

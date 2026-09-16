@@ -25,7 +25,8 @@ except ImportError:
 from anatomy import body_parts
 from anthro import build_rest_points
 from posemap import render_openpose, resolution_stickwidth
-from raster import depth_buffer, depth_to_grey, grade_scene, render_depth
+from raster import (depth_buffer, depth_to_grey, grade_scene,
+                    rasterize_depth, render_depth)
 from skeleton import KEYPOINT_NAMES, Skeleton, clean_extremities
 from vecmath import vadd, vcross, vdot, vlen, vmul, vnorm, vsub
 
@@ -258,9 +259,9 @@ def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
                         props=(), ground=True):
     """Depth map from the built-in anatomy, framed to match `pose_image`.
 
-    The always-available depth source: no model files, no torch, numpy and
-    Pillow only. The rigged-mesh and SMPL-X sources live on the editor because
-    they need files the user has to supply.
+    The approximation, and never an export: it draws the viewport and gives
+    `wearables` a profile to cut a garment out of. A depth map that reaches a
+    conditioning set comes from the rigged bodies, through `rigged_depth_image`.
 
     Objects go in as one group each. Groups meet with a hard minimum, so a
     chair occludes the figure on it with an edge instead of melting into it,
@@ -355,7 +356,6 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=(),
     the sort of thing nobody notices until they look for a coat.
     """
     import mesh_backend
-    from smplx_backend import rasterize_depth
     x0, y0, _x1, _y1 = rect
     s = out_w / (rect[2] - rect[0])
     k = camera.zoom * s

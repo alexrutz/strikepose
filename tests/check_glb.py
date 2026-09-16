@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
-"""Put a real .glb through the whole depth pipeline, headless.
+"""Put the body set through the whole depth pipeline, headless.
 
-    python3 tests/check_glb.py body.glb [more.glb ...]
-    python3 tests/check_glb.py body.glb --roles roles.json --out out/glb
-    python3 tests/check_glb.py body.glb --assets hair.glb shoes.glb
+    python3 tests/check_glb.py bodies/*.glb
+    python3 tests/check_glb.py bodies/female_average.glb --assets hair.glb
 
-For each file: load it, map its bones onto the editor's roles, pose it through
-several poses, skin it, render the depth map, and check the things that are
-worth checking on a rig nobody here has seen before. Writes a contact sheet of
-every pose so the result can be looked at as well as asserted.
+For each body: load it, map its bones onto the editor's roles, pose it through
+several poses, skin it, render the depth map, and check what only a real
+export can be checked against. Writes a contact sheet of every pose so the
+result can be looked at as well as asserted.
 
 `mesh_backend.py --selftest` proves the same maths against a rig built in
-memory, which cannot catch what real exports actually do: helper geometry,
-twist bones with their own rest rolls, metres instead of centimetres, bone
-names from whichever tool made the file. This is the script for that, and it
-needs no display.
+memory. That rig is Anny-shaped on purpose - the same bone names, the same
+A-pose, authored at the stature its keypoints describe - but it cannot catch
+what a real export carries: twist bones with their own rest rolls, morph
+targets at non-zero weights, nine skinning influences cut down to four. This
+is the script for that, and it needs no display.
 
-When the names do not match, `--inspect` lists them and a roles file maps them
-by hand:
-
-    {"hips": "Skeleton_torso_joint_1", "l_shoulder": "arm_joint_L_4", ...}
+Not in `run_all.sh`, because it needs `bodies/` on disk. Build it with
+`python3 tools/make_bodies.py bodies/`.
 """
 
 import argparse
-import json
 import math
 import os
 import sys
@@ -40,10 +37,28 @@ from openpose3d_editor import (KEYPOINT_NAMES, Camera, Skeleton,
 INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
 
 
-def posed(name):
+def preset_of(path):
+    """Which body preset a file in `bodies/` is, by its name.
+
+    The rig is posed by keypoints, and those keypoints have to describe THIS
+    body: the child is 122 cm and the average man 175, and a rig is no longer
+    stretched onto whatever keypoints it is handed. Posing the child with an
+    adult's skeleton is a 60 cm disagreement that says nothing about the rig.
+    """
+    import bodies_lib
+    from anthro import BODY_PRESETS, DEFAULT_PRESET
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    for preset in BODY_PRESETS:
+        if bodies_lib.slug(preset).lower() == stem:
+            return preset
+    return DEFAULT_PRESET
+
+
+def posed(name, preset):
     """A skeleton in one of the poses worth putting a rig through."""
     import pose_agent
-    skeleton = Skeleton()
+    from anthro import preset_params
+    skeleton = Skeleton(preset_params(preset))
     commands = {
         "rest": [],
         "t_pose": [{"op": "stance", "name": "t_pose"}],
@@ -62,7 +77,7 @@ def posed(name):
 POSES = ["rest", "t_pose", "arms_forward", "sitting", "reaching", "running"]
 
 
-def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
+def check_file(path, asset_paths=(), out_dir="out/glb",
                width=320, height=440, verbose=False):
     ok = True
 
@@ -83,19 +98,16 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
     if dropped:
         print("  %d vertices dropped as loose helper geometry" % dropped)
 
-    overrides = None
-    if roles_file:
-        with open(roles_file, encoding="utf-8") as fh:
-            overrides = json.load(fh)
-    roles = mesh_backend.resolve_bones(mesh["joint_names"], overrides)
+    roles = mesh_backend.resolve_bones(mesh["joint_names"])
     mesh["roles"] = roles
     problems = mesh_backend.validate_roles(mesh, roles)
-    check("bone names map onto the editor's roles", not problems,
+    check("this is the Anny rig, every bone named", not problems,
           "" if not problems else "%d problem(s): %s" % (len(problems),
                                                          problems[0]))
     if problems:
-        print("    run: python3 mesh_backend.py --inspect %s" % path)
-        print("    then pass a roles file with --roles")
+        print("    this program poses one armature, the 104-bone MakeHuman")
+        print("    skeleton every body in bodies/ is built on. Rebuild with")
+        print("    python3 tools/make_bodies.py bodies/")
         return False
     if verbose:
         for role in sorted(roles):
@@ -117,12 +129,14 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
     worst_pinch = (0.0, None)
     girths = {}                       # rest girth per bone, to compare against
 
+    preset = preset_of(path)
     for name in POSES:
-        skeleton = posed(name)
+        skeleton = posed(name, preset)
         points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
         solution = mesh_backend.pose_rig(
             mesh, points, roles,
-            rest_points=build_rest_points(skeleton.body))
+            rest_points=build_rest_points(skeleton.body),
+            stature=skeleton.body.get("stature"))
         bones = solution["bones"]
 
         # The rig is posed, not fitted: a bone points the way the keypoints
@@ -175,11 +189,15 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
               "%.1f%% of the frame" % (100.0 * (pixels > 0).mean()))
         sheet.append((name, image))
 
-    check("every mapped joint sits near its keypoint", worst_land < 25.0,
+    # 25 cm was the bar when a rig could be posed by keypoints describing a
+    # different body - the child stretched onto an adult's skeleton. Now the
+    # keypoints are built from this body's own preset and the worst across the
+    # nine is 10.1 cm, so the bar is where it can actually catch something.
+    check("every mapped joint sits near its keypoint", worst_land < 13.0,
           "worst %.2f cm - the gap between the two bodies' proportions"
           % worst_land)
     check("the rig is scaled to the figure", worst_scale is not None
-          and abs(worst_scale[1] - worst_scale[2]) < 0.18 * worst_scale[2],
+          and abs(worst_scale[1] - worst_scale[2]) < 0.10 * worst_scale[2],
           "worst: %s spans %.0f cm, the pose %.0f cm" % worst_scale)
     if worst_pinch[1] is None:
         # a rig whose named bones drive no vertices on their own - a mock, or
@@ -197,7 +215,7 @@ def check_file(path, roles_file=None, asset_paths=(), out_dir="out/glb",
         # without its morph targets, so the body no longer matched the rig
         # driving it. A tolerance wide enough to pass a broken export checks
         # nothing.
-        check("no limb is pinched by the skinning", worst_pinch[0] < 0.25,
+        check("no limb is pinched by the skinning", worst_pinch[0] < 0.12,
               "worst: %s lost %.0f%% of its girth"
               % (worst_pinch[1], 100.0 * worst_pinch[0]))
 
@@ -317,8 +335,6 @@ def save_sheet(sheet, path, width, height):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("files", nargs="+", help=".glb bodies to check")
-    parser.add_argument("--roles", help="JSON mapping role -> bone name, for a "
-                                        "rig whose names are not recognised")
     parser.add_argument("--assets", nargs="*", default=[],
                         help="hair, clothing and the like, on the same rig")
     parser.add_argument("--out", default="out/glb")
@@ -328,7 +344,7 @@ def main(argv=None):
                         help="list the bone mapping")
     args = parser.parse_args(argv)
 
-    results = [check_file(path, args.roles, args.assets, args.out,
+    results = [check_file(path, args.assets, args.out,
                           args.width, args.height, args.verbose)
                for path in args.files]
     print("\n" + ("ALL PASS" if all(results) else "FAILURES PRESENT"))

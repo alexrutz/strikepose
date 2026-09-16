@@ -26,105 +26,71 @@ width, which it takes at the iliac crests rather than the femoral heads, and
 the waist, which it takes at the navel while the body profile's waist station
 is the tenth rib. There is no child in ANSUR, so that preset is inherited.
 
-## The depth map is always a rigged body
+## The depth map is always the Anny body
 
-Every export renders real skinned geometry. The set lives in `bodies/`, one
-`.glb` per preset, and is found without being told where - `$STRIKEPOSE_BODIES`
-first, then `./bodies`, then `~/.strikepose/bodies`. Build it once:
+Every export renders real skinned geometry: the Anny body set, one `.glb` per
+preset, posed on its own armature. It lives in `bodies/` and is found without
+being told where - `$STRIKEPOSE_BODIES` first, then `./bodies`, then
+`~/.strikepose/bodies`. Build it once:
 
     pip install anny
     python3 tools/make_bodies.py bodies/
 
-If a body is missing the export **refuses** and says which one and how to build
-it. It does not fall back to the built-in swept anatomy: that sweep is there to
-draw the viewport and to cut garments out of, and an export of it is a picture
-of a mannequin - the trap being that the file still appears and nothing says
-so. Any rigged `.glb` of the right names works: Anny, MPFB2, SMPL-X, a Mixamo
-character.
+If a body is missing the export **refuses** and says which one and how to
+build it. It does not fall back to the built-in swept anatomy: that sweep is
+there to draw the viewport and to cut garments out of, and an export of it is
+a picture of a mannequin - the trap being that the file still appears and
+nothing says so.
 
-## Depth sources
+This program poses **one armature**, the 104-bone MakeHuman skeleton those
+bodies are built on, and it names every bone rather than matching it. A file
+that is not that skeleton is refused rather than half-matched into a mangled
+limb. There is no SMPL-X backend, no roles file and no way to open some other
+rig, and that is deliberate: carrying rigs nobody renders cost accuracy on the
+one that ships. Aiming a bone is a minimal rotation and there is none onto
+exactly the reverse of where it started, so a rig whose arms rest out to the
+side has an unstable roll that Anny's A-pose simply does not have.
 
-Two, and neither is the built-in sweep:
-
-1. **Rigged mesh** — a `.glb` with its armature, which is what `bodies/`
-   holds. The rig is *posed*, not fitted: each bone is rotated to point the
-   way its two keypoints do and nothing is slid or resized, so every segment
-   comes out at the length its author drew it. The eighteen OpenPose keypoints
-   are then read back off the posed rig, so the pose map and the depth map
-   cannot disagree about where the figure is.
-2. **SMPL-X** — needs `pip install smplx torch` and the model files from
-   smpl-x.is.tue.mpg.de.
+The rig is *posed*, not fitted: each bone is rotated to point the way its two
+keypoints do and nothing is slid or resized, so every segment comes out at the
+length its author drew it. Sizing it is a unit conversion, because
+`tools/make_bodies.py` bisects each body onto its preset's stature. The
+eighteen OpenPose keypoints are then read back off the posed rig, so the pose
+map and the depth map cannot disagree about where the figure is.
 
 The built-in swept anatomy draws the viewport and cuts garments out; it is
 never an export. Press **P** to see the armature that will be exported, **B**
 for the sweep.
 
-Inspect a rig before loading it:
+Put the body set through the whole depth pipeline, headless:
 
-    python3 mesh_backend.py --inspect body.glb
+    python3 tests/check_glb.py bodies/*.glb
 
-and put it through the whole depth pipeline, headless, before trusting it:
+### Where the bodies come from
 
-    python3 tests/check_glb.py body.glb
-    python3 tests/check_glb.py body.glb --roles roles.json --assets hair.glb
-
-That loads the file, maps its bones, poses it through six poses, skins it,
-renders each depth map and writes a contact sheet, checking that every mapped
-joint lands on its keypoint, that the rig is scaled to the figure, that no limb
-is pinched by the skinning, and that a limb swung right round does not jump.
-If the bone names are not recognised, `--inspect` lists them and a roles file
-maps them by hand:
-
-    {"hips": "pelvis", "l_shoulder": "upperarm01.L", ...}
-
-### Where to get a body
-
-**Anny** (`naver/anny`) is the quickest, and `tools/make_bodies.py` drives it:
+**Anny** (`naver/anny`), driven by `tools/make_bodies.py`:
 
     pip install anny
     python3 tools/make_bodies.py bodies/
     python3 everyday.py --render out/set --bodies bodies/
 
 It is the MakeHuman base mesh wrapped in a parametric shape space calibrated
-on WHO anthropometry, with MakeHuman's own bone names, so nothing here needs a
-roles file. Apache 2.0 code over CC0 assets. Three things it gives that
-building the same bodies in Blender does not: a pip install instead of Blender
-plus an add-on, so the set is reproducible anywhere; an `age` axis that is
+on WHO anthropometry, carrying MakeHuman's own bone names. Apache 2.0 code
+over CC0 assets, so the bodies and anything made with them can be used
+commercially without conditions. Three things it gives that building the same
+bodies in Blender with MPFB2 does not: a pip install instead of Blender plus
+an add-on, so the set is reproducible anywhere; an `age` axis that is
 anthropometric rather than a slider - 0.0 is a 66 cm newborn, 0.3 a 130 cm
 nine-year-old - with `height` bisected onto an exact stature, so a preset that
-says 162 cm gets a body 162 cm tall; and nine skinning influences per vertex
-against four, which measures out as 8-9% of a limb's girth lost at a hard bend
-against 9-14%.
+says 162 cm gets a body 162 cm tall, which is what makes sizing the rig a unit
+conversion; and nine skinning influences per vertex against four, which
+measures out as 8% of a limb's girth lost at a hard bend against 9-14%.
 
-What it does not give is a better-looking body: it is the same mesh, so the
-depth maps are the same depth maps. What improves is where the numbers come
-from and whether anyone can rebuild them.
-
-**MPFB2** (MakeHuman Plugin for Blender) is the one this is built around: the
-add-on is GPLv3, its bundled assets are CC0, and what you make with it is CC0,
-so it can be used commercially without conditions. The bone names its default
-rig uses - `upperarm01.L`, `lowerleg01.R` - are what the aliases here match
-first, so an export needs no roles file. Blender 4.2+.
-
-**Mixamo** characters are royalty-free for commercial and non-commercial use
-with no attribution, and its bone names (`LeftArm`, `RightForeArm`) are also
-matched. It has had no maintenance since 2015 and its authenticated features
-have been unreliable since mid-2025, so treat it as a source that may not be
-there tomorrow.
-
-**SMPL-X** is non-commercial research only; commercial use needs a sub-licence
-from Meshcapade. That is why it is a separate optional backend here rather than
-the default.
-
-Whatever the source, delete MakeHuman's helper geometry before exporting, or
-the skirt and tights read as clothing in the depth map - the loader drops small
-loose shells, but deleting them in MPFB2 is cleaner.
-
-Shape keys can be left in the export. MPFB2 keeps the whole body - age, weight,
-muscle, proportions - in shape keys, which glTF stores as morph targets with
-default weights, and those are read and applied here. An exporter set to strip
-them writes the unshaped base mesh instead, so every body in a set comes out
-the same 167 cm mannequin while its skeleton still carries the real shape.
+`tools/make_bodies.py` states the one convention that would otherwise be
+silent: Anny's `gender` slider runs the opposite way to MPFB2's, and getting
+it backwards produces a complete, plausible body set with every sex inverted.
+It is pinned as a measurement - at 0.0 the figure has 54 cm shoulders on a
+190 cm frame, at 1.0 44.5 cm on 176.
 
 ## Hair and clothes
 

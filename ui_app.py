@@ -122,7 +122,7 @@ SECTION_TABS = {
     "Objects": "Scene",
     "View": "Scene",
     "Export": "Export",
-    "Depth source": "Export",
+    "Depth": "Export",
     "Keys": "Export",
 }
 
@@ -283,13 +283,8 @@ class EditorApp:
         self.depth_shading = True
         self.length_mode = False
         self.thick_lines = tk.BooleanVar(value=False)
-        self.use_smplx = tk.BooleanVar(value=False)
-        self.smplx_dir = os.environ.get("SMPLX_MODEL_DIR", "")
-        self._smplx_cache = {}
-        self.use_mesh = tk.BooleanVar(value=False)
+
         self.mesh_path = ""
-        self._rigged_mesh = None
-        self.mesh_library = {}          # preset name -> .glb path
         self.assets = {}                # asset name -> .glb path
         self.asset_rows = None
         self._mesh_cache = {}           # path -> loaded mesh
@@ -820,26 +815,20 @@ class EditorApp:
                        ("Load scene\u2026", self.load_json)])
 
         # ---- depth --------------------------------------------------------
-        body = section("Depth source", opened=False)
+        #
+        # No source to choose any more. The depth map is the Anny body from
+        # `bodies/`, posed on its own armature, and there is no second answer
+        # to fall through to - which is the point: a quieter alternative that
+        # still writes a PNG is how a picture of a mannequin gets shipped.
+        body = section("Depth")
         field(body, "Body thickness", self.body_thickness, width=5)
-        tk.Checkbutton(body, text="SMPL-X mesh", variable=self.use_smplx,
-                       command=self.on_smplx_toggle, bg=PANEL, fg=FG, anchor="w",
-                       selectcolor=CONTROL, activebackground=PANEL,
-                       activeforeground=FG, relief="flat", bd=0,
-                       highlightthickness=0, cursor="hand2",
-                       font=("TkDefaultFont", 9)).pack(fill="x", padx=10)
-        tk.Checkbutton(body, text="Rigged mesh (.glb)", variable=self.use_mesh,
-                       command=self.on_mesh_toggle, bg=PANEL, fg=FG, anchor="w",
-                       selectcolor=CONTROL, activebackground=PANEL,
-                       activeforeground=FG, relief="flat", bd=0,
-                       highlightthickness=0, cursor="hand2",
-                       font=("TkDefaultFont", 9)).pack(fill="x", padx=10)
-        buttons(body, [("SMPL-X folder\u2026", self.choose_smplx_dir),
-                       ("Preview (P)", self.preview_depth),
-                       ("Load mesh\u2026", self.choose_mesh),
-                       ("Mesh library\u2026", self.choose_mesh_library),
+        buttons(body, [("Preview (P)", self.preview_depth),
                        ("Assets folder\u2026", self.choose_assets),
                        ("Clear assets", self.clear_assets)], small=True)
+        tk.Label(body, text="Assets are hair or clothing exported on this same "
+                            "armature.", bg=PANEL, fg=MUTED, anchor="w",
+                 justify="left", wraplength=210,
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
         self.asset_rows = tk.Frame(body, bg=PANEL)
         self.asset_rows.pack(fill="x", pady=(4, 0))
 
@@ -2011,136 +2000,7 @@ class EditorApp:
         except ValueError:
             return 1.0
 
-    # -- SMPL-X ------------------------------------------------------------
-    def choose_smplx_dir(self):
-        path = filedialog.askdirectory(
-            title="Folder containing smplx/SMPLX_NEUTRAL.npz")
-        if not path:
-            return
-        self.smplx_dir = path
-        self._smplx_cache.clear()
-        self.status.set(f"SMPL-X model folder: {path}")
-
-    def on_smplx_toggle(self):
-        if self.use_smplx.get() and not self.smplx_body():
-            self.use_smplx.set(False)
-            return
-        if self.use_smplx.get():
-            self.use_mesh.set(False)     # the two mesh sources are exclusive
-            self.status.set("Depth source: SMPL-X mesh.")
-        else:
-            self.status.set("Depth source: built-in anatomy.")
-
-    def smplx_body(self):
-        """Load and cache the model for the current preset's gender."""
-        preset = self.skeleton.body.get("preset", DEFAULT_PRESET)
-        gender = ("female" if preset.startswith("Female")
-                  else "male" if preset.startswith("Male") else "neutral")
-        if gender in self._smplx_cache:
-            return self._smplx_cache[gender]
-        try:
-            import smplx_backend
-            body = smplx_backend.SmplxBody(self.smplx_dir or None, gender=gender)
-        except ImportError as exc:
-            messagebox.showerror(
-                "SMPL-X not installed",
-                f"{exc}\n\npip install smplx torch\n\n"
-                "smplx_backend.py must sit next to this script.")
-            return None
-        except Exception as exc:
-            messagebox.showerror(
-                "SMPL-X model not found",
-                f"{exc}\n\nDownload SMPL-X v1.1 from smpl-x.is.tue.mpg.de and "
-                "arrange it as\n\n  <folder>/smplx/SMPLX_NEUTRAL.npz\n\n"
-                "then pick <folder> with the model folder button.")
-            return None
-        self._smplx_cache[gender] = body
-        return body
-
-    # -- rigged mesh (MPFB2, Mixamo, Daz, VRoid) ---------------------------
-    def choose_mesh(self):
-        path = filedialog.askopenfilename(
-            title="Rigged humanoid exported with its armature",
-            filetypes=[("glTF binary", "*.glb"), ("glTF", "*.gltf")])
-        if not path:
-            return
-        try:
-            import mesh_backend
-            mesh = mesh_backend.load_rigged_mesh(path)
-            roles = mesh_backend.resolve_bones(mesh["joint_names"])
-            problems = mesh_backend.validate_roles(mesh, roles)
-            if problems:
-                messagebox.showerror(
-                    "This rig does not map cleanly",
-                    "\n".join(problems) + "\n\nRun\n  python3 mesh_backend.py "
-                    "--inspect %s\nto see the bone names."
-                    % os.path.basename(path))
-                return
-            mesh["roles"] = roles
-        except ImportError:
-            messagebox.showerror("mesh_backend.py missing",
-                                 "Put mesh_backend.py next to this script.")
-            return
-        except Exception as exc:
-            messagebox.showerror("Could not read the mesh", str(exc))
-            return
-        self._rigged_mesh = mesh
-        self.mesh_path = path
-        self.use_mesh.set(True)
-        self.use_smplx.set(False)
-        dropped = mesh.get("dropped_vertices", 0)
-        note = ""
-        if dropped:
-            note = (", dropped %d vertices of loose geometry (MakeHuman "
-                    "helpers)" % dropped)
-        self.status.set("Loaded %s: %d vertices, %d bones%s."
-                        % (os.path.basename(path), len(mesh["vertices"]),
-                           len(mesh["joint_names"]), note))
-
-    def choose_mesh_library(self):
-        """A folder of .glb bodies, one per body type.
-
-        Files are matched to presets by name, so "female_curvy.glb" or
-        "Female, curvy.glb" both bind to that preset. Each figure then renders
-        with the body matching its own preset.
-        """
-        folder = filedialog.askdirectory(title="Folder of .glb bodies")
-        if not folder:
-            return
-        def key(text):
-            return "".join(ch for ch in text.lower() if ch.isalnum())
-        found, unmatched = {}, []
-        for name in sorted(os.listdir(folder)):
-            if not name.lower().endswith((".glb", ".gltf")):
-                continue
-            stem = key(os.path.splitext(name)[0])
-            match = None
-            for preset in BODY_PRESETS:
-                if key(preset) == stem:
-                    match = preset
-                    break
-                if match is None and (key(preset) in stem or stem in key(preset)):
-                    match = preset
-            if match:
-                found[match] = os.path.join(folder, name)
-            else:
-                unmatched.append(name)
-        if not found:
-            messagebox.showerror(
-                "No bodies matched",
-                "None of the files matched a body type.\n\nName them after the "
-                "presets, for example:\n  male_average.glb\n  female_curvy.glb"
-                "\n\nPresets: " + ", ".join(BODY_PRESETS))
-            return
-        self.mesh_library = found
-        self._mesh_cache.clear()
-        self.use_mesh.set(True)
-        self.use_smplx.set(False)
-        note = (", ignored %d file(s)" % len(unmatched)) if unmatched else ""
-        self.status.set("Mesh library: %d of %d body types matched%s."
-                        % (len(found), len(BODY_PRESETS), note))
-        self.redraw()
-
+    # -- assets ------------------------------------------------------------
     def choose_assets(self):
         """A folder of hair and clothing exported on the same armature."""
         folder = filedialog.askdirectory(title="Folder of hair / clothing .glb")
@@ -2187,7 +2047,6 @@ class EditorApp:
         elif not wanted and name in worn:
             worn.remove(name)
         self.skeleton.assets = worn
-        self.use_mesh.set(True)
         self.status.set("%s: %s" % (name, "on" if wanted else "off"))
 
     def asset_meshes(self, figure):
@@ -2206,76 +2065,15 @@ class EditorApp:
             out.append(self._mesh_cache[key])
         return out
 
-    def mesh_for(self, figure):
-        """The rigged body this figure should use, by its preset."""
-        import mesh_backend
-        path = self.mesh_library.get(figure.body.get("preset"))
-        if path is None:
-            return self._rigged_mesh
-        if path not in self._mesh_cache:
-            mesh = mesh_backend.load_rigged_mesh(path)
-            mesh["roles"] = mesh_backend.resolve_bones(mesh["joint_names"])
-            problems = mesh_backend.validate_roles(mesh, mesh["roles"])
-            if problems:
-                raise RuntimeError("%s: %s" % (os.path.basename(path),
-                                               problems[0]))
-            self._mesh_cache[path] = mesh
-        return self._mesh_cache[path]
-
-    def on_mesh_toggle(self):
-        if self.use_mesh.get():
-            if self._rigged_mesh is None and not self.mesh_library:
-                self.use_mesh.set(False)
-                self.choose_mesh()
-            else:
-                self.use_smplx.set(False)
-                self.status.set("Depth source: rigged mesh.")
-        else:
-            self.status.set("Depth source: built-in anatomy.")
-
-    def mesh_depth_image(self, width, height):
-        jobs = [(figure, self.mesh_for(figure), self.asset_meshes(figure))
-                for figure in self.figures]
-        return rigged_depth_image(jobs, self.camera, self.frame_rect(),
-                                  width, height, self.props,
-                                  ground=self.show_ground.get())
-
-    def smplx_depth_image(self, width, height):
-        import smplx_backend
-        body = self.smplx_body()
-        if body is None:
-            return None
-        x0, y0, x1, y1 = self.frame_rect()
-        s = width / (x1 - x0)
-        k = self.camera.zoom * s
-        right, up, fwd = self.camera.basis()
-        zbuf = np.full((height, width), np.inf)
-        for figure in self.figures:
-            points = {name: figure.points[i]
-                      for i, name in enumerate(KEYPOINT_NAMES)}
-            verts, faces = smplx_backend.mesh_from_skeleton(body, points)
-            rel = verts - np.asarray(self.camera.target, dtype=float)
-            px = np.column_stack([
-                (rel @ np.asarray(right) * self.camera.zoom
-                 + self.camera.width / 2.0 - x0) * s,
-                (-(rel @ np.asarray(up)) * self.camera.zoom
-                 + self.camera.height / 2.0 - y0) * s,
-                rel @ np.asarray(fwd) * k])
-            np.minimum(zbuf, smplx_backend.rasterize_depth(px, faces, width,
-                                                           height), out=zbuf)
-        return smplx_backend.depth_to_image(zbuf)
-
     def depth_image(self, width, height, anatomy=False):
         """Depth map framed identically to the pose export, so the two line up
         pixel for pixel.
 
-        Rigged geometry, from a mesh loaded by hand, from SMPL-X, or from the
-        body set on disk - in that order, because each is a deliberate choice
-        over the one after it. What it will *not* do is fall through to the
-        built-in anatomy: that sweep is a stack of tapering cross-sections, it
-        is there to draw the viewport and to cut garments out of, and an export
-        of it is a picture of a mannequin. Falling back silently is the trap,
-        because the file still appears.
+        The Anny body from `bodies/`, posed on its own armature. There is no
+        other source and no fallback: the built-in sweep is a stack of
+        tapering cross-sections, it is there to draw the viewport and to cut
+        garments out of, and an export of it is a picture of a mannequin.
+        Falling through silently is the trap, because the file still appears.
 
         `anatomy=True` asks for the sweep deliberately; the low-resolution
         viewport preview does.
@@ -2285,13 +2083,6 @@ class EditorApp:
                                        self.frame_rect(), width, height,
                                        self._thickness(), self.props,
                                        ground=self.show_ground.get())
-        if self.use_mesh.get() and (self._rigged_mesh is not None
-                                    or self.mesh_library):
-            return self.mesh_depth_image(width, height)
-        if self.use_smplx.get():
-            image = self.smplx_depth_image(width, height)
-            if image is not None:
-                return image
         import bodies_lib
         jobs = [(figure, mesh, self.asset_meshes(figure))
                 for figure, mesh in zip(self.figures,

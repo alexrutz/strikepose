@@ -17,7 +17,6 @@ run() {
 run "core maths"            "python3 tests/test_core.py"
 run "proportions"           "python3 tests/test_proportions.py"
 run "rigged mesh selftest"  "python3 mesh_backend.py --selftest"
-run "smpl-x selftest"       "python3 smplx_backend.py --selftest"
 run "props selftest"        "python3 props.py --selftest"
 run "wearables selftest"    "python3 wearables.py --selftest"
 run "randomizer selftest"   "python3 randomize.py --selftest"
@@ -28,8 +27,7 @@ run "pose agent wire"       "python3 tests/test_pose_agent.py"
 run "mobile server"         "python3 tests/test_server.py"
 for t in tests/test_editor_basics.py tests/test_depth_export.py \
          tests/test_body_presets.py tests/test_legacy_scenes.py \
-         tests/test_smplx_fallback.py tests/test_multi_person.py \
-         tests/test_rigged_mesh.py tests/test_depth_sources.py \
+         tests/test_multi_person.py \
          tests/test_editing_modes.py tests/test_panel_layout.py \
          tests/test_anchors_hinge.py tests/test_prompt_ui.py \
          tests/test_objects.py; do
