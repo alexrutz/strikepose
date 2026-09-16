@@ -368,9 +368,15 @@ class RigPose:
         floor. A rig joint is inside the body: the ankle bone sits several
         centimetres above the sole, so grounding on joints floats the figure.
         """
-        from mesh_backend import skin_mesh
-        Q, q = self.solve()
-        return float(skin_mesh(self.mesh, Q, q)[:, 1].min())
+        from mesh_backend import skin_with
+        # `skin_with`, which is what the export renders, and not `skin_mesh`
+        # on the raw mesh. The two disagree: `skin_with` scales the rest pose,
+        # the bind matrices and the vertices together, while this held joint
+        # positions already in centimetres against a mesh still in metres. It
+        # came out as a figure standing 2.2 cm into the floor in every depth
+        # map, which the ground plane then cut through at the ankles - and
+        # `stand()` reported 0.000, because it was measuring the other body.
+        return float(skin_with(self.mesh, self.solution())[:, 1].min())
 
     def stand(self, y=0.0):
         """Drop the figure until its lowest point rests at `y`."""
@@ -650,6 +656,64 @@ class Figure:
         here = q[idx] - q[p]
         fwd = np.asarray(fwd, float)
         self.pose.aim(p, idx, q[p] + here - 2.0 * float(here @ fwd) * fwd)
+
+    def grip(self, letter, amount, thumb=True):
+        """Close a hand, 0 open to 1 a fist.
+
+        Every finger bone turned about the joint it hangs from, which is what
+        a hand does and what nothing before the armature could express: the
+        `hand` command turns the WRIST, so a figure told to grip a mug got a
+        flat palm aimed at it. There are fifteen bones in each set of fingers
+        and they were all there the whole time.
+
+        The three knuckles of a finger do not close equally - the middle joint
+        travels furthest - so the curl is weighted down the chain, and the
+        thumb opposes rather than curling with the rest.
+        """
+        amount = max(0.0, min(1.0, float(amount)))
+        side = letter.upper()
+        pose = self.pose
+        for finger in range(2, 6):            # index to little
+            for knuckle, share in enumerate((0.75, 1.0, 0.8)):
+                name = "finger%d-%d.%s" % (finger, knuckle + 1, side)
+                if name not in pose.index:
+                    continue
+                j = pose.bone(name)
+                axis = self._curl_axis(j)
+                pose.rotate(j, axis, math.radians(85.0 * share * amount))
+        if thumb:
+            for knuckle, share in enumerate((0.6, 0.7, 0.7)):
+                name = "finger1-%d.%s" % (knuckle + 1, side)
+                if name in pose.index:
+                    j = pose.bone(name)
+                    pose.rotate(j, self._curl_axis(j),
+                                math.radians(55.0 * share * amount))
+        self.extremities["%s_grip" % letter] = float(amount)
+
+    def _curl_axis(self, j):
+        """The axis a finger bone folds about: across the palm.
+
+        Taken from the hand's own geometry - the bone's direction crossed with
+        the spread of the knuckles - so it is right on both hands without a
+        table, and mirrors itself because the knuckles do.
+        """
+        pose = self.pose
+        q = pose.positions()
+        kids = pose.kids.get(j)
+        along = (q[kids[0]] - q[j]) if kids else (q[j] - q[int(pose.parents[j])])
+        side = self.body_frame()[0]
+        axis = np.cross(unit(along), np.asarray(side, float))
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.asarray(self.body_frame()[1], float)
+        # fold toward the palm, whichever way that is for this hand
+        return unit(axis) * (1.0 if j in self._palm_side() else -1.0)
+
+    def _palm_side(self):
+        """Bone indices of the left hand, so a curl can pick its sign."""
+        if getattr(self, "_left_bones", None) is None:
+            self._left_bones = {j for j, n in enumerate(self.pose.names)
+                                if n.endswith(".L")}
+        return self._left_bones
 
     def set_extremity(self, part, letter, first, second):
         """Set a hand or a foot: `part` is "hand" or "foot", `letter` l or r.

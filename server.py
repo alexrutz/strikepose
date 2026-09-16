@@ -125,7 +125,13 @@ def scene_from_points(payload, aspect):
                     for j in skeleton.pose.subtree(skeleton.pose.bone(bone)):
                         if not seen:
                             skeleton.visible[j] = False
-        skeleton.outfit = wearables.clean(entry.get("outfit") or {})
+        # Only when the entry carries one. `clean({})` fills in every slot
+        # with "none", which reads the same to a person and is NOT the same
+        # object as the empty dict a freshly built figure has - enough to make
+        # an echoed scene's depth map differ from the one it echoed.
+        worn = entry.get("outfit")
+        if worn:
+            skeleton.outfit = wearables.clean(worn)
         figures.append(skeleton)
     if not figures:
         figures = [rigpose.figure_for(DEFAULT_PRESET)]
@@ -156,7 +162,13 @@ def describe(figures, objects, camera, warnings):
     return {
         # the eighteen, read off each posed rig - the phone draws capsules
         # around them and has nothing to do with the 104 bones behind
-        "people": [{"bones": figure.pose.to_dict()["bones"],
+        # The preset travels too. Without it an echoed scene comes back on
+        # whatever body the default is, and since the pose is joint ANGLES it
+        # applies cleanly to the wrong figure - a woman's pose on a man's
+        # skeleton, 15 cm out at the fingertips and correct everywhere a
+        # keypoint would have looked.
+        "people": [{"preset": figure.body.get("preset"),
+                    "bones": figure.pose.to_dict()["bones"],
                     "offset": figure.pose.to_dict()["offset"],
                     "points": [[float(v) for v in figure.keypoints()[n]]
                                for n in KEYPOINT_NAMES],

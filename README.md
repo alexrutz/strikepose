@@ -149,45 +149,72 @@ each other, correctly. Scenes save and load with their objects.
 
 ## Posing from a text prompt with a local LLM
 
-`pose_agent.py` turns a sentence into a pose and exports both conditioning
-images. The editor's own entry point forwards to it, so either works:
+Type a sentence in the **Prompt** box on the Pose tab and press Ctrl+Enter.
+`/` focuses it from anywhere. The call runs on a worker thread, so the window
+stays live while the model thinks - orbit the figure you have, and Stop gives
+up waiting without killing the request.
 
-    python3 openpose3d_editor.py --prompt "a boxer in a guard, three quarters"
-    python3 pose_agent.py --prompt "someone kneeling, looking up" --out out/
+Underneath the box, folded away, are **Model** (host, backend, a model list
+the server is asked for, and an API key box that does not show the key) and
+**Sampling**.
 
-writing `pose.png`, `depth.png` and a `scene.json` the editor can load. There is
-a **Prompt** box at the top of the editor's panel that does the same to the open
-scene; Ctrl+Z puts the old one back.
+### It reasons first, then writes it down
 
-The model is found automatically on the usual ports - Ollama on 11434, LM Studio
-on 1234, llama.cpp's server on 8080, vLLM on 8000 - or name one:
+Two calls, not one, because a JSON grammar and a reasoning model are in direct
+conflict: a grammar forces the first token to be `{`, so a constrained model
+commits before it has thought about anything, and llama.cpp drops grammar
+enforcement altogether when thinking is on. So the first call has no schema
+and thinking at full effort, and the second turns that plan into commands with
+thinking off.
 
-    python3 pose_agent.py --prompt "..." --host http://localhost:11434 \
-                          --model qwen2.5:7b-instruct
+Each half gets its own sampler settings, and the defaults are Qwen3's own
+published numbers rather than a preference: temperature 0.6, top_p 0.95,
+top_k 20, min_p 0 for the thinking half, and 0.7 / 0.8 for the half that only
+writes down what was already decided. `top_k` and `min_p` are sent even to
+OpenAI-compatible servers, which have no such fields in the spec and read them
+anyway.
 
-`--backend ollama` uses Ollama's `/api/chat`, `--backend openai` the
-OpenAI-compatible `/v1/chat/completions` everything else serves; `auto` tries
-both. Generation is constrained to a JSON schema, which is what makes a 7B model
-usable for this. `POSE_AGENT_HOST` and `POSE_AGENT_MODEL` set the defaults. No
-extra Python package is needed: it is urllib and the standard library.
+Reasoning defaults to **high**. Turning it off makes one call instead of two:
+much faster and noticeably worse.
 
-The model does not return coordinates - it returns a short list of commands
-(`point`, `bend`, `turn`, `lean`, `look`, `stance`, `hide`), applied through the
-same rotations a mouse drag uses, so no bone can change length whatever it asks
-for and an invented command is reported and skipped. `--list` prints the whole
-vocabulary. The model places objects with the same kind of command -
-`{"op":"place","shape":"chair","at":"under_hips"}` - anchored against the
-figure rather than in absolute coordinates, so "a chair under the hips" comes
-out as a chair whose seat meets the hips and whose legs still reach the floor,
-whatever the figure's size or pose. `scene.json` carries the plan, so a run can
-be hand-edited and
-replayed again. With no model running the prompt is still read, by keyword,
-and the
-run says so - use `--require-llm` if you would rather it failed.
+### It checks what it built, with a ruler
 
-Name a view in the prompt and you get it. Say nothing and the camera turns
-until the pose reads: a crouch seen head-on is a figure standing up straight,
-because the part that makes it a crouch is the part pointing at the lens.
+The interesting problem with asking a model to check its own work is that it
+runs the same reasoning again and mostly agrees with itself. So the check pass
+does not re-read the commands. It measures the *body* - thirteen thousand
+skinned vertices - and hands back what it found, in centimetres:
+
+    - the figure is 4 cm through the floor.
+    - the figure would fall over backward: its weight is 22 cm outside the
+      ground it is standing on.
+    - the figure's left hand is 6 cm inside its own torso.
+    - the figure has no `hand` or `foot` command, so both palms are at rest.
+    - the figure's right hand is 48 cm in front of the hips, 35 cm above
+      them and 127 cm off the ground.
+
+None of that is something a language model could have worked out, which is why
+it is worth a second round trip where "look again" is not. **Self-check
+passes** on the Sampling section is how many rounds it gets; 2 is the default.
+The first thing it caught was a real bug in the exporter.
+
+### It is shown worked examples
+
+`nearest_examples` puts the catalogue poses closest to your request in front
+of the model as worked answers. They cost nothing to keep current and they are
+known-correct - the suite asserts every one of the 84 applies with no command
+skipped.
+
+### Hands, feet and more than one person
+
+`hand` turns the wrist, `foot` points the toes, and `grip` closes the fingers -
+fifteen bones in each hand, which is why a figure told to hold a mug with
+`hand` alone gets a flat palm aimed at it. 60 of the 84 catalogue poses now set
+at least one, so the examples teach it; before, none did, and every generated
+figure came out with two limp hands.
+
+Ask for two people and you get two: `figures` is a list, and a request that
+describes a handshake, a handover or a conversation is told to use it.
+
 
 ## A catalogue of everyday poses
 

@@ -424,7 +424,104 @@ CATALOGUE = [
 ]
 
 # name -> commands, and the two lookups a caller wants
-POSES = {name: commands
+def hand(side, bend_deg, turn_deg=0.0):
+    """Which way a palm faces. + bend curls it toward its own palm,
+    + turn is pronation."""
+    return {"op": "hand", "side": side, "bend": float(bend_deg),
+            "turn": float(turn_deg)}
+
+
+def grip(side, amount):
+    """Close the fingers, 0 open to 1 a fist. Different from `hand`, which
+    turns the wrist: a figure holding a mug needs both."""
+    return {"op": "grip", "side": side, "amount": float(amount)}
+
+
+def foot(side, lift_deg, turn_deg=0.0):
+    """Where the toes point. + lift raises them, + turn points them outward."""
+    return {"op": "foot", "side": side, "lift": float(lift_deg),
+            "turn": float(turn_deg)}
+
+
+# Hands and feet, on the poses where they are most of what the pose IS.
+#
+# Kept as a table beside the catalogue rather than edited into each entry,
+# because that is what it is: a second pass over poses that were all written
+# before a hand could be posed at all. It also makes the gap visible - a pose
+# not in here is a pose with the rest pose's hands, and that is now a thing
+# you can see rather than a thing you have to notice.
+#
+# They matter more than their size suggests. `pose_agent.nearest_examples`
+# shows the model the catalogue entries nearest to what was asked, so a
+# vocabulary with no examples in it is a vocabulary the model never uses: the
+# `hand` and `foot` ops existed for releases and not one of the 84 poses used
+# them, which is exactly why every generated figure came out with two limp
+# hands on it.
+EXTREMITIES = {
+    "typing_at_desk":       [hand("both", 30, 25)],
+    "writing_at_desk":      [hand("right", 45, 30), hand("left", 20, 25)],
+    "sitting_at_desk":      [hand("both", 25, 25)],
+    "laptop_on_lap":        [hand("both", 30, 25)],
+    "carrying_box":         [hand("both", 55, -20), grip('both', 0.25)],
+    "carrying_bag_one_hand": [hand("right", 70, 0), grip('right', 0.9)],
+    "tying_shoelaces":      [hand("both", 60, 10), grip('both', 0.7)],
+    "drinking_from_a_mug":  [hand("right", 65, -15), grip('right', 0.8)],
+    "reading_a_book":       [hand("both", 25, 35), grip('both', 0.3)],
+    "phone_to_ear":         [hand("right", 55, -30), grip('right', 0.6)],
+    "checking_phone":       [hand("both", 30, 30), grip('both', 0.45)],
+    "texting_walking":      [hand("both", 30, 30), grip('both', 0.45)],
+    "holding_tablet":       [hand("both", 25, 30), grip('both', 0.4)],
+    "hands_on_hips":        [hand("both", 40, -25), grip('both', 0.5)],
+    "waving":               [hand("right", 0, 0)],
+    "waving_both_arms":     [hand("both", 0, 0)],
+    "pushing_a_cart":       [hand("both", 50, 0), grip('both', 0.85)],
+    "pulling_a_suitcase":   [hand("right", 65, 0), grip('right', 0.9)],
+    "stirring_a_pot":       [hand("right", 60, -10), grip('right', 0.85)],
+    "watering_a_plant":     [hand("right", 55, -20), grip('right', 0.8)],
+    "opening_a_door":       [hand("right", 60, -25), grip('right', 0.85)],
+    "holding_tray":         [hand("both", 10, 40)],
+    "sweeping":             [hand("both", 55, 0), grip('both', 0.85)],
+    "clapping":             [hand("both", 10, -40)],
+    "washing_hands":        [hand("both", 35, 25)],
+    "shaking_hands":        [hand("right", 50, -35), grip('right', 0.75)],
+    "handing_something_over": [hand("right", 20, 35)],
+    "hailing_a_taxi":       [hand("right", 0, -20), grip('right', 0.0)],
+    "pointing_ahead":       [hand("right", 0, 10), grip('right', 0.0)],
+    "thinking_chin":        [hand("right", 45, -20)],
+    "scratching_head":      [hand("right", 35, -15)],
+    "covering_face":        [hand("both", 15, 30)],
+    "hands_clasped_front":  [hand("both", 45, 20), grip('both', 0.6)],
+    "hands_in_pockets":     [hand("both", 35, 10)],
+    "taking_selfie":        [hand("right", 50, -25), grip('right', 0.7)],
+    "pressing_a_button":    [hand("right", 10, 20)],
+    "touching_toes":        [hand("both", 20, 20)],
+    "reaching_high_shelf":  [hand("right", 15, 0)],
+    "reaching_across_a_table": [hand("right", 20, 30)],
+    "lifting_from_the_floor": [hand("both", 55, 0), grip('both', 0.85)],
+    "stooping_to_pick_up":  [hand("right", 55, 0), grip('right', 0.8)],
+    "throwing":             [hand("right", 40, 0), grip('right', 0.7)],
+    "catching":             [hand("both", 25, 25)],
+    "meditating":           [hand("both", 5, 45), foot("both", 0, 30)],
+    "press_up":             [hand("both", 0, 40), foot("both", -35, 0)],
+    "lunging":              [foot("right", -30, 0)],
+    "kneeling_on_one_knee": [foot("left", -30, 0)],
+    "kneeling_upright":     [foot("both", -35, 0)],
+    "running":              [foot("right", -20, 0), hand("both", 35, 0)],
+    "walking":              [hand("both", 15, 0)],
+    "stepping_up":          [foot("left", -15, 0)],
+    "climbing_stairs":      [foot("left", -15, 0), grip('both', 0.3)],
+    "jumping":              [foot("both", -40, 0)],
+    "kicking":              [foot("right", -30, 0)],
+    "squatting":            [hand("both", 20, 0)],
+    "sitting_cross_legged": [foot("both", 0, 35), hand("both", 20, 30)],
+    "lying_on_back":        [foot("both", -25, 15), hand("both", 15, 20)],
+    "sleeping_curled":      [hand("both", 35, 25)],
+    "standing_still":       [hand("both", 15, 0)],
+    "weight_on_one_leg":    [hand("both", 15, 0)],
+}
+
+POSES = {name: commands + EXTREMITIES.get(name, [])
+
          for _group, entries in CATALOGUE for name, _about, commands in entries}
 ABOUT = {name: about
          for _group, entries in CATALOGUE for name, about, _cmd in entries}

@@ -15,6 +15,8 @@ import io
 import json
 import math
 import os
+import queue
+import threading
 import random
 import sys
 import time
@@ -124,6 +126,8 @@ def part_sides(target):
 
 SECTION_TABS = {
     "Prompt": "Pose",
+    "Model": "Pose",
+    "Sampling": "Pose",
     "Randomize": "Pose",
     "Hands and feet": "Pose",
     "Edit": "Pose",
@@ -230,22 +234,44 @@ class EditorApp:
         self.prop_label = tk.StringVar(value="No objects. Objects show in the "
                                               "depth map, not the pose map.")
         self.drag_prop = None
-        self.prompt_text = tk.StringVar(value="")
+        # -- the model, and what it is asked to do -----------------------
+        #
+        # Everything the LLM route needs lives here rather than on a command
+        # line, because the one thing you change most often while getting a
+        # pose right - the prompt - should never be more than a keystroke
+        # away, and the things you set once - host, key, sampler - should be
+        # out of the way but not out of reach.
         self.prompt_host = tk.StringVar(
-            value=os.environ.get("POSE_AGENT_HOST", ""))
+            value=os.environ.get("STRIKEPOSE_LLM_HOST", ""))
         self.prompt_model = tk.StringVar(
-            value=os.environ.get("POSE_AGENT_MODEL", ""))
+            value=os.environ.get("STRIKEPOSE_LLM_MODEL", ""))
+        self.prompt_backend = tk.StringVar(value="auto")
+        self.prompt_key = tk.StringVar(
+            value=os.environ.get("STRIKEPOSE_LLM_KEY", ""))
         self.prompt_status = tk.StringVar(
-            value="Describe a pose and press Enter. Needs a local model "
-                  "running; falls back to keywords without one.")
-        # Which hand or foot the two sliders are driving, and their values.
-        self.part_target = tk.StringVar(value=PART_TARGETS[0])
-        self.part_angles = (tk.DoubleVar(value=0.0), tk.DoubleVar(value=0.0))
-        self.part_status = tk.StringVar(
-            value="A hand and a foot are set, not inferred - nothing in a "
-                  "pose says which way a palm faces. Every finger and toe is "
-                  "a bone you can also drag: press K.")
-        self._part_sync = False
+            value="Describe a pose. Ctrl+Enter, or / from anywhere.")
+        self.prompt_busy = False
+        self.prompt_queue = queue.Queue()
+        self.prompt_report = None
+        self.prompt_generation = 0
+        self.model_status = tk.StringVar(value="")
+
+        # Qwen3's own published numbers for THINKING mode. They are not a
+        # guess and they are not the same as its non-thinking numbers, which
+        # the extraction pass uses instead.
+        self.sampling_vars = {
+            "reasoning": tk.StringVar(value="high"),
+            "temperature": tk.DoubleVar(value=0.6),
+            "top_p": tk.DoubleVar(value=0.95),
+            "top_k": tk.IntVar(value=20),
+            "min_p": tk.DoubleVar(value=0.0),
+            "presence_penalty": tk.DoubleVar(value=0.0),
+            "max_tokens": tk.StringVar(value=""),
+            "seed": tk.StringVar(value=""),
+        }
+        self.prompt_passes = tk.IntVar(value=2)
+        self.prompt_timeout = tk.IntVar(value=600)
+
         self.random_parts = {
             part: tk.BooleanVar(value=part in randomize.DEFAULT_PARTS)
             for part in randomize.PART_ORDER}
@@ -255,6 +281,14 @@ class EditorApp:
             value="Edge cases a catalogue never reaches. 1.0 is a "
                   "contortionist. A seed repeats one exactly, so an odd "
                   "figure can be reported.")
+        self.part_target = tk.StringVar(value="Both hands")
+        self.part_angles = (tk.DoubleVar(value=0.0), tk.DoubleVar(value=0.0))
+        self.part_status = tk.StringVar(
+            value="A hand and a foot are set, not inferred - nothing in a "
+                  "pose says which way a palm faces. Every finger and toe is "
+                  "a bone you can also drag: press K.")
+        self._part_sync = False
+        self.grip_amount = tk.DoubleVar(value=0.0)
         self.figures = [rigpose.figure_for(DEFAULT_PRESET)]
         self.active = 0
         self.figure_label = tk.StringVar(value="Person 1 of 1")
@@ -542,7 +576,26 @@ class EditorApp:
                 bd=0, highlightthickness=0, cursor="hand2", pady=1,
                 font=("TkDefaultFont", 9)).pack(fill="x", padx=10)
 
-        def field(parent, label, variable, width=6):
+        def choice(parent, label, variable, options):
+            """A dropdown that matches the panel. A bare tk.OptionMenu paints
+            itself in the platform theme, which on this panel is a white slab
+            with black text."""
+            line = tk.Frame(parent, bg=PANEL)
+            line.pack(fill="x", padx=12, pady=2)
+            tk.Label(line, text=label, bg=PANEL, fg=MUTED, anchor="w",
+                     font=("TkDefaultFont", 9)).pack(side="left")
+            menu = tk.OptionMenu(line, variable, *options)
+            menu.configure(bg=CONTROL, fg=FG, activebackground=ACCENT,
+                           activeforeground=BG, relief="flat", bd=0,
+                           highlightthickness=0, cursor="hand2",
+                           font=("TkDefaultFont", 9), anchor="e", width=10)
+            menu["menu"].configure(bg=CONTROL, fg=FG, relief="flat", bd=0,
+                                   activebackground=ACCENT,
+                                   activeforeground=BG)
+            menu.pack(side="right")
+            return menu
+
+        def field(parent, label, variable, width=6, secret=False):
             line = tk.Frame(parent, bg=PANEL)
             line.pack(fill="x", padx=12, pady=2)
             tk.Label(line, text=label, bg=PANEL, fg=MUTED, anchor="w",
@@ -550,6 +603,7 @@ class EditorApp:
             entry = tk.Entry(line, textvariable=variable, width=width, bg=CONTROL,
                              fg=FG, relief="flat", insertbackground=FG,
                              justify="center", highlightthickness=1,
+                             show="\u2022" if secret else "",
                              highlightbackground=EDGE, highlightcolor=ACCENT)
             entry.pack(side="right", ipady=3)
             entry.bind("<Return>", lambda _e: self.redraw())
@@ -557,19 +611,76 @@ class EditorApp:
             return entry
 
         # ---- prompt -------------------------------------------------------
+        #
+        # The old one was a single-line Entry with the host and the model
+        # boxes stacked underneath it and no way to reach any of it without
+        # the mouse. Three things were wrong with that. A pose is a sentence
+        # and sometimes two, and a one-line box hides everything but the last
+        # forty characters of it. The two settings you change once a month sat
+        # in front of the one you change every ten seconds. And the call ran
+        # on the Tk thread, so the whole window - viewport, menus, the lot -
+        # froze solid for as long as the model took, which on a reasoning
+        # model over a network is a minute or more with no way to tell whether
+        # it had hung.
+        #
+        # So: the prompt is a real text box and it is the first thing on the
+        # tab, `/` focuses it from anywhere, Ctrl+Enter sends it, the work
+        # happens on a thread, and the settings fold away underneath.
         body = section("Prompt")
-        entry = tk.Entry(body, textvariable=self.prompt_text, bg=CONTROL,
-                         fg=FG, relief="flat", insertbackground=FG,
-                         highlightthickness=1, highlightbackground=EDGE,
-                         highlightcolor=ACCENT)
-        entry.pack(fill="x", padx=12, pady=(0, 3), ipady=4)
-        entry.bind("<Return>", lambda _e: self.pose_from_prompt())
-        self.prompt_entry = entry
-        buttons(body, [("Pose it", self.pose_from_prompt)], cols=1)
-        field(body, "Model host", self.prompt_host, width=18)
-        field(body, "Model", self.prompt_model, width=18)
+        box = tk.Text(body, height=4, wrap="word", bg=CONTROL, fg=FG,
+                      relief="flat", insertbackground=FG, highlightthickness=1,
+                      highlightbackground=EDGE, highlightcolor=ACCENT,
+                      font=("TkDefaultFont", 9), padx=6, pady=5)
+        box.pack(fill="x", padx=12, pady=(0, 4))
+        box.bind("<Control-Return>", lambda _e: (self.pose_from_prompt(), "break")[1])
+        box.bind("<Escape>", lambda _e: (self.canvas.focus_set(), "break")[1])
+        self.prompt_box = box
+        self.prompt_button = tk.Button(
+            body, text="Pose it  (Ctrl+Enter)", command=self.pose_from_prompt,
+            bg=CONTROL, fg=FG, activebackground=ACCENT, activeforeground=BG,
+            relief="flat", bd=0, highlightthickness=0, cursor="hand2",
+            font=("TkDefaultFont", 9))
+        self.prompt_button.pack(fill="x", padx=12, pady=(0, 3), ipady=3)
         tk.Label(body, textvariable=self.prompt_status, bg=PANEL, fg=MUTED,
                  anchor="w", justify="left", wraplength=210,
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
+        buttons(body, [("Stop", self.cancel_prompt),
+                       ("What it thought", self.show_reasoning)], cols=2,
+                small=True)
+
+        # ---- the model ----------------------------------------------------
+        body = section("Model", tab="Pose")
+        field(body, "Host", self.prompt_host, width=18)
+        choice(body, "Backend", self.prompt_backend,
+               ("auto", "ollama", "openai"))
+        self.model_menu = choice(body, "Model", self.prompt_model, ("",))
+        field(body, "API key", self.prompt_key, width=18, secret=True)
+        buttons(body, [("Find models", self.refresh_models)], cols=1,
+                small=True)
+        tk.Label(body, textvariable=self.model_status, bg=PANEL, fg=MUTED,
+                 anchor="w", justify="left", wraplength=210,
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
+
+        # ---- sampling ------------------------------------------------------
+        body = section("Sampling", tab="Pose")
+        choice(body, "Reasoning", self.sampling_vars["reasoning"],
+               ("high", "medium", "low", "off"))
+        for label, key in (("Temperature", "temperature"), ("Top-p", "top_p"),
+                           ("Top-k", "top_k"), ("Min-p", "min_p"),
+                           ("Presence penalty", "presence_penalty"),
+                           ("Max tokens", "max_tokens"), ("Seed", "seed")):
+            field(body, label, self.sampling_vars[key], width=7)
+        field(body, "Self-check passes", self.prompt_passes, width=7)
+        field(body, "Timeout (s)", self.prompt_timeout, width=7)
+        buttons(body, [("Qwen thinking defaults", self.reset_sampling)],
+                cols=1, small=True)
+        tk.Label(body,
+                 text="Defaults are Qwen3's published thinking-mode numbers. "
+                      "Reasoning off is much faster and noticeably worse. "
+                      "Each self-check pass measures what was built and asks "
+                      "the model to fix it.",
+                 bg=PANEL, fg=MUTED, anchor="w", justify="left",
+                 wraplength=210,
                  font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(1, 2))
 
         # ---- randomize ----------------------------------------------------
@@ -728,6 +839,19 @@ class EditorApp:
                               command=lambda _v: self.set_part())
             slider.pack(fill="x", padx=12, pady=(0, 2))
             self.part_sliders.append((label, slider))
+        # Grip is its own control because it is its own thing: the two sliders
+        # above turn the WRIST, and a figure holding a mug needs the fingers
+        # closed, which is fifteen more bones and no amount of wrist.
+        tk.Label(body, text="Grip  (fingers, not the wrist)", bg=PANEL,
+                 fg=MUTED, anchor="w",
+                 font=("TkDefaultFont", 8)).pack(fill="x", padx=13, pady=(4, 0))
+        tk.Scale(body, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+                 variable=self.grip_amount, bg=CONTROL, fg=FG, troughcolor=BG,
+                 activebackground=ACCENT, highlightthickness=0, bd=0,
+                 relief="flat", sliderrelief="flat", showvalue=True,
+                 sliderlength=20, width=10, font=("TkDefaultFont", 7),
+                 command=lambda _v: self.set_grip()).pack(fill="x", padx=12,
+                                                          pady=(0, 2))
         buttons(body, [("Straighten", self.reset_part),
                        ("All back", self.reset_all_parts)])
         tk.Label(body, textvariable=self.part_status, bg=PANEL, fg=MUTED,
@@ -1094,25 +1218,240 @@ class EditorApp:
         self.preset_name.set(self.skeleton.body.get("preset", DEFAULT_PRESET))
         self.refresh_outfit()
 
+    # -- the model ---------------------------------------------------------
+
+    def _llm_settings(self):
+        """The sampler, as the boxes on the Sampling section have it."""
+        import pose_agent
+
+        def number(key, cast, default):
+            raw = self.sampling_vars[key].get()
+            try:
+                return cast(raw)
+            except (TypeError, ValueError, tk.TclError):
+                return default
+
+        return pose_agent.Sampling(
+            temperature=number("temperature", float, 0.6),
+            top_p=number("top_p", float, 0.95),
+            top_k=number("top_k", int, 20),
+            min_p=number("min_p", float, 0.0),
+            presence_penalty=number("presence_penalty", float, 0.0),
+            max_tokens=number("max_tokens", int, None) or None,
+            seed=number("seed", int, None),
+            reasoning=self.sampling_vars["reasoning"].get())
+
+    def _connection(self):
+        """Everything needed to reach the model, as plain values.
+
+        Read on the MAIN THREAD and handed to the worker as a dict. A tk
+        variable belongs to the interpreter that made it and reading one from
+        another thread raises "main thread is not in main loop" - which is
+        exactly what the first version of this did, from inside the worker,
+        and it turned every prompt into that error instead of a pose.
+        """
+        try:
+            timeout = max(10, int(self.prompt_timeout.get()))
+        except (tk.TclError, ValueError):
+            timeout = 600
+        return {"backend": self.prompt_backend.get(),
+                "host": self.prompt_host.get().strip() or None,
+                "model": self.prompt_model.get().strip() or None,
+                "api_key": self.prompt_key.get().strip() or None,
+                "timeout": timeout,
+                "sampling": self._llm_settings()}
+
+    @staticmethod
+    def _client(connection):
+        import pose_agent
+        return pose_agent.discover(**connection)
+
+    def reset_sampling(self):
+        for key, value in (("reasoning", "high"), ("temperature", 0.6),
+                           ("top_p", 0.95), ("top_k", 20), ("min_p", 0.0),
+                           ("presence_penalty", 0.0), ("max_tokens", ""),
+                           ("seed", "")):
+            self.sampling_vars[key].set(value)
+        self.prompt_status.set("Back to Qwen3's thinking-mode numbers.")
+
+    def refresh_models(self):
+        """Ask the server what it has loaded, on a thread like everything else
+        that talks to it - a host that is not there takes the full timeout to
+        say so, and that is not a reason to freeze the window."""
+        self.model_status.set("Looking\u2026")
+        connection = self._connection()
+
+        def work():
+            try:
+                client = self._client(connection)
+                if client is None:
+                    raise RuntimeError("no server answered")
+                found = [m for m in client.models() if m]
+                self.prompt_queue.put(("models", found, client.backend))
+            except Exception as exc:                      # any transport error
+                self.prompt_queue.put(("models-failed", str(exc), None))
+
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_prompt()
+
+    def _set_models(self, names, backend):
+        menu = self.model_menu["menu"]
+        menu.delete(0, "end")
+        for name in names:
+            menu.add_command(label=name,
+                             command=lambda n=name: self.prompt_model.set(n))
+        if names and self.prompt_model.get() not in names:
+            self.prompt_model.set(names[0])
+        self.model_status.set("%d model(s) on %s." % (len(names), backend))
+
+    def show_reasoning(self):
+        """What the model thought, in a window of its own.
+
+        Worth having in front of you: when a pose comes out wrong it is almost
+        always wrong in the reasoning rather than in the commands, and the
+        commands alone do not show which.
+        """
+        report = self.prompt_report or {}
+        text = (report.get("thinking") or "").strip()
+        findings = report.get("findings") or []
+        parts = []
+        if text:
+            parts.append("WHAT IT THOUGHT\n\n" + text)
+        for i, round_ in enumerate(findings):
+            parts.append("WHAT WAS MEASURED, PASS %d\n\n%s"
+                         % (i + 1, "\n".join("- " + f for f in round_)))
+        if report.get("plan"):
+            parts.append("THE PLAN\n\n" + json.dumps(report["plan"], indent=1))
+        if not parts:
+            self.prompt_status.set("Nothing to show yet - pose something "
+                                   "with a model first.")
+            return
+        window = tk.Toplevel(self.root)
+        window.title("What the model thought")
+        window.configure(bg=BG)
+        window.geometry("720x620")
+        view = tk.Text(window, wrap="word", bg=CONTROL, fg=FG, relief="flat",
+                       padx=12, pady=10, font=("TkFixedFont", 9))
+        bar = tk.Scrollbar(window, command=view.yview)
+        view.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        view.pack(fill="both", expand=True)
+        view.insert("1.0", ("\n\n" + "-" * 60 + "\n\n").join(parts))
+        view.configure(state="disabled")
+
+    def focus_prompt(self, _event=None):
+        self.show_tab("Pose")
+        self.prompt_box.focus_set()
+        return "break"
+
+    def cancel_prompt(self):
+        """Stop waiting for the model.
+
+        The worker is left to finish and its answer is dropped: urllib has no
+        cancel, and killing a thread mid-socket is worse than ignoring it.
+        What this buys is the window back, which is the thing you actually
+        wanted.
+        """
+        if not self.prompt_busy:
+            self.prompt_status.set("Nothing running.")
+            return
+        self.prompt_busy = False
+        self.prompt_generation = getattr(self, "prompt_generation", 0) + 1
+        self.prompt_button.configure(state="normal",
+                                     text="Pose it  (Ctrl+Enter)")
+        self.prompt_status.set("Stopped waiting. The model may still finish.")
+
     def pose_from_prompt(self):
         """Pose the scene from the prompt box with a local model.
 
-        Replaces the figures rather than editing them: a prompt describes a
-        whole pose, and undo puts the old scene back. The import is deferred
-        because pose_agent imports this module.
+        The call goes on a worker thread and the answer comes back through a
+        queue, because a reasoning model on another machine takes a minute and
+        the window has to stay alive - you want to orbit the figure you have
+        while the next one is being worked out.
+
+        Nothing in the worker touches Tk. It reads the settings once, before
+        starting, and puts a finished scene on the queue; everything that
+        draws happens here, on the main thread.
         """
-        prompt = self.prompt_text.get().strip()
+        if self.prompt_busy:
+            self.prompt_status.set("Still waiting for the model. Stop first.")
+            return
+        prompt = self.prompt_box.get("1.0", "end").strip()
         if not prompt:
             self.prompt_status.set("Type what the figure should be doing.")
+            self.prompt_box.focus_set()
             return
         import pose_agent
-        self.prompt_status.set("Asking the model\u2026")
-        self.root.update_idletasks()
-        llm = pose_agent.discover(host=self.prompt_host.get().strip() or None,
-                                  model=self.prompt_model.get().strip() or None)
         width, height = self._sizes()
-        figures, props, camera, report = pose_agent.pose_from_prompt(
-            prompt, llm, self.camera.width, self.camera.height, width / height)
+        aspect = width / float(height)
+        view_w, view_h = self.camera.width, self.camera.height
+        try:
+            passes = max(1, int(self.prompt_passes.get()))
+        except (tk.TclError, ValueError):
+            passes = 2
+        self.prompt_busy = True
+        self.prompt_generation = getattr(self, "prompt_generation", 0) + 1
+        mine = self.prompt_generation
+        self.prompt_button.configure(state="disabled", text="Thinking\u2026")
+        self.prompt_status.set("Asking the model\u2026")
+        connection = self._connection()          # on THIS thread, not the worker
+
+        def work():
+            try:
+                llm = self._client(connection)
+            except Exception as exc:
+                self.prompt_queue.put(("failed", (mine, str(exc)), None))
+                return
+            try:
+                result = pose_agent.pose_from_prompt(
+                    prompt, llm, view_w, view_h, aspect, passes=passes,
+                    progress=lambda text: self.prompt_queue.put(
+                        ("note", (mine, text), None)))
+                self.prompt_queue.put(("scene", (mine, result), None))
+            except Exception as exc:
+                self.prompt_queue.put(("failed", (mine, str(exc)), None))
+
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_prompt()
+
+    def _poll_prompt(self):
+        """Drain whatever the worker has said, on the main thread."""
+        try:
+            while True:
+                kind, payload, extra = self.prompt_queue.get_nowait()
+                if kind == "models":
+                    self._set_models(payload, extra)
+                elif kind == "models-failed":
+                    self.model_status.set("No answer: %s" % payload[:120])
+                elif kind in ("note", "scene", "failed"):
+                    mine, body = payload
+                    if mine != getattr(self, "prompt_generation", 0):
+                        continue                  # a run that was stopped
+                    if kind == "note":
+                        self.prompt_status.set(body.capitalize() + "\u2026")
+                    elif kind == "failed":
+                        self.prompt_busy = False
+                        self.prompt_button.configure(
+                            state="normal", text="Pose it  (Ctrl+Enter)")
+                        self.prompt_status.set("No pose: %s" % body[:160])
+                    else:
+                        self._apply_prompt_scene(body)
+        except queue.Empty:
+            pass
+        if self.prompt_busy or not self.prompt_queue.empty():
+            self.root.after(80, self._poll_prompt)
+
+    def _apply_prompt_scene(self, result):
+        """Put the scene the worker built on screen.
+
+        Replaces the figures rather than editing them: a prompt describes a
+        whole pose, and undo puts the old scene back.
+        """
+        figures, props, camera, report = result
+        self.prompt_busy = False
+        self.prompt_button.configure(state="normal",
+                                     text="Pose it  (Ctrl+Enter)")
+        self.prompt_report = report
         self.push_undo()
         self.figures = figures
         self.props = props
@@ -1129,7 +1468,9 @@ class EditorApp:
         self.set_active(0, announce=False)
         self.redraw()
         note = "read by %s" % report["source"]
-        if report["warnings"]:
+        if len(self.figures) > 1:
+            note += "; %d people" % len(self.figures)
+        if report.get("warnings"):
             note += "; %d command(s) skipped" % len(report["warnings"])
         self.prompt_status.set(note)
         self.status.set("Posed from prompt (%s). Ctrl+Z puts it back." % note)
@@ -1734,6 +2075,7 @@ class EditorApp:
             "r": self.reset_pose, "m": self.mirror,
             "f": self.flip_selected, "v": self.toggle_visibility,
             "l": self.toggle_length_mode, "p": self.preview_depth,
+            "/": self.focus_prompt,
             "x": self.randomize_pose,
         }
         if event.keysym == "X":          # shift: a fresh seed, same settings
@@ -1797,6 +2139,30 @@ class EditorApp:
             slider.configure(from_=low, to=high)
             self.part_angles[i].set(round(float(angles[i]), 1))
         self.root.after_idle(self._part_settled)
+
+    def set_grip(self):
+        """Close the active target's fingers. Applied from rest each time, so
+        dragging the slider back opens the hand rather than closing it
+        further."""
+        if self._part_sync:
+            return
+        target = self.part_target.get().lower()
+        if "foot" in target or "feet" in target:
+            self.status.set("Grip is for hands. Pick a hand first.")
+            return
+        sides = ("l", "r") if "both" in target else \
+                ("l" if "left" in target else "r",)
+        amount = float(self.grip_amount.get())
+        for side in sides:
+            for finger in range(1, 6):
+                for knuckle in range(1, 4):
+                    name = "finger%d-%d.%s" % (finger, knuckle, side.upper())
+                    if name in self.skeleton.pose.index:
+                        self.skeleton.pose.reset(
+                            self.skeleton.pose.bone(name))
+            self.skeleton.grip(side, amount)
+        self.redraw()
+        self.status.set("Grip %.2f." % amount)
 
     def _part_settled(self):
         self._part_sync = False

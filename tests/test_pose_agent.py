@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "out", "agent")
 
+import everyday
 import pose_agent
 from openpose3d_editor import LIMB_SEQ, vlen, vsub
 
@@ -124,9 +125,94 @@ check("it is asked with response_format json_schema",
 Stub.mode, Stub.seen = "openai_no_schema", []
 llm = pose_agent.LocalLLM(host, "openai", "stub-7b")
 plan = llm.complete("a runner", pose_agent.response_schema())
-kinds = [(r.get("response_format") or {}).get("type") for _p, r in Stub.seen]
+# The reasoning pass has no schema at all, so the first request carries no
+# response_format - that is the point of it. Only the extraction calls are
+# asked about here.
+kinds = [(r.get("response_format") or {}).get("type") for _p, r in Stub.seen
+         if r.get("response_format")]
 check("a refused json_schema falls back rather than failing the run",
       plan == PLAN and kinds[:2] == ["json_schema", "json_object"], str(kinds))
+
+# -- reason first, then write it down --------------------------------------
+#
+# A JSON grammar forces the first token to be `{`, so a model constrained from
+# the start commits before it has considered anything; and llama.cpp drops the
+# grammar entirely when thinking is on (ggml-org #20345), so "both at once" is
+# not on offer either. Two calls: think with no schema, extract with one.
+Stub.mode, Stub.seen = "openai", []
+llm = pose_agent.LocalLLM(host, "openai", "stub-7b")
+llm.complete("a runner", pose_agent.response_schema())
+schema_calls = [r for _p, r in Stub.seen if r.get("response_format")]
+free_calls = [r for _p, r in Stub.seen if not r.get("response_format")]
+check("it reasons before it answers", len(free_calls) >= 1 and schema_calls,
+      "%d free, %d constrained" % (len(free_calls), len(schema_calls)))
+check("the reasoning call asks for thinking",
+      (free_calls[0].get("chat_template_kwargs") or {}).get("enable_thinking")
+      is True, str(free_calls[0].get("chat_template_kwargs")))
+check("and the extraction call asks for none",
+      (schema_calls[0].get("chat_template_kwargs") or {}).get("enable_thinking")
+      is False, str(schema_calls[0].get("chat_template_kwargs")))
+check("each half gets its own sampler settings",
+      abs(free_calls[0]["temperature"] - 0.6) < 1e-9
+      and abs(schema_calls[0]["temperature"] - 0.7) < 1e-9
+      and abs(schema_calls[0]["top_p"] - 0.8) < 1e-9,
+      "thinking %.2f, writing %.2f" % (free_calls[0]["temperature"],
+                                       schema_calls[0]["temperature"]))
+check("top_k and min_p reach the server even though OpenAI has no such field",
+      free_calls[0].get("top_k") == 20 and "min_p" in free_calls[0])
+
+Stub.mode, Stub.seen = "openai", []
+llm = pose_agent.LocalLLM(host, "openai", "stub-7b",
+                          sampling=pose_agent.Sampling(reasoning="off"))
+llm.complete("a runner", pose_agent.response_schema())
+check("reasoning off makes one call, not two", len(Stub.seen) == 1,
+      "%d call(s)" % len(Stub.seen))
+
+# -- the model is shown worked examples ------------------------------------
+asked = pose_agent.with_examples("a person typing at a desk")
+check("the nearest catalogue poses are shown as examples",
+      "typing_at_desk" in asked and '"op": "point"' in asked)
+check("and a request nothing matches is sent as it is",
+      pose_agent.with_examples("zzzqqq") == "zzzqqq")
+
+# -- what was actually built, measured -------------------------------------
+#
+# The point of the check pass: this is NOT the path that built the pose, so a
+# second opinion from it is new information rather than the same reasoning
+# reaching the same place.
+import rigpose
+floater = rigpose.figure_for("Male, average")
+floater.pose.translate((0.0, 40.0, 0.0))
+found = pose_agent.critique([floater])
+check("a figure off the ground is measured as off the ground",
+      any("floating" in f for f in found), str(found[:1]))
+bare = rigpose.figure_for("Male, average")
+check("a figure with no hands set is told so",
+      any("no `hand`" in f for f in pose_agent.critique([bare])))
+posed = rigpose.figure_for("Male, average")
+pose_agent.apply_commands(posed, [{"op": "hand", "side": "both",
+                                   "bend": 30, "turn": 10}], [])
+check("and one with them set is not",
+      not any("no `hand`" in f for f in pose_agent.critique([posed])))
+check("where a hand ended up is reported in centimetres",
+      any("cm" in f and "hand is" in f for f in pose_agent.critique([posed])))
+
+# -- the fingers are a separate thing from the wrist ------------------------
+import numpy as _np
+open_hand = rigpose.figure_for("Male, average")
+tip = _np.asarray(open_hand.points[open_hand.pose.bone("finger3-3.R")])
+pose_agent.apply_commands(open_hand, [{"op": "grip", "side": "right",
+                                       "amount": 1.0}], [])
+closed = _np.asarray(open_hand.points[open_hand.pose.bone("finger3-3.R")])
+check("grip closes the fingers", _np.linalg.norm(closed - tip) > 5.0,
+      "%.1f cm" % _np.linalg.norm(closed - tip))
+check("and it is in the vocabulary the model is given",
+      "grip" in pose_agent.OPS
+      and "grip" in pose_agent.command_schema()["properties"]["op"]["enum"])
+wearing = sum(1 for _n, steps in everyday.POSES.items()
+              if any(c.get("op") in ("hand", "foot", "grip") for c in steps))
+check("and the catalogue actually uses hands and feet",
+      wearing > 40, "%d of %d poses" % (wearing, len(everyday.POSES)))
 
 # -- a model that wraps its answer ----------------------------------------
 Stub.mode = "ollama_chatty"

@@ -171,6 +171,67 @@ command; a stance name is picked at most once and saves it ten guesses, so the
 catalogue can be long. The system prompt lists them grouped rather than as one
 line of 84.
 
+**A schema and reasoning cannot both be on, so they are two calls.** A JSON
+grammar forces the first token to be `{`, so a model constrained from the
+start has committed to an answer before it has considered anything; and
+llama.cpp drops grammar enforcement entirely when thinking is enabled
+(ggml-org/llama.cpp#20345), so asking for both gets unconstrained output that
+only looks constrained. `LocalLLM.complete` therefore reasons first with no
+schema and extracts second with one, and each half gets the sampler settings
+its own half wants.
+
+What stood here was one call at a hard-coded temperature of 0.3 with the
+schema on and nothing switching reasoning on at all - which is close to the
+worst configuration a reasoning model can be given. `Sampling` carries Qwen3's
+own published numbers: 0.6 / 0.95 / top_k 20 / min_p 0 for thinking, and
+0.7 / 0.8 for the pass that only has to write down what was already decided.
+Those are published figures, not preferences.
+
+Every runtime spells all three of these differently - the schema, the
+thinking switch, the sampler - so each request is built in the spelling the
+server is most likely to know and the next one is tried on a refusal. Ollama
+takes `think` at the top level and options in `options`; OpenAI-compatible
+servers take `chat_template_kwargs.enable_thinking`, some also
+`reasoning_effort`, and read `top_k` and `min_p` even though the OpenAI spec
+has neither. Sending several at once is safe because a server ignores a field
+it does not know.
+
+**The check pass measures the RESULT; it never re-reads the reasoning.**
+Asking a model to look over its own commands mostly gets the same commands
+back, because the reasoning that produced them is the reasoning being asked to
+find the fault - it already believes this is a person kneeling. What it cannot
+work out, at any amount of thinking, is that the left hand came out 4 cm
+inside the ribcage or that the figure's weight is 30 cm behind its heels.
+`critique` computes those from thirteen thousand skinned vertices and says
+them in plain sentences, and `pose_from_prompt` hands them back for a second
+pass. That is new information rather than a second opinion, which is the whole
+reason it is worth a round trip.
+
+It measures: a figure through the floor or floating above it; a centre of mass
+outside the ground the figure is actually touching, counting the top of a
+chair as ground; a hand, elbow or knee inside the trunk capsule; a hand inside
+the head; hands and feet left at the rest pose; and where each hand finished,
+in centimetres from the hips. The first thing it found was a real bug -
+`RigPose.lowest` skinned the raw mesh while the export skinned the scaled one,
+so every figure stood 2.2 cm into its own floor and `stand()` reported zero.
+
+**A vocabulary with no examples is a vocabulary the model never uses.** The
+`hand` and `foot` ops existed for releases and not one of the 84 catalogue
+poses used them, so `nearest_examples` - which shows the model the catalogue
+entries closest to what was asked - could never show one, and every generated
+figure came out with two limp hands. `everyday.EXTREMITIES` is a table beside
+the catalogue rather than an edit into each entry, because that is what it is:
+a second pass over poses written before a hand could be posed at all. It also
+makes the gap visible, which is better than having to notice it.
+
+**`hand` turns the wrist; `grip` closes the fingers; they are different
+things.** A figure told to hold a mug with `hand` alone gets a flat palm aimed
+at it. There are fifteen bones in each set of fingers and they were always
+there - `Figure.grip` folds them about the joint each hangs from, weighted
+down the chain because the middle knuckle travels furthest, with the thumb
+opposing rather than curling along. The curl axis comes from the hand's own
+geometry, so it mirrors itself and needs no table.
+
 **A model never writes coordinates.** `pose_agent` hands a local LLM a command
 vocabulary - point a bone, bend a joint, turn the figure - and applies it
 through `move_joint` and `rotate_about_axis`, the same rotations a drag uses.
@@ -574,6 +635,23 @@ torso leans by rotating the spine chain and the legs stay because they hang
 off `root` beside it, so there is no list of what moves and no axis to choose.
 That is the general argument for posing a rig rather than a point cloud: a
 whole class of error stops being a thing you can get wrong.
+
+**The model call runs on a thread, and the worker never touches Tk.** A
+reasoning model on another machine takes a minute, and the whole window used
+to freeze for it - viewport, menus and all - with no way to tell a slow model
+from a hung one. `pose_from_prompt` starts a worker and polls a queue; the
+longest the window blocks is now under a tenth of a second.
+
+The worker reads NOTHING from a tk variable. A tk variable belongs to the
+interpreter that made it and reading one off-thread raises "main thread is not
+in main loop", which is what the first version of this did, from inside the
+worker, turning every prompt into that error instead of a pose.
+`_connection()` snapshots the host, model, key and sampler on the main thread
+and hands the worker a plain dict.
+
+Cancelling drops the answer rather than killing the thread: urllib has no
+cancel, and a generation counter means a stopped run's reply is ignored when
+it arrives. What Stop buys is the window back, which is the thing you wanted.
 
 **The panel is four tabs, and every section names the tab it lives on.**
 Twelve collapsible groups in one column is a list to hunt through even folded,

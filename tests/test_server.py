@@ -9,6 +9,7 @@ last one is what says the phone and the desktop are the same editor.
 
 import io
 import json
+import numpy as np
 import os
 import sys
 import threading
@@ -169,8 +170,30 @@ _, echoed = post("/api/render", {
                 "points": planned["people"][0]["points"],
                 "visible": planned["people"][0]["visible"]}],
     "props": planned["props"], "width": 192, "height": 288})
-check("the same scene sent back renders identically",
-      echoed["pose"] == planned["pose"] and echoed["depth"] == planned["depth"])
+def grey(data_url):
+    import base64, io as _io
+    from PIL import Image
+    raw = base64.b64decode(data_url.split(",", 1)[1])
+    return np.asarray(Image.open(_io.BytesIO(raw)).convert("L"), float)
+
+
+# The pose map has to come back byte-identical - it is drawn from eighteen
+# projected points and there is nothing in it to round.
+check("the same scene sent back gives the same pose map",
+      echoed["pose"] == planned["pose"])
+
+# The depth map is allowed a pixel. `to_dict` rounds each rotation to nine
+# decimals so a scene file is readable, and 1e-9 of a rotation moves a
+# silhouette edge by about 1e-7 cm - which lands on one side or the other of
+# a pixel boundary somewhere along the outline. Measured rather than compared
+# as base64, because "the strings differ" does not say whether the figure
+# moved a micron or an arm.
+before, after = grey(planned["depth"]), grey(echoed["depth"])
+apart = np.abs(before - after)
+check("and a depth map that is the same to within a pixel",
+      (apart > 0).sum() <= 8 and apart.max() <= 1.0,
+      "%d of %d pixels differ, worst %.0f grey level(s)"
+      % (int((apart > 0).sum()), apart.size, apart.max()))
 
 # and a drag, which really is keypoints and nothing else, still lands close
 _, dragged = post("/api/render", {

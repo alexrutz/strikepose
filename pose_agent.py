@@ -256,7 +256,7 @@ ANCHORS = {
 }
 
 OPS = ("stance", "point", "bend", "turn", "lean", "look", "hand", "foot",
-       "hide", "place", "wear", "outfit")
+       "grip", "hide", "place", "wear", "outfit")
 
 SIDES = ("left", "right", "both")
 
@@ -310,6 +310,9 @@ def command_schema():
             "bend": {"type": "number"},
             "lift": {"type": "number"},
             "turn": {"type": "number"},
+            # grip: 0 open, 1 a closed fist. The `hand` op turns the WRIST;
+            # this closes the fingers, which are fifteen bones of their own.
+            "amount": {"type": "number"},
         },
         "required": ["op"],
     }
@@ -356,6 +359,14 @@ Commands, applied in order:
                                               it to face backward
   {"op":"foot","side":SIDE,"lift":N,"turn":N}  + lifts the toes, + points them
                                               outward
+  {"op":"grip","side":SIDE,"amount":N}         close the fingers, 0 open to
+                                              1 a fist. Anything the figure
+                                              HOLDS wants one: a mug 0.8, a
+                                              handle 0.9, a phone 0.5, a
+                                              box carried flat 0.2. `hand`
+                                              turns the wrist; this is the
+                                              fingers, and they are different
+                                              things.
   {"op":"hide","target":JOINT_OR_LIMB}         mark it off-frame or occluded
   {"op":"place","shape":SHAPE,"at":ANCHOR,"distance":CM,"size":N,"degrees":N}
                                               put an object in the scene
@@ -393,8 +404,23 @@ place at:     %(anchors)s
 Shape:
 {"figures":[{"preset":"Male, average","commands":[ ... ]}],"camera":"front"}
 
+MORE THAN ONE PERSON. `figures` is a list. If the request describes two people
+- shaking hands, handing something over, dancing, one watching another - give
+two entries, each with its own preset and its own commands. They are laid out
+70 cm apart along the figure's right, so turn them to face each other with
+`turn` when they should. Do not put two people in one entry, and do not
+collapse a two-person request into one figure.
+
+HANDS AND FEET ARE NOT IMPLIED. Nothing about an arm says which way its palm
+faces, and nothing about a leg says where the toes point. A pose that leaves
+them out gets the rest pose's hands, which read as limp. Almost every real
+pose wants at least one `hand` command: a hand on a desk is bend 35 turn 0, a
+hand gripping something is bend 60, a hand hanging relaxed is bend 15. Feet
+matter when the figure is not standing flat - toes down for a lunge or a
+kneel, lifted for a heel strike.
+
 Start from a stance when one is close, then correct it with a few commands.
-Prefer six to twelve commands. Do not invent op, target or direction names.
+Prefer eight to sixteen commands. Do not invent op, target or direction names.
 """
 
 
@@ -424,6 +450,96 @@ def outfit_listing(width=74):
     return "\n".join(textwrap.wrap(", ".join(OUTFIT_NAMES), width,
                                    initial_indent="    ",
                                    subsequent_indent="    ")).lstrip()
+
+
+PLANNING_PROMPT = """You are working out how a human body is arranged for a
+pose, before anyone writes it down. Think it through properly; you will be
+asked for the commands afterwards, so do not write JSON here.
+
+Everything is named in the FIGURE's own frame, never the viewer's: "left" and
+"right" are the figure's own, "forward" is the way it faces, "up" is above its
+head.
+
+Work through, in this order:
+
+1. HOW MANY PEOPLE. One unless the request describes more. "Two people
+   shaking hands", "a man handing a woman a box", "a couple dancing" are two
+   figures; say what each one is doing separately, and say how they are
+   arranged relative to each other.
+2. WHAT THE WHOLE BODY IS DOING. Standing, sitting, kneeling, lying,
+   crouching, walking, mid-stride. Is it leaning or twisting, and which way?
+3. THE LEGS. Where is the weight? Are the knees straight or bent, and how far?
+4. THE ARMS. For each one separately: where does the upper arm point, is the
+   elbow bent and how far, and where does that put the hand.
+5. THE HANDS AND THE FEET. These are separate from the arms and legs and are
+   NOT implied by them. Which way does each palm face - down on a table, in
+   towards the body, forward? Are the fingers curled round something? Are the
+   toes flat on the ground, or pointed, or lifted? A pose that does not say is
+   a pose with two limp hands in it.
+6. THE HEAD. Where is it looking?
+7. ANYTHING IT NEEDS. A figure that sits needs something under it. A figure
+   at a desk needs a desk. A figure holding something needs the something.
+8. THE CAMERA. Which view shows what makes this pose what it is? A crouch
+   read head-on looks like standing.
+
+Then say, in a few lines, the plan you have arrived at: a list of what each
+part of each figure does. Be specific about angles in degrees where you can.
+"""
+
+
+def planning_prompt():
+    return PLANNING_PROMPT
+
+
+def with_examples(prompt, limit=3):
+    """The request, with the nearest catalogue poses shown as worked answers.
+
+    Few-shot from a corpus that is already there and already correct: the
+    suite asserts that every one of the 84 applies with no command skipped,
+    so an example cannot teach a name that does not exist or a shape that does
+    not work. It is the cheapest accuracy there is - the model stops guessing
+    at the grammar and spends its thinking on the pose.
+    """
+    examples = nearest_examples(prompt, limit)
+    if not examples:
+        return prompt
+    return ("%s\n\nSome poses from the catalogue that are near this one, as "
+            "worked examples of the command style. Do not copy one unless it "
+            "IS the pose asked for; use them for the shape of an answer:\n\n%s"
+            % (prompt, "\n\n".join(examples)))
+
+
+def nearest_examples(prompt, limit=3):
+    """Catalogue poses whose names overlap the request, as worked examples.
+
+    The 84 poses in `everyday.py` are a corpus of correct answers in exactly
+    the vocabulary the model has to write: real command lists that apply with
+    no warnings, because the suite asserts that. Showing the nearest two or
+    three is worth more than any amount of describing the grammar, and it
+    costs nothing to keep current - a pose added to the catalogue becomes an
+    example the same day.
+
+    Matched on words, not embeddings: there is no embedding model here, the
+    names are deliberately plain English, and a miss costs an example rather
+    than a wrong answer.
+    """
+    words = set(re.findall(r"[a-z]+", (prompt or "").lower()))
+    words -= {"a", "an", "the", "of", "in", "on", "at", "to", "is", "with",
+              "person", "man", "woman", "figure", "someone", "who", "and",
+              "his", "her", "their", "its", "he", "she", "they", "it"}
+    scored = []
+    for name, steps in STANCES.items():
+        if not isinstance(steps, list) or not steps:
+            continue
+        theirs = set(name.lower().split("_"))
+        shared = len(words & theirs)
+        if shared:
+            scored.append((shared, -len(steps), name, steps))
+    scored.sort(reverse=True)
+    out = []
+    for _n, _l, name, steps in scored[:limit]:
+        out.append("%s:\n%s" % (name, json.dumps(steps)))
+    return out
 
 
 def system_prompt():
@@ -721,6 +837,20 @@ def apply_command(skeleton, command, props=None, depth=0, defer=None):
         skeleton.pose.rotate(skeleton.pose.bone("neck01"), vnorm(axis), angle)
         return None
 
+    if op == "grip":
+        side = str(command.get("side") or target or "both").lower()
+        if side not in SIDES:
+            return "grip needs a side: left, right or both, not %r" % (side,)
+        try:
+            amount = float(command.get("amount",
+                                       command.get("degrees", 1.0)))
+        except (TypeError, ValueError):
+            return "grip amount should be a number between 0 and 1"
+        for letter in (("r", "l") if side == "both"
+                       else ("l" if side == "left" else "r",)):
+            skeleton.grip(letter, amount)
+        return None
+
     if op in ("hand", "foot"):
         # The one thing eighteen keypoints cannot say. The wrist and the ankle
         # end their chains, so nothing in a pose reports which way a palm
@@ -863,6 +993,162 @@ def apply_commands(skeleton, commands, props=None):
 # ---------------------------------------------------------------------------
 # Building the scene
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Checking the result
+# ---------------------------------------------------------------------------
+#
+# The point of this is that it is NOT the path that built the pose.
+#
+# Asking a model to re-read its own commands and spot the mistake mostly gets
+# the same commands back, because the reasoning that produced them is the
+# reasoning being asked to find the fault - it already believes this is a
+# person kneeling. What it cannot do, at any amount of thinking, is work out
+# that the left hand ended up 4 cm inside the ribcage, or that the figure's
+# weight is 30 cm behind its heels. Those are facts about thirteen thousand
+# skinned vertices, arrived at by arithmetic, and handing them back is new
+# information rather than a second opinion.
+#
+# So this measures, in centimetres, and says what it found in plain words. A
+# revision pass gets the prompt, the plan it wrote, and these.
+
+FLOOR_SLACK = 1.5          # cm a foot may sink before it is worth saying
+TOPPLE_SLACK = 6.0         # cm the centre of mass may sit outside the feet
+
+
+def _torso_axis(figure):
+    """(hip midpoint, neck, radius): the trunk as one capsule."""
+    q = figure.pose.positions()
+    hips = 0.5 * (q[figure.pose.bone("l_hip")] + q[figure.pose.bone("r_hip")])
+    neck = q[figure.pose.index["spine01"]]
+    half = 0.5 * float(np.linalg.norm(q[figure.pose.bone("l_shoulder")]
+                                      - q[figure.pose.bone("r_shoulder")]))
+    return hips, neck, max(8.0, half * 0.85)
+
+
+def _inside_capsule(point, a, b, radius):
+    """How far inside a capsule a point sits, in cm; 0 when outside."""
+    axis = b - a
+    length = float(axis @ axis)
+    t = 0.0 if length < 1e-9 else float(np.clip((point - a) @ axis / length,
+                                                0.0, 1.0))
+    return max(0.0, radius - float(np.linalg.norm(point - (a + axis * t))))
+
+
+def critique(figures, props=()):
+    """What is measurably wrong, or measurably worth knowing, about a scene.
+
+    Plain sentences, because they go back to a language model. Every number in
+    them comes from the posed geometry.
+    """
+    notes = []
+    for index, figure in enumerate(figures):
+        who = ("the figure" if len(figures) == 1
+               else "figure %d" % (index + 1))
+        pose = figure.pose
+        q = pose.positions()
+        surface = figure.surface()
+        at = lambda name: q[pose.bone(name)]
+
+        # -- through the floor, or floating above it ---------------------
+        low = float(surface[:, 1].min())
+        if low < -FLOOR_SLACK:
+            notes.append("%s is %.0f cm through the floor." % (who, -low))
+        elif low > FLOOR_SLACK:
+            notes.append("%s is floating %.0f cm above the floor." % (who, low))
+
+        # -- would it stand up? ------------------------------------------
+        #
+        # Centre of mass against the ground it is actually touching. A pose
+        # whose weight is outside its own feet is a person falling over, which
+        # is the single most common thing a plausible-looking command list
+        # gets wrong - and the one thing no amount of reasoning about limbs
+        # will notice.
+        # What is holding it up: the floor, and the top of anything it is
+        # sitting or standing on. A chair counts - a seated figure's weight is
+        # behind its feet by design, and without the seat every `sitting` pose
+        # reads as a person toppling backwards.
+        touching = [surface[:, 1] < low + 5.0]
+        for prop in props or ():
+            plo, phi = props_module.bounds(prop)
+            touching.append(
+                (surface[:, 1] < phi[1] + 5.0) & (surface[:, 1] > phi[1] - 5.0)
+                & (surface[:, 0] > plo[0]) & (surface[:, 0] < phi[0])
+                & (surface[:, 2] > plo[2]) & (surface[:, 2] < phi[2]))
+        held = touching[0]
+        for extra in touching[1:]:
+            held = held | extra
+        contact = surface[held]
+        if len(contact) > 8:
+            com = surface.mean(axis=0)
+            lo = contact.min(axis=0)
+            hi = contact.max(axis=0)
+            over_x = max(lo[0] - com[0], com[0] - hi[0])
+            over_z = max(lo[2] - com[2], com[2] - hi[2])
+            out = max(over_x, over_z)
+            if out > TOPPLE_SLACK:
+                way = ("forward" if com[2] > hi[2] else
+                       "backward" if com[2] < lo[2] else
+                       "sideways")
+                notes.append(
+                    "%s would fall over %s: its weight is %.0f cm outside "
+                    "the ground it is standing on. Something has to take the "
+                    "weight - a hand down, a wider stance, or an object."
+                    % (who, way, out))
+
+        # -- a limb inside the body --------------------------------------
+        a, b, radius = _torso_axis(figure)
+        for part, bone in (("left hand", "wrist.L"), ("right hand", "wrist.R"),
+                           ("left elbow", "lowerarm01.L"),
+                           ("right elbow", "lowerarm01.R"),
+                           ("left knee", "lowerleg01.L"),
+                           ("right knee", "lowerleg01.R")):
+            depth = _inside_capsule(at(bone), a, b, radius)
+            if depth > 3.0:
+                notes.append("%s's %s is %.0f cm inside its own torso."
+                             % (who, part, depth))
+        head = at("head")
+        for part, bone in (("left hand", "wrist.L"), ("right hand", "wrist.R")):
+            gap = float(np.linalg.norm(at(bone) - head))
+            if gap < 9.0:
+                notes.append("%s's %s is inside its own head." % (who, part))
+
+        # -- hands and feet left at rest ---------------------------------
+        if not figure.extremities:
+            notes.append(
+                "%s has no `hand` or `foot` command, so both palms and both "
+                "feet are at the rest pose. Say which way they face." % who)
+
+        # -- where things actually ended up ------------------------------
+        #
+        # Not a fault - a reading. A model that asked for a hand on a desk can
+        # only tell whether it got one by being told where the hand is.
+        side, up, facing = figure.body_frame()
+        hips = 0.5 * (at("l_hip") + at("r_hip"))
+        for part, bone in (("left hand", "wrist.L"), ("right hand", "wrist.R")):
+            rel = at(bone) - hips
+            notes.append(
+                "%s's %s is %.0f cm %s, %.0f cm %s and %.0f cm off the "
+                "ground." % (who, part,
+                             abs(rel @ np.asarray(facing)),
+                             "in front of the hips" if rel @ np.asarray(facing) >= 0
+                             else "behind the hips",
+                             abs(rel @ np.asarray(up)),
+                             "above the hips" if rel @ np.asarray(up) >= 0
+                             else "below the hips",
+                             at(bone)[1]))
+        notes.append("%s's head is %.0f cm off the ground; it stands %.0f cm "
+                     "tall in this pose." % (who, at("head")[1],
+                                             float(surface[:, 1].max() - low)))
+
+    for prop in props or ():
+        low, high = props_module.bounds(prop)
+        notes.append("there is a %s in the scene, %.0f cm wide and %.0f cm "
+                     "tall, its top at %.0f cm."
+                     % (prop["shape"], high[0] - low[0], high[1] - low[1],
+                        high[1]))
+    return notes
+
 
 def build_scene(plan, view_w=900, view_h=700, aspect=512.0 / 768.0):
     """A plan -> (figures, props, camera, warnings), ready to render."""
@@ -1380,22 +1666,105 @@ DEFAULT_ENDPOINTS = [
 ]
 
 
+class Sampling:
+    """What the model is asked to do with its probabilities, in one place.
+
+    The defaults are Qwen3's own published recommendation for THINKING mode -
+    temperature 0.6, top_p 0.95, top_k 20, min_p 0 - rather than something
+    picked here. What they replaced was a hard-coded temperature of 0.3 and
+    nothing else, which is a poor setting for any reasoning model and has no
+    answer at all for a runtime that wants top_k.
+
+    `reasoning` is "high", "medium", "low" or "off". Ollama takes it as the
+    top-level `think` field, which accepts a bool or one of those words;
+    everything OpenAI-compatible takes `chat_template_kwargs.enable_thinking`,
+    and some servers also read `reasoning_effort`. All three are sent, because
+    a server that does not know a field ignores it, and a server that does is
+    the one we wanted to reach.
+    """
+
+    FIELDS = ("temperature", "top_p", "top_k", "min_p", "presence_penalty",
+              "repeat_penalty", "max_tokens", "seed", "reasoning")
+
+    def __init__(self, temperature=0.6, top_p=0.95, top_k=20, min_p=0.0,
+                 presence_penalty=0.0, repeat_penalty=1.0, max_tokens=None,
+                 seed=None, reasoning="high"):
+        self.temperature = float(temperature)
+        self.top_p = float(top_p)
+        self.top_k = int(top_k)
+        self.min_p = float(min_p)
+        self.presence_penalty = float(presence_penalty)
+        self.repeat_penalty = float(repeat_penalty)
+        self.max_tokens = max_tokens
+        self.seed = seed
+        self.reasoning = str(reasoning).lower()
+
+    def replace(self, **changes):
+        out = Sampling(**{f: getattr(self, f) for f in self.FIELDS})
+        for k, v in changes.items():
+            setattr(out, k, v)
+        return out
+
+    def as_dict(self):
+        return {f: getattr(self, f) for f in self.FIELDS}
+
+    @property
+    def thinking(self):
+        return self.reasoning not in ("off", "none", "false", "0", "")
+
+    def ollama_options(self):
+        out = {"temperature": self.temperature, "top_p": self.top_p,
+               "top_k": self.top_k, "min_p": self.min_p,
+               "repeat_penalty": self.repeat_penalty}
+        if self.presence_penalty:
+            out["presence_penalty"] = self.presence_penalty
+        if self.max_tokens:
+            out["num_predict"] = int(self.max_tokens)
+        if self.seed is not None:
+            out["seed"] = int(self.seed)
+        return out
+
+    def openai_body(self):
+        out = {"temperature": self.temperature, "top_p": self.top_p}
+        if self.presence_penalty:
+            out["presence_penalty"] = self.presence_penalty
+        if self.max_tokens:
+            out["max_tokens"] = int(self.max_tokens)
+        if self.seed is not None:
+            out["seed"] = int(self.seed)
+        # top_k and min_p are not in the OpenAI spec; llama.cpp, vLLM and
+        # LM Studio all read them anyway, and a server that does not simply
+        # ignores them.
+        out["top_k"] = self.top_k
+        out["min_p"] = self.min_p
+        return out
+
+
+# Qwen publishes one set of numbers for thinking and a different set for
+# answering without it, and the gap is not small - temperature 0.6 against
+# 0.7, top_p 0.95 against 0.8. The extraction pass below runs with thinking
+# off, so it gets the second set rather than the first.
+NON_THINKING = {"temperature": 0.7, "top_p": 0.8}
+
+
 class LocalLLM:
-    """A local chat model over HTTP, constrained to the pose schema.
+    """A local chat model over HTTP.
 
     `backend` is "ollama" for Ollama's own /api/chat, or "openai" for the
     OpenAI-compatible /v1/chat/completions that LM Studio, llama.cpp's server
-    and vLLM all serve. Nothing here needs an API key; a local server that
-    wants one takes it from --api-key.
+    and vLLM all serve. A local server usually wants no key; one that does
+    takes it from --api-key or the API key box on the Pose tab.
     """
 
-    def __init__(self, host, backend="openai", model=None, timeout=120.0,
-                 api_key=None):
+    def __init__(self, host, backend="openai", model=None, timeout=600.0,
+                 api_key=None, sampling=None):
         self.host = host.rstrip("/")
         self.backend = backend
         self.model = model
         self.timeout = timeout
         self.api_key = api_key
+        self.sampling = sampling or Sampling()
+        self.last_thinking = ""
 
     # -- wire ------------------------------------------------------------
     def _post(self, path, payload):
@@ -1433,45 +1802,68 @@ class LocalLLM:
         self.model = available[0]
         return self.model
 
-    # -- generation ------------------------------------------------------
-    def complete(self, prompt, schema):
-        """The model's reply as a parsed object, schema-constrained if it can be.
+    # -- one exchange ----------------------------------------------------
+    def _bodies(self, messages, sampling, schema):
+        """Every spelling of one request, best first.
 
-        Schema enforcement is asked for first and dropped on error. Runtimes
-        disagree about how a schema is passed - llama.cpp has shipped releases
-        that reject the OpenAI spelling outright - and a model answering
-        unconstrained JSON is still worth having, so a refusal falls back
-        rather than failing the run.
+        Runtimes disagree about all three of the things that matter here - how
+        a schema is passed, how thinking is switched on, and where the sampler
+        settings live - so each is sent in the spelling the server is most
+        likely to know and the next one is tried on a refusal. A server
+        ignores a field it does not recognise, which is what makes sending
+        several at once safe.
         """
         model = self.resolve_model()
-        messages = [{"role": "system", "content": system_prompt()},
-                    {"role": "user", "content": prompt}]
-        attempts = []
         if self.backend == "ollama":
-            attempts.append({"model": model, "messages": messages,
-                             "stream": False, "format": schema,
-                             "options": {"temperature": 0.3}})
-            attempts.append({"model": model, "messages": messages,
-                             "stream": False, "format": "json",
-                             "options": {"temperature": 0.3}})
-            path = "/api/chat"
-        else:
-            attempts.append({"model": model, "messages": messages,
-                             "temperature": 0.3, "stream": False,
-                             "response_format": {
-                                 "type": "json_schema",
-                                 "json_schema": {"name": "pose_plan",
-                                                 "strict": True,
-                                                 "schema": schema}}})
-            attempts.append({"model": model, "messages": messages,
-                             "temperature": 0.3, "stream": False,
-                             "response_format": {"type": "json_object",
-                                                 "schema": schema}})
-            attempts.append({"model": model, "messages": messages,
-                             "temperature": 0.3, "stream": False,
-                             "response_format": {"type": "json_object"}})
-            path = "/v1/chat/completions"
+            base = {"model": model, "messages": messages, "stream": False,
+                    "options": sampling.ollama_options()}
+            if sampling.thinking:
+                base["think"] = (True if sampling.reasoning == "on"
+                                 else sampling.reasoning)
+            else:
+                base["think"] = False
+            out = []
+            if schema:
+                out.append(dict(base, format=schema))
+                out.append(dict(base, format="json"))
+            else:
+                out.append(dict(base))
+            # a build too old for `think` refuses the whole request
+            out += [dict(b) for b in out]
+            for b in out[len(out) // 2:]:
+                b.pop("think", None)
+            return "/api/chat", out
 
+        base = dict({"model": model, "messages": messages, "stream": False},
+                    **sampling.openai_body())
+        if sampling.thinking:
+            base["chat_template_kwargs"] = {"enable_thinking": True}
+            base["reasoning_effort"] = (
+                sampling.reasoning if sampling.reasoning in
+                ("high", "medium", "low") else "high")
+        else:
+            base["chat_template_kwargs"] = {"enable_thinking": False}
+        out = []
+        if schema:
+            out.append(dict(base, response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "pose_plan", "strict": True,
+                                "schema": schema}}))
+            out.append(dict(base, response_format={"type": "json_object",
+                                                   "schema": schema}))
+            out.append(dict(base, response_format={"type": "json_object"}))
+        else:
+            out.append(dict(base))
+        plain = []
+        for b in out:                      # same again without the thinking
+            c = dict(b)                    # fields, for a server that refuses
+            c.pop("chat_template_kwargs", None)
+            c.pop("reasoning_effort", None)
+            plain.append(c)
+        return "/v1/chat/completions", out + plain
+
+    def _say(self, messages, sampling, schema=None):
+        path, attempts = self._bodies(messages, sampling, schema)
         last = None
         for payload in attempts:
             try:
@@ -1480,19 +1872,95 @@ class LocalLLM:
                     ValueError) as exc:
                 last = exc
                 continue
-            text = self._content(reply)
-            parsed = parse_json_object(text)
-            if parsed is not None:
-                return parsed
-            last = RuntimeError("model did not return JSON: %.200r" % (text,))
+            text, thinking = self._content(reply)
+            if thinking:
+                self.last_thinking = thinking
+            if text and text.strip():
+                return text
+            last = RuntimeError("empty reply")
         raise RuntimeError("%s: %s" % (self.host, last))
+
+    # -- generation ------------------------------------------------------
+    def think_aloud(self, prompt):
+        """Work the pose out in words, with no schema in the way.
+
+        This is the half that a constrained call cannot do. A JSON grammar
+        forces the first token to be `{`, so the model commits to an answer
+        before it has considered anything; and on llama.cpp asking for both a
+        grammar and thinking at once silently drops the grammar (ggml-org
+        issue #20345), so "both" is not on offer either. Reason here, extract
+        below, and each half gets the settings it wants.
+        """
+        return self._say([{"role": "system", "content": planning_prompt()},
+                          {"role": "user", "content": with_examples(prompt)}],
+                         self.sampling)
+
+    def extract(self, prompt, notes, schema):
+        """Turn a worked-out plan into commands, under the schema.
+
+        Thinking off and Qwen's non-thinking sampler settings: there is
+        nothing left to work out, the answer is in `notes`, and the only job
+        is to write it in the vocabulary without inventing a name.
+        """
+        sampling = self.sampling.replace(reasoning="off", **NON_THINKING)
+        user = prompt if not notes else (
+            "%s\n\nA plan for this pose, worked out already. Turn it into "
+            "commands, changing nothing about what it decided:\n\n%s"
+            % (prompt, notes))
+        text = self._say([{"role": "system", "content": system_prompt()},
+                          {"role": "user", "content": with_examples(user)}],
+                         sampling, schema)
+        parsed = parse_json_object(text)
+        if parsed is None:
+            raise RuntimeError("model did not return JSON: %.200r" % (text,))
+        return parsed
+
+    def revise(self, prompt, plan, findings, schema):
+        """A second pass, given measurements of what the first one built.
+
+        The findings are the point. Re-reading its own commands gets the same
+        commands back, because the reasoning that wrote them is the reasoning
+        being asked to find the fault. Being told that the left hand came out
+        4 cm inside the ribcage is something it could not have worked out and
+        cannot argue with.
+        """
+        told = ("Here is the pose you asked for:\n\n%s\n\nHere is what was "
+                "built from it, measured:\n\n%s\n\nFix what is wrong and "
+                "leave what is right alone. Answer with the whole plan again."
+                % (json.dumps(plan, indent=1), "\n".join("- " + f
+                                                          for f in findings)))
+        return self.extract(prompt, told, schema)
+
+    def complete(self, prompt, schema, notes=None):
+        """A plan for this prompt: reason, then write it down.
+
+        Two calls rather than one. Kept as `complete` because that is what
+        every caller and the test stub already ask for.
+        """
+        self.last_thinking = ""
+        thought = ""
+        if self.sampling.thinking:
+            try:
+                thought = self.think_aloud(prompt)
+            except RuntimeError:
+                thought = ""              # a model that cannot, still answers
+        if notes:
+            thought = (thought + "\n\n" + notes) if thought else notes
+        return self.extract(prompt, thought, schema)
 
     @staticmethod
     def _content(reply):
-        if "message" in reply:                        # ollama
-            return reply["message"].get("content", "")
-        choices = reply.get("choices") or [{}]        # openai compatible
-        return (choices[0].get("message") or {}).get("content", "")
+        """(answer, thinking). Runtimes put the reasoning in three places:
+        Ollama in `message.thinking`, OpenAI-compatible servers in
+        `message.reasoning_content` or `message.reasoning`."""
+        message = reply.get("message")
+        if message is None:
+            choices = reply.get("choices") or [{}]
+            message = choices[0].get("message") or {}
+        return (message.get("content", ""),
+                message.get("thinking")
+                or message.get("reasoning_content")
+                or message.get("reasoning") or "")
 
 
 def parse_json_object(text):
@@ -1542,7 +2010,8 @@ def parse_json_object(text):
     return None
 
 
-def discover(backend="auto", host=None, model=None, api_key=None, timeout=120.0):
+def discover(backend="auto", host=None, model=None, api_key=None,
+             timeout=600.0, sampling=None):
     """The first local model server that answers, or None.
 
     `auto` probes the default ports of the four runtimes worth probing. A run
@@ -1552,7 +2021,8 @@ def discover(backend="auto", host=None, model=None, api_key=None, timeout=120.0)
     if host:
         kinds = [backend] if backend != "auto" else ["ollama", "openai"]
         for kind in kinds:
-            client = LocalLLM(host, kind, model, timeout, api_key)
+            client = LocalLLM(host, kind, model, timeout, api_key,
+                              sampling)
             try:
                 client.resolve_model()
                 return client
@@ -1562,7 +2032,8 @@ def discover(backend="auto", host=None, model=None, api_key=None, timeout=120.0)
     for kind, endpoint in DEFAULT_ENDPOINTS:
         if backend not in ("auto", kind):
             continue
-        client = LocalLLM(endpoint, kind, model, timeout, api_key)
+        client = LocalLLM(endpoint, kind, model, timeout, api_key,
+                          sampling)
         try:
             client.resolve_model()
             return client
@@ -1588,16 +2059,51 @@ def plan_for(prompt, llm=None):
 
 
 def pose_from_prompt(prompt, llm=None, view_w=900, view_h=700,
-                     aspect=512.0 / 768.0):
+                     aspect=512.0 / 768.0, passes=2, progress=None):
     """Everything between a sentence and a posed scene.
 
+    `passes` is how many times the model gets to answer. The first builds a
+    scene; each one after that is shown what was actually built, measured in
+    centimetres by `critique`, and asked to fix what is wrong. Two is the
+    useful default: the first pass gets the shape of the pose right and the
+    second catches the figure standing inside its own arm.
+
     Returns (figures, props, camera, report), report carrying the plan, which
-    route read the prompt and every command that was skipped.
+    route read the prompt, every command that was skipped, and what each pass
+    was told.
     """
+    say = progress or (lambda _text: None)
+    say("thinking about the pose")
     plan, source, warnings = plan_for(prompt, llm)
     figures, props, camera, more = build_scene(plan, view_w, view_h, aspect)
+    rounds = []
+    for extra in range(max(0, int(passes) - 1)):
+        if llm is None:
+            break
+        findings = [f for f in critique(figures, props)
+                    if not f.startswith("there is a")]
+        faults = [f for f in findings if " is " in f and
+                  ("floor" in f or "fall over" in f or "inside" in f
+                   or "no `hand`" in f)]
+        rounds.append(findings)
+        if not faults:
+            break
+        say("checking pass %d: %s" % (extra + 2, faults[0][:60]))
+        try:
+            revised = llm.revise(prompt, plan, findings, response_schema())
+        except (RuntimeError, urllib.error.URLError):
+            break
+        built = build_scene(revised, view_w, view_h, aspect)
+        if not built[0]:
+            break
+        plan, source = revised, source + "+checked"
+        figures, props, camera, more = built
+    say("done")
     return figures, props, camera, {"plan": plan, "source": source,
-                                    "warnings": warnings + more}
+                                    "warnings": warnings + more,
+                                    "findings": rounds,
+                                    "thinking": getattr(llm, "last_thinking",
+                                                        "")}
 
 
 # ---------------------------------------------------------------------------

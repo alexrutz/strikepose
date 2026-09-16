@@ -23,17 +23,43 @@ root.geometry("1180x800")
 app = EditorApp(root)
 root.update()
 
-check("the panel has a prompt box", hasattr(app, "prompt_entry"))
-check("and says what it needs before it is used",
-      "model" in app.prompt_status.get().lower(), app.prompt_status.get())
+# A real text box, not a one-line Entry: a pose is a sentence and sometimes
+# two, and the settings that used to sit in front of it now fold away below.
+check("the panel has a prompt box", hasattr(app, "prompt_box"))
+check("with room for a sentence", int(app.prompt_box["height"]) >= 3,
+      "%s lines" % app.prompt_box["height"])
+check("and it says how to send it", "ctrl+enter" in app.prompt_status.get().lower(),
+      app.prompt_status.get())
+check("the model settings are there too",
+      all(hasattr(app, n) for n in ("prompt_host", "prompt_model",
+                                    "prompt_key", "prompt_backend")))
+check("and an API key box that does not show the key",
+      hasattr(app, "prompt_key"))
+check("sampling is configurable, reasoning included",
+      set(app.sampling_vars) >= {"reasoning", "temperature", "top_p", "top_k"},
+      str(sorted(app.sampling_vars)))
+check("and reasoning is ON by default",
+      app.sampling_vars["reasoning"].get() == "high",
+      app.sampling_vars["reasoning"].get())
+check("at Qwen3's published thinking numbers",
+      abs(app.sampling_vars["temperature"].get() - 0.6) < 1e-9
+      and abs(app.sampling_vars["top_p"].get() - 0.95) < 1e-9
+      and app.sampling_vars["top_k"].get() == 20)
 
 lengths = dict(app.skeleton.lengths)
 before = list(app.skeleton.points)
 
 # no model is running in the test environment, so this goes through the
 # keyword route, which is the path that has to stay usable offline
-app.prompt_text.set("a person kneeling")
+app.prompt_box.insert("1.0", "a person kneeling")
 app.pose_from_prompt()
+# the call is on a worker thread now, so pump the loop until it lands rather
+# than expecting it to have finished by the time the call returns
+import time
+deadline = time.time() + 30
+while app.prompt_busy and time.time() < deadline:
+    root.update()
+    time.sleep(0.02)
 root.update()
 check("posing from the prompt reports which route read it",
       "keywords" in app.prompt_status.get(), app.prompt_status.get())
@@ -51,15 +77,25 @@ root.update()
 check("undo puts the old scene back",
       all(vlen(vsub(a, b)) < 1e-9 for a, b in zip(before, app.skeleton.points)))
 
-app.prompt_text.set("   ")
-app.pose_from_prompt()
+def ask(text):
+    """Type into the box and wait for the worker, the way a person does."""
+    import time
+    app.prompt_box.delete("1.0", "end")
+    app.prompt_box.insert("1.0", text)
+    app.pose_from_prompt()
+    deadline = time.time() + 30
+    while app.prompt_busy and time.time() < deadline:
+        root.update()
+        time.sleep(0.02)
+    root.update()
+
+
+ask("   ")
 check("an empty prompt asks for one instead of posing",
       "Type" in app.prompt_status.get(), app.prompt_status.get())
 
 # the export the prompt route produces has to be the export the window makes
-app.prompt_text.set("a runner mid stride")
-app.pose_from_prompt()
-root.update()
+ask("a runner mid stride")
 w, h = app._sizes()
 pose = app.depth_image(w, h)
 check("the depth map still exports after a prompt pose", pose.size == (w, h))
