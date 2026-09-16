@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import rigpose
 
 # ---------------------------------------------------------------------------
 # The command constructors.
@@ -625,7 +626,8 @@ def render_set(out_dir, poses=None, presets=None, out_w=512, out_h=768,
 
 def _selftest():
     import pose_agent
-    from openpose3d_editor import BODY_PRESETS, Skeleton, preset_params, vlen, vsub
+    from openpose3d_editor import (BODY_PRESETS, DEFAULT_PRESET,
+                                   preset_params, vlen, vsub)
     ok = True
 
     def check(label, cond, extra=""):
@@ -651,7 +653,7 @@ def _selftest():
     # failure this has to catch, so the bar is zero warnings, not "it ran".
     bad = []
     for name in NAMES:
-        skeleton = Skeleton()
+        skeleton = rigpose.figure_for(DEFAULT_PRESET)
         objects = []
         warnings = pose_agent.apply_commands(skeleton, POSES[name], objects)
         if warnings:
@@ -662,9 +664,9 @@ def _selftest():
     # the invariant that makes any of this safe to generate in bulk
     worst = (0.0, None)
     for name in NAMES:
-        rest = Skeleton()
+        rest = rigpose.figure_for(DEFAULT_PRESET)
         lengths = dict(rest.lengths)
-        pose = Skeleton()
+        pose = rigpose.figure_for(DEFAULT_PRESET)
         pose_agent.apply_commands(pose, POSES[name], [])
         for key, was in lengths.items():
             gap = abs(pose.lengths[key] - was)
@@ -678,7 +680,7 @@ def _selftest():
     for name in NAMES:
         if name == "standing_still":
             continue
-        rest, pose = Skeleton(), Skeleton()
+        rest, pose = rigpose.figure_for(DEFAULT_PRESET), rigpose.figure_for(DEFAULT_PRESET)
         pose_agent.apply_commands(pose, POSES[name], [])
         moved = max(vlen(vsub(a, b))
                     for a, b in zip(rest.points, pose.points))
@@ -693,7 +695,7 @@ def _selftest():
     bad = []
     for preset in BODY_PRESETS:
         for name in NAMES:
-            skeleton = Skeleton(preset_params(preset))
+            skeleton = rigpose.figure_for(preset)
             if pose_agent.apply_commands(skeleton, POSES[name], []):
                 bad.append((preset, name))
     check("every pose applies to every body type", not bad,
@@ -703,7 +705,7 @@ def _selftest():
     # the props a pose leans on have to land under it, not through it
     floated = []
     for name in NAMES:
-        skeleton, objects = Skeleton(), []
+        skeleton, objects = rigpose.figure_for(DEFAULT_PRESET), []
         pose_agent.apply_commands(skeleton, POSES[name], objects)
         for prop in objects:
             if not all(abs(v) < 600.0 for v in prop["position"]):

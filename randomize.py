@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 import random
 
+import rigpose
 from skeleton import CHILDREN, KEYPOINT_NAMES, Skeleton
 from vecmath import vadd, vcross, vlen, vmul, vnorm, vsub
 
@@ -43,7 +44,9 @@ INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
 
 
 def _j(*names):
-    return tuple(INDEX[n] for n in names)
+    """Rig bone names. A part names bones now rather than keypoint indices,
+    because the rig is the only thing the randomizer moves."""
+    return tuple(names)
 
 
 # What each selectable part moves, and how far it is allowed to at amount 1.0.
@@ -56,17 +59,19 @@ def _j(*names):
 RANDOM_PARTS = {
     "arms": dict(
         about="Shoulders, elbows and wrists",
-        joints=_j("r_shoulder", "l_shoulder", "r_elbow", "l_elbow",
-                  "r_wrist", "l_wrist"),
+        # the joint you would grab in a drag: an elbow swings the upper arm,
+        # a wrist the forearm, a knuckle the hand
+        joints=_j("lowerarm01.R", "lowerarm01.L", "wrist.R", "wrist.L",
+                  "metacarpal3.R", "metacarpal3.L"),
         spread=150.0),
     "legs": dict(
         about="Hips, knees and ankles",
-        joints=_j("r_hip", "l_hip", "r_knee", "l_knee",
-                  "r_ankle", "l_ankle"),
+        joints=_j("lowerleg01.R", "lowerleg01.L", "foot.R", "foot.L",
+                  "toe3-1.R", "toe3-1.L"),
         spread=95.0),
     "head": dict(
         about="Where the figure is looking",
-        joints=_j("nose"),
+        joints=_j("head"),
         spread=55.0),
     "torso": dict(
         about="Lean and twist above the hips",
@@ -118,72 +123,58 @@ def _swing(skeleton, joint, rng, half_angle):
     makes: the bone is rotated onto the new direction and keeps its length, and
     everything downstream of it comes along.
     """
-    parent = skeleton.parent_of(joint)
+    idx = skeleton.pose.bone(joint) if isinstance(joint, str) else joint
+    parent = skeleton.parent_of(idx)
     if parent < 0:
         return
-    here = vsub(skeleton.points[joint], skeleton.points[parent])
+    here = vsub(skeleton.points[idx], skeleton.points[parent])
     length = vlen(here)
     if length < 1e-6:
         return
     aim = _cone_direction(rng, here, half_angle)
-    skeleton.move_joint(joint, vadd(skeleton.points[parent],
-                                    vmul(aim, length)))
+    skeleton.move_joint(idx, vadd(skeleton.points[parent],
+                                  vmul(aim, length)))
 
 
 def _bend_torso(skeleton, rng, spread):
-    """Lean and twist everything above the hips, about the hip midpoint.
+    """Lean and twist the torso, spread along the spine a bone at a time.
 
-    Not a joint swing: there is no spine in eighteen keypoints, so the torso
-    moves the way `pose_agent`'s `lean` does - one rotation of the whole upper
-    body about the hip line, which is the only thing the format can express.
+    The rig has a five-bone spine, so the torso is posed the way everything
+    else is: rotate a bone and what hangs off it follows. Spreading the lean
+    along the chain rather than spending it at one joint is what a back
+    actually does, and it stops the figure hinging at the waist like a door.
+
+    The keypoint version could do none of this - there is no spine in eighteen
+    points - so it rotated a hand-picked list of everything above the hips
+    about an axis it had to choose. Both bugs its own length check caught on
+    the first run were about where that axis ran: a twist about the vertical
+    through the hip midpoint stretched a neck-to-hip bone by 17 cm once the
+    legs had already moved the hips, and re-reading the neck before the lean
+    had moved it put 5 cm back. Neither is expressible here. A bone rotation
+    cannot move the bone it turns about, and cannot change a length at all -
+    so the class of error is gone rather than fixed.
     """
-    neck = skeleton.points[INDEX["neck"]]
-    hip_mid = vmul(vadd(skeleton.points[INDEX["r_hip"]],
-                        skeleton.points[INDEX["l_hip"]]), 0.5)
-    across = vsub(skeleton.points[INDEX["l_hip"]],
-                  skeleton.points[INDEX["r_hip"]])
-    spine = vsub(neck, hip_mid)
-    if vlen(across) < 1e-6 or vlen(spine) < 1e-6:
+    pose = skeleton.pose
+    chain = [n for n in ("spine05", "spine04", "spine03", "spine02", "spine01")
+             if n in pose.index]
+    if not chain:
         return
-    across = vnorm(across)
-    upper = [i for i in range(len(skeleton.points))
-             if i not in (INDEX["r_hip"], INDEX["l_hip"],
-                          INDEX["r_knee"], INDEX["l_knee"],
-                          INDEX["r_ankle"], INDEX["l_ankle"])]
-    # Both rotations have to leave every neck-to-hip bone the length it was,
-    # and each does it by where its AXIS runs, not by what it rotates.
-    #
-    # The lean turns about the hip line itself: both hips lie on that axis by
-    # construction, so they do not move and the neck's distance to each of
-    # them is preserved exactly however far it swings.
-    #
-    # The twist turns about the spine, through the NECK. Anchoring it at the
-    # hip midpoint instead is the tempting version and it stretches: the neck
-    # is only above the hip midpoint on a figure nobody has touched, and by
-    # the time the torso is randomized the legs have already moved the hips,
-    # so the neck swings off its own hip bones - 17 cm of it at full spread,
-    # which the length check caught on the first run.
-    skeleton.rotate_about_axis(upper, hip_mid, across,
-                               math.radians(rng.uniform(-spread, spread)))
-    # Re-read the neck: the lean just moved it, and turning about where it
-    # used to be is turning about a point that is no longer on the body. That
-    # is worth 5 cm on a neck-to-hip bone, and it looks exactly like the bug
-    # above, which is why the fix for that one did not fix this one.
-    neck = skeleton.points[INDEX["neck"]]
-    spine = vsub(neck, hip_mid)
-    if vlen(spine) < 1e-6:
-        return
-    skeleton.rotate_about_axis(upper, neck, vnorm(spine),
-                               math.radians(rng.uniform(-spread, spread)) * 0.6)
+    side, up, _facing = skeleton.body_frame()
+    lean = math.radians(rng.uniform(-spread, spread)) / len(chain)
+    twist = math.radians(rng.uniform(-spread, spread)) * 0.6 / len(chain)
+    # a cone rather than a fixed plane, so the lean is not always straight
+    # forward or straight back
+    axis = _cone_direction(rng, side, math.radians(90.0))
+    for name in chain:
+        j = pose.bone(name)
+        pose.rotate(j, axis, lean)
+        pose.rotate(j, up, twist)
 
 
 def _turn(skeleton, rng, spread):
-    """Yaw the whole figure about its own hip midpoint."""
-    hip_mid = vmul(vadd(skeleton.points[INDEX["r_hip"]],
-                        skeleton.points[INDEX["l_hip"]]), 0.5)
-    skeleton.rotate_about_axis(list(range(len(skeleton.points))), hip_mid,
-                               (0.0, 1.0, 0.0),
-                               math.radians(rng.uniform(-spread, spread)))
+    """Yaw the whole figure - one rotation of the root bone, which carries
+    everything because everything hangs off it."""
+    skeleton.turn(math.radians(rng.uniform(-spread, spread)))
 
 
 def normalise_parts(parts):
@@ -251,7 +242,7 @@ def random_scene(parts=None, amount=0.6, seed=None, count=1, preset=None):
             name = rng.choice(list(BODY_PRESETS))
         else:
             name = preset or DEFAULT_PRESET
-        figure = Skeleton(preset_params(name))
+        figure = rigpose.figure_for(name)
         figure.preset = name
         randomize_figure(figure, parts, amount, rng=rng)
         figures.append(figure)
@@ -305,15 +296,22 @@ def _selftest():
     from anthro import DEFAULT_PRESET, preset_params
     from skeleton import LIMB_SEQ
 
-    def lengths(sk):
-        return [vlen(vsub(sk.points[c], sk.points[p])) for p, c in LIMB_SEQ]
+    def lengths(figure):
+        """Every bone of the armature - 103 of them, not the seventeen
+        keypoint limbs. The randomizer goes through `move_joint` and
+        `pose.rotate` and never writes a coordinate, so this cannot fail
+        without something new having started to."""
+        q = figure.pose.positions()
+        parents = figure.pose.parents
+        return [vlen(vsub(tuple(q[j]), tuple(q[int(parents[j])])))
+                for j in range(len(figure.pose.names)) if parents[j] >= 0]
 
     # The one that matters: rotations only, so nothing resizes. Run hard,
     # across the whole range, because a randomiser that stretched a limb once
     # in fifty would be worse than none at all.
     worst = 0.0
     for seed in range(60):
-        sk = Skeleton(preset_params(DEFAULT_PRESET))
+        sk = rigpose.figure_for(DEFAULT_PRESET)
         before = lengths(sk)
         randomize_figure(sk, "all", amount=1.5, seed=seed)
         after = lengths(sk)
@@ -322,35 +320,38 @@ def _selftest():
           worst < 1e-9, "worst %.2e cm" % worst)
 
     # A seed names a pose, or a bug report is a screenshot.
-    a = Skeleton(preset_params(DEFAULT_PRESET))
-    b = Skeleton(preset_params(DEFAULT_PRESET))
+    a = rigpose.figure_for(DEFAULT_PRESET)
+    b = rigpose.figure_for(DEFAULT_PRESET)
     randomize_figure(a, "all", amount=0.8, seed=1234)
     randomize_figure(b, "all", amount=0.8, seed=1234)
     check("the same seed gives the same pose",
           max(vlen(vsub(p, q)) for p, q in zip(a.points, b.points)) < 1e-12)
-    c = Skeleton(preset_params(DEFAULT_PRESET))
+    c = rigpose.figure_for(DEFAULT_PRESET)
     randomize_figure(c, "all", amount=0.8, seed=1235)
     check("and a different one does not",
           max(vlen(vsub(p, q)) for p, q in zip(a.points, c.points)) > 1.0)
 
     # Selectable means selectable: an unchosen part must not move. Legs only,
     # so every joint above the hips has to come out exactly where it started.
-    rest = Skeleton(preset_params(DEFAULT_PRESET))
-    legs = Skeleton(preset_params(DEFAULT_PRESET))
+    rest = rigpose.figure_for(DEFAULT_PRESET)
+    legs = rigpose.figure_for(DEFAULT_PRESET)
     randomize_figure(legs, "legs", amount=1.0, seed=99)
-    upper = [INDEX[n] for n in ("nose", "neck", "r_shoulder", "l_shoulder",
-                                "r_elbow", "l_elbow", "r_wrist", "l_wrist",
-                                "r_eye", "l_eye", "r_ear", "l_ear")]
+    # every bone of the head, spine and both arms: far more than the twelve
+    # keypoints this could name before, and it catches a spine bone moving
+    upper = [j for j, n in enumerate(rest.pose.names)
+             if rigpose.region_of(n) in ("head", "torso", "left arm",
+                                         "right arm", "left hand",
+                                         "right hand")]
     check("choosing legs leaves everything above the hips alone",
           max(vlen(vsub(rest.points[i], legs.points[i])) for i in upper) < 1e-9)
-    moved = max(vlen(vsub(rest.points[i], legs.points[i]))
-                for i in (INDEX["r_knee"], INDEX["l_knee"],
-                          INDEX["r_ankle"], INDEX["l_ankle"]))
+    moved = max(vlen(vsub(rest.points[rest.pose.bone(n)],
+                          legs.points[legs.pose.bone(n)]))
+                for n in ("lowerleg01.R", "lowerleg01.L", "foot.R", "foot.L"))
     check("and actually moves the legs", moved > 1.0, "%.1f cm" % moved)
 
     # Amount has to mean something, or the control is decoration.
     def departure(amount, seed):
-        sk = Skeleton(preset_params(DEFAULT_PRESET))
+        sk = rigpose.figure_for(DEFAULT_PRESET)
         randomize_figure(sk, "arms", amount=amount, seed=seed)
         return sum(vlen(vsub(p, q)) for p, q in zip(sk.points, rest.points))
     small = sum(departure(0.2, s) for s in range(12))
@@ -359,7 +360,7 @@ def _selftest():
           "%.0f cm against %.0f" % (large, small))
 
     # Zero is a real setting: it is how you ask for "this pose, new outfit".
-    still = Skeleton(preset_params(DEFAULT_PRESET))
+    still = rigpose.figure_for(DEFAULT_PRESET)
     randomize_figure(still, "all", amount=0.0, seed=5)
     check("amount 0 leaves the pose where it was",
           max(vlen(vsub(p, q)) for p, q in zip(still.points, rest.points))

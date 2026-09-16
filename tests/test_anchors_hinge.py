@@ -31,92 +31,85 @@ for i in range(3):      # repeated toggling must stay stable
 check("stable after 4 round trips", app.ortho_frame.winfo_width() == w0
       and app.canvas.winfo_width() == c0)
 
-# ---- two anchors via the UI
+# ---- anchoring
+#
+# ONE anchor, not two. The pair used to make a hinge the body swung about,
+# built by re-rooting the keypoint tree at those two joints so the chain ran
+# outward from them. A rig cannot be re-rooted - every one of its 104 bones
+# hangs off a single root - so the same gesture is an IK solve, and it is not
+# on this path. What a single anchor means carries over exactly: whatever the
+# figure does next, it does without moving that point.
 sk = app.skeleton
-app.selected = 9; app.set_anchor()
-check("one anchor -> pivot mode", sk.anchors == [9] and not sk.hinged)
-app.selected = 12; app.set_anchor()
-check("two anchors -> hinge", sk.hinged and sk.anchors == [9,12])
-app.selected = 4; app.set_anchor()
-check("third anchor drops the oldest", sk.anchors == [12,4])
-app.selected = 4; app.set_anchor()
-check("re-picking removes it", sk.anchors == [12])
-app.selected = 9; app.set_anchor()
-check("back to a hinge", sk.anchors == [12,9])
-sk.anchors = [9,12]
+KNEE = sk.pose.bone("lowerleg01.R")
+ELBOW = sk.pose.bone("lowerarm01.R")
+WRIST = sk.pose.bone("wrist.R")
+app.selected = KNEE; app.set_anchor()
+check("one anchor pins a joint", sk.anchors == {KNEE} and not sk.hinged)
+app.selected = ELBOW; app.set_anchor()
+check("a second replaces it rather than making a hinge", sk.anchors == {ELBOW})
+app.selected = ELBOW; app.set_anchor()
+check("re-picking clears it", not sk.anchors)
+app.selected = KNEE; app.set_anchor()
+check("and it can be set again", sk.anchors == {KNEE})
 
-# ---- dragging with the hinge
-knees = (sk.points[9], sk.points[12]); ankles = (sk.points[10], sk.points[13])
-neck0 = sk.points[1]
-# knees anchored means the axis runs across the front view, so tip in Left
+# ---- dragging with a joint pinned
+knee0 = sk.points[KNEE]
+wrist0 = sk.points[WRIST]
+lengths0 = dict(sk.lengths)
+sx, sy, _ = app.camera.project(sk.points[ELBOW])
+app.on_press(E(sx, sy))
+check("the press picked the elbow", app.drag_joint == ELBOW,
+      str(app.drag_joint))
+for i in range(1, 10): app.on_drag(E(sx + 3*i, sy - 2*i))
+app.on_release(E(sx, sy))
+check("the pinned knee stayed exactly put",
+      vlen(vsub(sk.points[KNEE], knee0)) < 1e-9,
+      "%.2e cm" % vlen(vsub(sk.points[KNEE], knee0)))
+check("and the dragged arm moved",
+      vlen(vsub(sk.points[WRIST], wrist0)) > 1.0,
+      "%.1f cm" % vlen(vsub(sk.points[WRIST], wrist0)))
+check("with every one of the 103 bones the length it was",
+      max(abs(v - lengths0[j]) for j, v in sk.lengths.items()) < 1e-9)
+
+# clearing it through the panel, not just by re-picking
+app.clear_anchor()
+check("the panel clears it too", not sk.anchors)
+
+# the ortho views must hold still while a figure is merely posed
 left = [v for v in app.ortho_views if v.name == "left"][0]
 left.fit(app.figures)
-sx, sy, _ = left.camera.project(sk.points[1])
-app.on_press(E(sx,sy), left)
-for i in range(1,10): app.on_drag(E(sx+3*i, sy+2*i), left)
-app.on_release(E(sx,sy), left)
-check("knees pinned", all(vlen(vsub(sk.points[j],p))<1e-9 for j,p in zip((9,12),knees)))
-check("shins pinned", all(vlen(vsub(sk.points[j],p))<1e-9 for j,p in zip((10,13),ankles)))
-check("torso tipped", vlen(vsub(sk.points[1], neck0)) > 5.0, "%.1f cm" % vlen(vsub(sk.points[1], neck0)))
-check("all bone lengths exact",
-      max(abs(vlen(vsub(sk.points[c],sk.points[p]))-sk.lengths[c]) for p,c in LIMB_SEQ) < 1e-9)
-# the torso must stay rigid: neck-to-hip distance unchanged
-d_before = vlen(vsub(neck0, knees[0]))
-check("body did not swing off into space",
-      abs(vlen(vsub(sk.points[1], sk.points[9])) - d_before) < 1e-9)
-# the front view is edge-on to this hinge: it must say so, not snap silently
-front = [v for v in app.ortho_views if v.name == "front"][0]
-front.fit(app.figures)
-n_before = sk.points[1]
-fx, fy, _ = front.camera.project(sk.points[1])
-app.on_press(E(fx,fy), front)
-app.on_drag(E(fx, fy+40), front)
-app.on_release(E(fx,fy), front)
-check("edge-on hinge refuses and explains",
-      vlen(vsub(sk.points[1], n_before)) < 1e-9 and "edge-on" in app.status.get(),
-      app.status.get())
-# A hinged joint rides a circle, so it cannot reach a cursor placed off that
-# circle. The property to check is that it lands on the closest point it can.
-tx, ty, _ = left.camera.project(sk.points[1])
-cursor = (tx + 25, ty - 15)
-app.on_press(E(tx,ty), left); app.on_drag(E(*cursor), left)
-# measure with the camera as it was during the drag, before release refits
-px, py, _ = left.camera.project(sk.points[1])
-landed = math.hypot(px-cursor[0], py-cursor[1])
-centre, a, b = sk.hinge_circle(1)
-best = min(math.hypot(left.camera.project(vadd(centre, vadd(vmul(a, math.cos(t)),
-                                                           vmul(b, math.sin(t)))))[0]-cursor[0],
-                      left.camera.project(vadd(centre, vadd(vmul(a, math.cos(t)),
-                                                           vmul(b, math.sin(t)))))[1]-cursor[1])
-           for t in [i*2*math.pi/2000 for i in range(2000)])
-check("joint lands on the closest reachable point of its arc",
-      abs(landed - best) < 0.05, "landed %.2f px, best possible %.2f px" % (landed, best))
-check("and it did rotate towards the cursor", landed < math.hypot(tx-cursor[0], ty-cursor[1]) + 1e-9)
-app.on_release(E(tx,ty), left)
-# the ortho views must hold still while a figure is merely posed
 before = (left.camera.zoom, left.camera.target)
 app.redraw()
 check("ortho view does not re-frame after every edit",
       left.camera.zoom == before[0] and left.camera.target == before[1])
 
-# ---- stepped tipping
-app.reset_pose(); sk = app.skeleton; sk.anchors = [9,12]
+# ---- stepped turning, pivoting on the anchor
+app.reset_pose(); sk = app.skeleton
+KNEE = sk.pose.bone("lowerleg01.R")
+NECK = sk.pose.bone("neck01")
+sk.anchor(KNEE)
 app.turn_step.set("10")
-n0 = sk.points[1]
-for _ in range(9): app.rotate_hinge(1)
-check("9 x 10 deg keeps the neck at the same radius from the axis",
-      abs(vlen(vsub(sk.points[1], sk.points[9])) - vlen(vsub(n0, sk.points[9]))) < 1e-9)
-check("and moved it", vlen(vsub(sk.points[1], n0)) > 10.0)
-check("knees still pinned", vlen(vsub(sk.points[9], knees[0])) < 1e-9 or True)
-for _ in range(9): app.rotate_hinge(-1)
-check("tipping back returns exactly", vlen(vsub(sk.points[1], n0)) < 1e-9,
-      "%.2e cm" % vlen(vsub(sk.points[1], n0)))
-sk.anchors = []
-app.rotate_hinge(1)
-check("no hinge -> explains instead of acting", "two anchors" in app.status.get())
+n0, knee0 = sk.points[NECK], sk.points[KNEE]
+for _ in range(9): app.rotate_figure(1, "y")
+check("9 x 10 deg keeps the neck the same distance from the anchor",
+      abs(vlen(vsub(sk.points[NECK], sk.points[KNEE]))
+          - vlen(vsub(n0, knee0))) < 1e-9)
+check("and moved it", vlen(vsub(sk.points[NECK], n0)) > 10.0,
+      "%.1f cm" % vlen(vsub(sk.points[NECK], n0)))
+check("the anchor itself did not move",
+      vlen(vsub(sk.points[KNEE], knee0)) < 1e-9)
+for _ in range(9): app.rotate_figure(-1, "y")
+check("turning back returns exactly", vlen(vsub(sk.points[NECK], n0)) < 1e-6,
+      "%.2e cm" % vlen(vsub(sk.points[NECK], n0)))
 
-# undo carries anchors
-sk.anchors = [9,12]; app.push_undo(); sk.anchors = [1]; app.undo()
-check("anchors restored by undo", app.skeleton.anchors == [9,12])
+# the hinge is gone, and says so rather than doing nothing quietly
+app.rotate_hinge(1)
+check("the two-anchor hinge explains itself instead of acting",
+      "not on the rig path" in app.status.get(), app.status.get())
+
+# undo carries the anchor
+sk.anchor(KNEE); app.push_undo(); sk.anchor(NECK); app.undo()
+check("the anchor is restored by undo", app.skeleton.anchors == {KNEE},
+      str(app.skeleton.anchors))
 print("\n"+("ALL PASS" if ok else "FAILURES"))
 root.destroy()

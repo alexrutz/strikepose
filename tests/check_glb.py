@@ -32,6 +32,7 @@ import numpy as np
 import mesh_backend
 from openpose3d_editor import (KEYPOINT_NAMES, Camera, Skeleton,
                                build_rest_points, frame_rect,
+                               frame_scene,
                                rigged_depth_image, vlen, vnorm, vsub)
 
 INDEX = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
@@ -58,7 +59,8 @@ def posed(name, preset):
     """A skeleton in one of the poses worth putting a rig through."""
     import pose_agent
     from anthro import preset_params
-    skeleton = Skeleton(preset_params(preset))
+    import rigpose
+    skeleton = rigpose.figure_for(preset)
     commands = {
         "rest": [],
         "t_pose": [{"op": "stance", "name": "t_pose"}],
@@ -132,25 +134,38 @@ def check_file(path, asset_paths=(), out_dir="out/glb",
     preset = preset_of(path)
     for name in POSES:
         skeleton = posed(name, preset)
-        points = {n: skeleton.points[i] for i, n in enumerate(KEYPOINT_NAMES)}
-        solution = mesh_backend.pose_rig(
-            mesh, points, roles,
-            rest_points=build_rest_points(skeleton.body),
-            stature=skeleton.body.get("stature"))
+        solution = skeleton.solution()
         bones = solution["bones"]
+        points = skeleton.keypoints()
 
-        # The rig is posed, not fitted: a bone points the way the keypoints
-        # say and keeps the length it was authored with, so a joint sits off
-        # its keypoint by however much the two bodies' proportions differ.
-        # What is checked is that the gap stays small enough to be that and
-        # not a solver going wrong.
-        for role in ("l_wrist", "r_wrist", "l_ankle", "r_ankle", "l_elbow",
-                     "r_elbow", "l_knee", "r_knee"):
-            if role not in roles:
-                continue
-            got = bones[mesh["joint_names"][roles[role]]][1]
-            worst_land = max(worst_land, float(np.linalg.norm(
-                got - np.asarray(points[role], float))))
+        # The figure IS the armature, so there is no solve to check and
+        # nothing for a joint to land near: the elbow keypoint is where the
+        # forearm bone starts, by construction. What is worth checking is the
+        # other direction - that the eighteen this rig reports still describe
+        # the same body they always did - so the gap measured is against the
+        # ANSUR table's idea of where they go, which is the five or six
+        # centimetres at the shoulder that no amount of work on either side
+        # closes.
+        # The OpenPose PNG is a description of this mesh, never a second
+        # opinion about it. Ten of the eighteen ARE joints of the rig, so they
+        # have to come back as exactly those joints and not as anything
+        # derived; and the neck has to be the midpoint of the shoulders, or
+        # the format is not the format.
+        #
+        # This used to compare each joint against the keypoint the solver was
+        # aiming it at, which measured how far a solve had missed. There is no
+        # solve any more - the figure is the armature - so what is left to
+        # check is that reading it back does not quietly invent anything.
+        for role in ("l_elbow", "r_elbow", "l_wrist", "r_wrist", "l_hip",
+                     "r_hip", "l_knee", "r_knee", "l_ankle", "r_ankle"):
+            if role in roles and role in points:
+                worst_land = max(worst_land, float(np.linalg.norm(
+                    np.asarray(points[role], float)
+                    - bones[mesh["joint_names"][roles[role]]][1])))
+        worst_land = max(worst_land, float(np.linalg.norm(
+            np.asarray(points["neck"], float)
+            - 0.5 * (np.asarray(points["l_shoulder"], float)
+                     + np.asarray(points["r_shoulder"], float)))))
 
         verts = mesh_backend.skin_with(mesh, solution)
         check("%s: skinning produced finite geometry" % name,
@@ -160,11 +175,10 @@ def check_file(path, asset_paths=(), out_dir="out/glb",
         # head, so nose-to-ankle stops describing how tall the pose is and the
         # check failed every rig it was given in a pose that was not upright.
         # The crown and the soles reach past the keypoints, hence the margin.
-        ys = [p[1] for p in skeleton.points]
+        ys = [p[1] for p in points.values()]
         span = float(verts.max(axis=0)[1] - verts.min(axis=0)[1])
         target = (max(ys) - min(ys)) + 0.16 * abs(
-            skeleton.points[INDEX["l_ankle"]][1]
-            - skeleton.points[INDEX["nose"]][1])
+            points["l_ankle"][1] - points["nose"][1])
         if worst_scale is None or abs(span - target) > abs(worst_scale[1]
                                                            - worst_scale[2]):
             worst_scale = (name, span, target)
@@ -181,6 +195,12 @@ def check_file(path, asset_paths=(), out_dir="out/glb",
             if was > 1e-6 and abs(got - was) / was > worst_pinch[0]:
                 worst_pinch = (abs(got - was) / was, "%s %s" % (name, role))
 
+        # Frame it, rather than trusting a fixed camera. There is one framing
+        # in this program and both the window and the export use it; a camera
+        # left at its defaults happened to suit where a keypoint figure sat
+        # and puts a rigged one, which stands with its feet at y=0 and its
+        # crown at its own stature, mostly above the top of the frame.
+        frame_scene([skeleton], camera, rect)
         image = rigged_depth_image([(skeleton, mesh, assets)], camera, rect,
                                    width, height)
         pixels = np.asarray(image)
@@ -193,9 +213,10 @@ def check_file(path, asset_paths=(), out_dir="out/glb",
     # different body - the child stretched onto an adult's skeleton. Now the
     # keypoints are built from this body's own preset and the worst across the
     # nine is 10.1 cm, so the bar is where it can actually catch something.
-    check("every mapped joint sits near its keypoint", worst_land < 13.0,
-          "worst %.2f cm - the gap between the two bodies' proportions"
-          % worst_land)
+    check("the keypoints it reports are read off the rig, not re-derived",
+          worst_land < 1e-9,
+          "worst %.2e cm between a joint keypoint and the bone it is" %
+          worst_land)
     check("the rig is scaled to the figure", worst_scale is not None
           and abs(worst_scale[1] - worst_scale[2]) < 0.10 * worst_scale[2],
           "worst: %s spans %.0f cm, the pose %.0f cm" % worst_scale)

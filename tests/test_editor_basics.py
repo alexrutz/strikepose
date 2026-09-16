@@ -14,8 +14,10 @@ for w in root.pack_slaves():
 app.redraw(); root.update()
 print("canvas items after redraw:", len(app.canvas.find_all()))
 
-# find the r_wrist on screen and drag it upward
-idx = KEYPOINT_NAMES.index("r_wrist")
+# find the right wrist on screen and drag it upward. It is a bone of the
+# armature now, not one of eighteen keypoints - the editor poses the rig
+# directly, so the thing under the cursor is the thing that comes out.
+idx = app.skeleton.pose.bone("wrist.R")
 sx, sy, _ = app.camera.project(app.skeleton.points[idx])
 print("r_wrist screen", round(sx), round(sy), "picked:", app.pick(sx, sy))
 
@@ -28,7 +30,7 @@ print("selected:", app.selected, "sign:", app.drag_sign)
 for step in range(1, 11):
     app.on_drag(E(sx + 4*step, sy - 12*step))
 app.on_release(E(sx, sy))
-after = {c: vlen(vsub(app.skeleton.points[c], app.skeleton.points[p])) for p, c in LIMB_SEQ}
+after = dict(app.skeleton.lengths)     # all 103 bones, not seventeen limbs
 print("max bone length drift:", max(abs(after[c]-before[c]) for c in after))
 print("undo entries:", len(app.undo_stack))
 print("status:", app.status.get())
@@ -62,8 +64,9 @@ app.canvas.postscript(file="/dev/null")
 # resize a bone, which is the one guarantee the editor makes about every
 # other way of moving a joint.
 def bone_lengths():
-    return {c: vlen(vsub(app.skeleton.points[c], app.skeleton.points[p]))
-            for p, c in LIMB_SEQ}
+    # every bone of the armature, which is what the figure is now - 103 of
+    # them, not the seventeen limbs eighteen keypoints could describe
+    return dict(app.skeleton.lengths)
 
 rest_points, rest_lengths = list(app.skeleton.points), bone_lengths()
 app.random_seed.set("4242")

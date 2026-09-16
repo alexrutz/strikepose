@@ -153,15 +153,35 @@ check("a render returns both conditioning images",
       "%d and %d bytes" % (len(planned["pose"]), len(planned["depth"])))
 check("and they are not the same image", planned["pose"] != planned["depth"])
 
-# The phone drags locally and sends the keypoints back. If that does not land
-# on the same pixels, the thing on the phone is not this editor.
+# The phone sends a scene back. If that does not land on the same pixels, the
+# thing on the phone is not this editor.
+#
+# What travels is the joint angles. The eighteen keypoints go too - the phone
+# drags those and draws capsules round them - but they cannot CARRY a pose:
+# ten of them are rig joints, five ride the skull and one is the midpoint of
+# two others, so a round trip through keypoints alone loses every roll, both
+# collarbones and all thirty bones of each hand, which came to 6.6 cm of body
+# on a figure reading a book.
 _, echoed = post("/api/render", {
+    "people": [{"preset": "Female, average",
+                "bones": planned["people"][0]["bones"],
+                "offset": planned["people"][0]["offset"],
+                "points": planned["people"][0]["points"],
+                "visible": planned["people"][0]["visible"]}],
+    "props": planned["props"], "width": 192, "height": 288})
+check("the same scene sent back renders identically",
+      echoed["pose"] == planned["pose"] and echoed["depth"] == planned["depth"])
+
+# and a drag, which really is keypoints and nothing else, still lands close
+_, dragged = post("/api/render", {
     "people": [{"preset": "Female, average",
                 "points": planned["people"][0]["points"],
                 "visible": planned["people"][0]["visible"]}],
     "props": planned["props"], "width": 192, "height": 288})
-check("the same scene sent back as keypoints renders identically",
-      echoed["pose"] == planned["pose"] and echoed["depth"] == planned["depth"])
+check("a keypoint-only drag still renders a figure",
+      dragged["pose"].startswith("data:image/png;base64,")
+      and len(dragged["depth"]) > 1000,
+      "%d bytes of depth" % len(dragged["depth"]))
 
 # -- it survives what a client gets wrong ---------------------------------
 check("a body that is not JSON is a 400",

@@ -195,6 +195,11 @@ def _blob(centre, axes, radii):
 def body_segments(skeleton, respect_visibility=True):
     """Every swept part of the figure, before any of it is turned into solids.
 
+    Takes the eighteen keypoints, so a rigged figure is asked to describe
+    itself as one: the sweep is an approximation drawn from a skeleton, and
+    what it approximates is the posed rig. The description travels one way
+    only - nothing here ever writes back.
+
     Returns (segments, frame). A segment is a dict carrying what `_tube` needs:
     where it runs from and to, the frame it takes its roll from, the profile it
     sweeps and how much to scale that profile by.
@@ -204,6 +209,8 @@ def body_segments(skeleton, respect_visibility=True):
     sleeve fit whatever preset and whatever pose it finds, with nothing to fit
     and nothing to drift. `wearables` reads this table; so does the body.
     """
+    if hasattr(skeleton, "as_skeleton"):
+        skeleton = skeleton.as_skeleton()
     P = skeleton.points
     ids = {n: i for i, n in enumerate(KEYPOINT_NAMES)}
     B = getattr(skeleton, "body", None)

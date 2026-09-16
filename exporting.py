@@ -116,14 +116,43 @@ def frame_rect(view_w, view_h, aspect):
             (view_w + fw) / 2.0, (view_h + fh) / 2.0)
 
 
+# Which rig bone hides which keypoint, so "hide the left arm" still takes the
+# arm out of the pose PNG. The five face keypoints ride the skull and the
+# neck is the shoulder midpoint, so those follow the head and the collars.
+KEYPOINT_BONES = {
+    "nose": "head", "neck": "spine01", "l_eye": "head", "r_eye": "head",
+    "l_ear": "head", "r_ear": "head",
+    "l_shoulder": "clavicle.L", "r_shoulder": "clavicle.R",
+    "l_elbow": "lowerarm01.L", "r_elbow": "lowerarm01.R",
+    "l_wrist": "wrist.L", "r_wrist": "wrist.R",
+    "l_hip": "upperleg01.L", "r_hip": "upperleg01.R",
+    "l_knee": "lowerleg01.L", "r_knee": "lowerleg01.R",
+    "l_ankle": "foot.L", "r_ankle": "foot.R",
+}
+
+
 def project_people(figures, camera, rect, out_w, out_h):
-    """Every figure's keypoints in export pixels, with their visibility."""
+    """Every figure's EIGHTEEN keypoints in export pixels, with visibility.
+
+    Read off the posed rig, not taken from the figure's joints: a figure holds
+    104 of those and the OpenPose format has eighteen, in its own order, with
+    its own idea of where a shoulder and a neck are. Handing it the armature
+    instead runs off the end of the palette - which is what it did.
+    """
     x0, y0, x1, y1 = rect
     sx, sy = out_w / (x1 - x0), out_h / (y1 - y0)
-    return [([((px - x0) * sx, (py - y0) * sy)
-              for px, py, _ in (camera.project(pt) for pt in figure.points)],
-             list(figure.visible))
-            for figure in figures]
+    out = []
+    for figure in figures:
+        drawn = figure.as_skeleton() if hasattr(figure, "as_skeleton") \
+            else figure
+        seen = ([figure.visible[figure.pose.bone(KEYPOINT_BONES[n])]
+                 if KEYPOINT_BONES.get(n) in figure.pose.index else True
+                 for n in KEYPOINT_NAMES]
+                if hasattr(figure, "pose") else list(figure.visible))
+        out.append(([((px - x0) * sx, (py - y0) * sy)
+                     for px, py, _ in (camera.project(pt)
+                                       for pt in drawn.points)], seen))
+    return out
 
 
 def pose_image(figures, camera, rect, out_w, out_h, thick_lines=True):
@@ -287,34 +316,20 @@ def anatomy_depth_image(figures, camera, rect, out_w, out_h, thickness=1.0,
 
 
 def pose_body(figure, mesh):
-    """(solution, keypoints) for one figure on its own rig.
+    """(solution, keypoints) for one figure - both read off its own rig.
 
-    The rig is POSED, not fitted. The older path aimed each bone at a keypoint
-    and then slid and scaled it until it landed there, so the body came out
-    wearing the keypoint skeleton's proportions - stretched by up to a tenth
-    per segment, and every disagreement between the two conventions had to be
-    reconciled by hand somewhere in `mesh_backend`. A depth map does not need
-    any of that: eighteen keypoints are a good witness to which way a limb
-    points and a poor one to how long it is, so only the directions are taken
-    and the body keeps every length it was measured with.
+    There is nothing to solve any more. The figure IS the armature: what the
+    editor dragged is a local rotation per bone, which is exactly what the
+    skinning wants, so this hands it over and reads the eighteen keypoints
+    back off the result for whoever still wants a pose PNG.
 
-    The keypoints handed back are read off the posed rig rather than the ones
-    that went in, so the OpenPose PNG describes the same body the depth map
-    shows. It is the only order that cannot disagree with itself.
+    What stood here was a solver that aimed each of the rig's bones at one of
+    eighteen keypoints. It worked, and it was still a translation between two
+    descriptions of one pose - so it could only ever lose what the poorer of
+    the two could not say, which was the whole hand, the collarbones, the roll
+    of every limb and 85 of the rig's 104 bones.
     """
-    import mesh_backend
-    rest = build_rest_points(figure.body)
-    stature = figure.body.get("stature")
-    solution = mesh_backend.pose_rig(mesh, {name: figure.points[i]
-                                            for i, name
-                                            in enumerate(KEYPOINT_NAMES)},
-                                     mesh.get("roles"), rest_points=rest,
-                                     stature=stature,
-                                     extremities=clean_extremities(
-                                         getattr(figure, "extremities", None)))
-    riders = mesh_backend.keypoint_riders(mesh, rest, mesh.get("roles"),
-                                          stature=stature)
-    return solution, mesh_backend.keypoints_of(solution, riders, mesh)
+    return figure.solution(), figure.keypoints()
 
 
 def rigged_keypoints(jobs):
@@ -416,35 +431,31 @@ def rigged_depth_image(jobs, camera, rect, out_w, out_h, props=(),
                        brightest=GROUND_BRIGHT)
 
 
-def body_frame(skeleton):
-    """(side, up, facing) of the figure as it stands now, side to its left."""
-    frame = Skeleton.torso_frame(skeleton.points)
-    if frame is None:                  # a degenerate torso; fall back to world
-        return (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
-    return frame
+def body_frame(figure):
+    """(side, up, facing) of the figure as it stands now, side to its left.
+
+    Read off the rig's own hips and spine rather than off a keypoint torso:
+    the pelvis is a bone with an orientation, which is a better witness to
+    which way someone is facing than three points that happen to lie near it.
+    """
+    return figure.body_frame()
 
 
 def silhouette_points(figure):
-    """Keypoints plus the ends of the parts that have no keypoint of their own.
+    """The figure's own surface - which is what has to fit in the frame.
 
-    The crown, the hands and the feet all reach well past the last keypoint on
-    their chain - a hand is another 17 cm past the wrist - so framing on the
-    keypoints alone crops them off, which is exactly what it did to a figure
-    lying down.
+    This used to be the eighteen keypoints plus a hand-written allowance for
+    every part that reaches past the last keypoint on its chain: 14 cm above
+    the nose for the crown, 19 past the wrist for a hand, 21 in front of the
+    ankle for a toe. Every one of those was a guess at a body it could not
+    see, and they were all wrong by a centimetre or two on any preset but the
+    average adult male.
+
+    The figure carries a rigged mesh now, so the silhouette is the mesh. It is
+    exact for every preset, and a body that is wearing something is measured
+    with it on rather than being allowed for.
     """
-    points = list(figure.points)
-    at = lambda name: figure.points[INDEX[name]]
-    head_up = vnorm(vsub(at("nose"), at("neck")))
-    points.append(vadd(at("nose"), vmul(head_up, 14.0)))
-    for side in ("r", "l"):
-        forearm = vnorm(vsub(at(side + "_wrist"), at(side + "_elbow")))
-        points.append(vadd(at(side + "_wrist"), vmul(forearm, 19.0)))
-        shin = vnorm(vsub(at(side + "_ankle"), at(side + "_knee")))
-        sole = vadd(at(side + "_ankle"), vmul(shin, 8.0))
-        _side, _up, facing = body_frame(figure)
-        points.append(vadd(sole, vmul(facing, 21.0)))
-        points.append(vadd(sole, vmul(facing, -9.0)))
-    return points
+    return [tuple(v) for v in figure.surface()]
 
 
 def frame_scene(figures, camera, rect, margin=1.06, props=(), grow=1.9):

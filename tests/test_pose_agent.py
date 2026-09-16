@@ -157,11 +157,12 @@ check("a model plan is used when one arrives",
       report["source"].startswith("stub-7b"), report["source"])
 check("and the preset it chose is applied",
       figures[0].body.get("preset") == "Female, average")
-rest_lengths = [vlen(vsub(figures[0].points[c], figures[0].points[p]))
-                for p, c in LIMB_SEQ]
-from openpose3d_editor import Skeleton, preset_params
-fresh = Skeleton(preset_params("Female, average"))
-want = [vlen(vsub(fresh.points[c], fresh.points[p])) for p, c in LIMB_SEQ]
+# every bone of the armature against the same body untouched: 103 of them,
+# not the seventeen limbs eighteen keypoints could describe
+import rigpose
+rest_lengths = list(figures[0].lengths.values())
+fresh = rigpose.figure_for("Female, average")
+want = list(fresh.lengths.values())
 check("and no bone changed length applying it",
       max(abs(a - b) for a, b in zip(rest_lengths, want)) < 1e-9)
 server.shutdown()
@@ -229,16 +230,16 @@ check("the catalogue never shadows a basic stance",
       all(pose_agent.STANCES[n] is everyday.POSES[n]
           or n in ("walking", "running", "sitting", "t_pose")
           for n in everyday.POSES))
-walker = Skeleton()
+walker = rigpose.figure_for("Male, average")
 warnings = pose_agent.apply_commands(walker, [{"op": "stance",
                                                "name": "walking"}])
 check("an aliased stance resolves to the real one", not warnings
-      and abs(walker.points[INDEX["l_knee"]][2]) > 5.0,
-      "knee moved %.1f cm forward" % walker.points[INDEX["l_knee"]][2])
+      and abs(walker.at("l_knee")[2]) > 5.0,
+      "knee moved %.1f cm forward" % walker.at("l_knee")[2])
 
 pose_agent.STANCES["ouroboros"] = [{"op": "stance", "name": "ouroboros"}]
 try:
-    victim = Skeleton()
+    victim = rigpose.figure_for("Male, average")
     warnings = pose_agent.apply_commands(victim, [{"op": "stance",
                                                    "name": "ouroboros"}])
     check("a stance that reaches itself is reported, not a stack overflow",
@@ -253,12 +254,12 @@ finally:
 # ground is its own lowest foot, it came out 86 cm tall with the desk in front
 # of it ending up below the seat.
 import props as props_module
-seat_first, objects_first = Skeleton(), []
+seat_first, objects_first = rigpose.figure_for("Male, average"), []
 pose_agent.apply_commands(seat_first,
                           [{"op": "place", "shape": "chair",
                             "at": "under_hips"},
                            {"op": "stance", "name": "sitting"}], objects_first)
-seat_last, objects_last = Skeleton(), []
+seat_last, objects_last = rigpose.figure_for("Male, average"), []
 pose_agent.apply_commands(seat_last,
                           [{"op": "stance", "name": "sitting"},
                            {"op": "place", "shape": "chair",

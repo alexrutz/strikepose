@@ -27,8 +27,7 @@ check("the panel has a prompt box", hasattr(app, "prompt_entry"))
 check("and says what it needs before it is used",
       "model" in app.prompt_status.get().lower(), app.prompt_status.get())
 
-lengths = {c: vlen(vsub(app.skeleton.points[c], app.skeleton.points[p]))
-           for p, c in LIMB_SEQ}
+lengths = dict(app.skeleton.lengths)
 before = list(app.skeleton.points)
 
 # no model is running in the test environment, so this goes through the
@@ -40,13 +39,12 @@ check("posing from the prompt reports which route read it",
       "keywords" in app.prompt_status.get(), app.prompt_status.get())
 check("and it actually moved the figure",
       any(vlen(vsub(a, b)) > 1.0 for a, b in zip(before, app.skeleton.points)))
-thigh = vnorm(vsub(app.skeleton.points[9], app.skeleton.points[8]))
+thigh = vnorm(vsub(app.skeleton.at("r_knee"), app.skeleton.at("r_hip")))
 check("into the pose that was asked for", vdot(thigh, (0.0, -1.0, 0.0)) > 0.9,
       "thigh down %.3f" % vdot(thigh, (0.0, -1.0, 0.0)))
-after = {c: vlen(vsub(app.skeleton.points[c], app.skeleton.points[p]))
-         for p, c in LIMB_SEQ}
+after = dict(app.skeleton.lengths)     # all 103 bones of the armature
 check("without resizing a single bone",
-      max(abs(after[c] - lengths[c]) for c in lengths) < 1e-6)
+      max(abs(after[j] - lengths[j]) for j in lengths) < 1e-6)
 
 app.undo()
 root.update()

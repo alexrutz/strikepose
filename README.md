@@ -1,8 +1,9 @@
 # 3D OpenPose editor
 
-Author OpenPose skeletons in 3D and export a pose map and a matching depth map
-for ControlNet. Limbs keep a fixed length: dragging a joint moves it on the
-sphere of reach around its parent, so the drop point sets direction, never size.
+Pose a rigged human body in 3D and export a depth map, and a matching OpenPose
+pose map, for ControlNet. What you drag is the body's own 104-bone armature:
+grab a joint and the bone above it swings, carrying everything below. Bones
+cannot change length, because a rotation cannot change one.
 
     python3 openpose3d_editor.py
 
@@ -51,12 +52,25 @@ one that ships. Aiming a bone is a minimal rotation and there is none onto
 exactly the reverse of where it started, so a rig whose arms rest out to the
 side has an unstable roll that Anny's A-pose simply does not have.
 
-The rig is *posed*, not fitted: each bone is rotated to point the way its two
-keypoints do and nothing is slid or resized, so every segment comes out at the
-length its author drew it. Sizing it is a unit conversion, because
-`tools/make_bodies.py` bisects each body onto its preset's stature. The
-eighteen OpenPose keypoints are then read back off the posed rig, so the pose
-map and the depth map cannot disagree about where the figure is.
+## The armature is the pose
+
+The editor used to drag eighteen OpenPose keypoints and solve the rig onto
+them. That was a translation between two descriptions of one pose, and it
+could only lose whatever the poorer of the two could not say: the whole hand,
+both collarbones, the roll of every limb, and 85 of the rig's 104 bones.
+
+There is one description now. A pose is a local rotation per bone; a drag
+composes a rotation; the depth map is skinned from the same array with nothing
+in between. Every finger joint and every toe is a bone you can drag (press
+**K** to show them), a forearm pronates, a collarbone shrugs. Sizing the rig
+is a unit conversion, because `tools/make_bodies.py` bisects each body onto
+its preset's stature, so nothing scales a bone either.
+
+The eighteen keypoints are still there, as **output**: `keypoints_of` reads
+them off the posed rig for the pose PNG, so the two images cannot disagree
+about where the figure is. They travel back in exactly twice - opening a scene
+file written before this change, and a drag from the phone, which has only
+eighteen points to offer. Both are lossy imports and say so.
 
 The built-in swept anatomy draws the viewport and cuts garments out; it is
 never an export. Press **P** to see the armature that will be exported, **B**
@@ -236,10 +250,14 @@ floor at all, so adding the ground never costs the subject any modelling.
 
 ## Hands and feet
 
-OpenPose stops at the wrist and the ankle, so nothing in a pose says which way
-a palm faces or whether a toe points in - the rig's hand rides the forearm and
-its foot rides the shin. The **Hands and feet** panel on the Pose tab sets the
-rest: pick a hand, a foot, or both of either, and two sliders do it.
+Nothing in a pose says which way a palm faces or whether a toe points in, so
+it has to be said. The **Hands and feet** panel on the Pose tab is the quick
+way: pick a hand, a foot, or both of either, and two sliders do it.
+
+Underneath they are ordinary bones. Press **K** and the thirty bones of each
+hand, the fifteen of each foot and the face rig appear in the viewport and
+drag like anything else, so a single finger is a drag away when the sliders
+are not enough.
 
     bend   the hand curls towards its own palm
     turn   with the arm at rest, the palm rolls back

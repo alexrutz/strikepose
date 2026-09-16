@@ -56,6 +56,18 @@ from raster import (depth_to_grey, inside_polygon, render_depth,
                     silhouette_quads, solid_quads)
 from scenefile import (scene_from_dict, scene_load, scene_objects,
                        scene_to_dict)
+import rigpose
+
+FINE_BONES = ("finger", "metacarpal", "toe", "eye", "jaw", "tongue",
+              "special", "orbicularis", "levator", "risorius", "temporalis",
+              "oculi", "oris", "nose", "cheek", "brow", "lip", "chin",
+              "ear", "palm")
+
+
+def _is_fine(name):
+    """A bone too small to be worth drawing at body zoom."""
+    return name.lower().startswith(FINE_BONES)
+
 from skeleton import (ADJACENCY, CHILDREN, COLORS, EXTREMITY_ANGLES,
                       FIGURE_BODY_TINTS, FIGURE_STYLES, GIRDLE,
                       KEYPOINT_NAMES, LIMB_SEQ, MIRROR_OF, MIRROR_PAIRS,
@@ -139,13 +151,12 @@ HELP = [
     "Right-drag        pan     Wheel  zoom",
     "Shift-drag        push joint away from you",
     "Ctrl-drag         pull joint towards you",
-    "Alt-drag / L      change the limb's length",
     "F  flip selected bone through the screen",
-    "V  toggle keypoint visibility",
+    "V  hide the selected bone",
     "M  mirror   R  reset   Ctrl+Z  undo",
-    "B  body preview   P  full depth map",
-    "S  mirror edits   A  anchor (up to 2)",
-    "< >  tip about the hinge axis",
+    "B  swept preview   P  full depth map",
+    "K  fingers, toes and face",
+    "S  mirror edits   A  anchor a joint",
     "Double click  flip a limb front/back",
     "O  front/left/top + two 3/4 views",
     "X  randomize   Shift+X  again, new seed",
@@ -231,8 +242,9 @@ class EditorApp:
         self.part_target = tk.StringVar(value=PART_TARGETS[0])
         self.part_angles = (tk.DoubleVar(value=0.0), tk.DoubleVar(value=0.0))
         self.part_status = tk.StringVar(
-            value="Eighteen keypoints stop at the wrist and the ankle; these "
-                  "two angles each are the rest.")
+            value="A hand and a foot are set, not inferred - nothing in a "
+                  "pose says which way a palm faces. Every finger and toe is "
+                  "a bone you can also drag: press K.")
         self._part_sync = False
         self.random_parts = {
             part: tk.BooleanVar(value=part in randomize.DEFAULT_PARTS)
@@ -243,7 +255,7 @@ class EditorApp:
             value="Edge cases a catalogue never reaches. 1.0 is a "
                   "contortionist. A seed repeats one exactly, so an odd "
                   "figure can be reported.")
-        self.figures = [Skeleton(preset_params(DEFAULT_PRESET))]
+        self.figures = [rigpose.figure_for(DEFAULT_PRESET)]
         self.active = 0
         self.figure_label = tk.StringVar(value="Person 1 of 1")
         self.turn_step = tk.StringVar(value="15")
@@ -274,7 +286,7 @@ class EditorApp:
         # The rig is what the export is made of, so it is what the viewport
         # shows. The swept body is the fast approximation underneath it and
         # defaults off now that there is something better to look at.
-        self.show_rig = True
+        self.show_fine = False
         self.show_body = False
         self._parts_cache = {}
         self._parts_sig = None
@@ -331,19 +343,18 @@ class EditorApp:
     def add_figure(self, copy_active=False):
         self.push_undo()
         if copy_active:
-            new = Skeleton(dict(self.skeleton.body))
-            new.points = list(self.skeleton.points)
+            new = rigpose.figure_for(self.skeleton.body.get("preset",
+                                                            DEFAULT_PRESET))
+            new.pose.restore(self.skeleton.pose.snapshot())
             new.visible = list(self.skeleton.visible)
-            new.lengths = dict(self.skeleton.lengths)
-            new.body_scale = self.skeleton.body_scale
         else:
-            new = Skeleton(preset_params(self.preset_name.get()))
+            new = rigpose.figure_for(self.preset_name.get())
         # stand the newcomer clear of everyone else, along the view's right
         right, _, _ = self.camera.basis()
         edge = max(vdot(p, right) for f in self.figures for p in f.points)
-        shift = edge + 55.0 - vdot(new.points[ROOT], right)
-        base = self.figures[self.active].points[ROOT]
-        new.translate(vsub(vadd(base, vmul(right, shift)), new.points[ROOT]))
+        shift = edge + 55.0 - vdot(new.points[0], right)
+        base = self.figures[self.active].points[0]
+        new.translate(vsub(vadd(base, vmul(right, shift)), new.points[0]))
         self.figures.append(new)
         self.set_active(len(self.figures) - 1, announce=False)
         self.status.set("Added person %d." % len(self.figures))
@@ -385,24 +396,23 @@ class EditorApp:
             return 15.0
 
     def rotate_figure(self, direction, axis="y"):
-        """Turn the active person about a world axis, pivoting on the anchor
-        joint so an anchored knee or hip stays put."""
+        """Turn the active person about a world axis.
+
+        One rotation of the root bone, which carries everything because
+        everything hangs off it - so this cannot change a bone length, where
+        rewriting every point by hand could and the old version had to be
+        trusted not to. An anchored joint is held by sliding the figure back
+        afterwards, which is what one anchor means.
+        """
         self.push_undo()
         sk = self.skeleton
-        pivot = sk.points[sk.anchor]
+        pinned = ([sk.points[j] for j in sk.anchors] or [None])[0]
         angle = math.radians(direction * self._step())
-        ca, sa = math.cos(angle), math.sin(angle)
-        turned = []
-        for point in sk.points:
-            dx, dy, dz = vsub(point, pivot)
-            if axis == "y":
-                out = (dx * ca + dz * sa, dy, -dx * sa + dz * ca)
-            elif axis == "x":
-                out = (dx, dy * ca - dz * sa, dy * sa + dz * ca)
-            else:
-                out = (dx * ca - dy * sa, dx * sa + dy * ca, dz)
-            turned.append(vadd(pivot, out))
-        sk.points = turned
+        sk.pose.rotate(sk.pose.roots[0],
+                       {"y": (0.0, 1.0, 0.0), "x": (1.0, 0.0, 0.0)}.get(
+                           axis, (0.0, 0.0, 1.0)), angle)
+        if pinned is not None:
+            sk.hold_anchors(pinned)
         self.redraw()
         self.status.set("Person %d turned %.1f degrees about %s."
                         % (self.active + 1, direction * self._step(),
@@ -756,7 +766,7 @@ class EditorApp:
                        ("Bottom", lambda: self.set_view("bottom"))],
                 cols=3, small=True)
         switch(body, "Extra views (O)", "show_ortho")
-        switch(body, "Native rig (K)", "show_rig")
+        switch(body, "Fingers and toes (K)", "show_fine")
         switch(body, "Swept preview (B)", "show_body")
         switch(body, "Floor grid (G)", "show_grid")
         switch(body, "Joint names (N)", "show_labels")
@@ -1074,7 +1084,7 @@ class EditorApp:
             self.props = deepcopy(snap[2])
             self.active_prop = snap[3]
         while len(self.figures) < len(states):
-            self.figures.append(Skeleton())
+            self.figures.append(rigpose.figure_for(DEFAULT_PRESET))
         del self.figures[len(states):]
         for figure, state in zip(self.figures, states):
             figure.restore(state)
@@ -1289,9 +1299,15 @@ class EditorApp:
                         "export." if self.show_body else "Swept preview off.")
 
     def toggle_rig(self):
-        self.set_flag("show_rig", not self.show_rig)
-        self.status.set("Native rig on: the armature the depth map is made "
-                        "from." if self.show_rig else "Native rig off.")
+        """The fine bones: thirty in each hand, fifteen in each foot, and the
+        face rig. They are real bones and every one of them is posable, but at
+        the zoom you pose a body at they are a smudge over the hand - so they
+        are off until you go looking for them."""
+        self.set_flag("show_fine", not self.show_fine)
+        self.status.set("Fingers, toes and face on: %d more bones to drag."
+                        % sum(1 for n in self.skeleton.pose.names
+                              if _is_fine(n))
+                        if self.show_fine else "Fingers and toes hidden.")
 
     def toggle(self, attr):
         self.set_flag(attr, not getattr(self, attr))
@@ -1346,61 +1362,6 @@ class EditorApp:
             if len(run) >= 4:
                 canvas.create_line(*run, fill=colour, dash=(5, 4))
 
-    def rig_bones(self, figure):
-        """The posed rig's bones for one figure, as world segments.
-
-        This is the armature the depth map is actually made from - Anny's own
-        104 bones, posed by joint angle - rather than the eighteen keypoints
-        that say which way to point them. They are two different things and
-        the editor used to draw only the second, so what you dragged and what
-        came out of the export were never the same picture.
-
-        Cached on the pose, because a drag redraws several times a second and
-        solving is numpy over a hundred bones.
-        """
-        import bodies_lib
-        key = (figure, tuple(tuple(p) for p in self.figures[figure].points))
-        if getattr(self, "_rig_key", None) == key:
-            return self._rig_cache
-        self._rig_key = key
-        self._rig_cache = []
-        try:
-            mesh = bodies_lib.for_figures([self.figures[figure]])[0]
-            if mesh is not None:
-                _solution, _points = pose_body(self.figures[figure], mesh)
-                names = mesh["joint_names"]
-                parents = mesh["parents"]
-                at = lambda j: _solution["bones"][names[j]][1]
-                self._rig_cache = [(at(int(parents[j])), at(j))
-                                   for j in range(len(names))
-                                   if int(parents[j]) >= 0]
-        except Exception:
-            self._rig_cache = []            # no body set, or a rig that will
-        return self._rig_cache              # not map: fall back to keypoints
-
-    def draw_rig(self, camera, canvas, compact=False):
-        """The native armature, drawn back to front with the figure."""
-        segments = []
-        for f in range(len(self.figures)):
-            for a, b in self.rig_bones(f):
-                pa, pb = camera.project(a), camera.project(b)
-                segments.append(((pa[2] + pb[2]) / 2.0, pa, pb, f))
-        if not segments:
-            return False
-        depths = [d for d, _a, _b, _f in segments]
-        lo, hi = min(depths), max(depths)
-        span = max(1e-6, hi - lo)
-        for mid, pa, pb, f in sorted(segments, key=lambda t: -t[0]):
-            near = 1.0 - 0.55 * ((mid - lo) / span)
-            grey = int(70 + 150 * near)
-            if f != self.active:
-                grey = int(grey * 0.75)
-            canvas.create_line(pa[0], pa[1], pb[0], pb[1],
-                               fill="#%02x%02x%02x" % (grey, grey,
-                                                       min(255, grey + 12)),
-                               width=1 if compact else 2, capstyle="round")
-        return True
-
     def draw_body(self, camera=None, canvas=None, coarse=False):
         """Figures and objects, one depth sort across the lot.
 
@@ -1445,7 +1406,12 @@ class EditorApp:
         Returns (figure, joint)."""
         hits = []
         for f in range(len(self.figures)):
+            figure = self.figures[f]
             for i, (sx, sy, depth) in enumerate(self.projected(f, camera)):
+                if not figure.draggable(i):
+                    continue        # the root carries the whole figure
+                if _is_fine(figure.pose.names[i]) and not self.show_fine:
+                    continue        # not drawn, so not grabbable
                 d = math.hypot(sx - x, sy - y)
                 if d < PICK_RADIUS:
                     hits.append((d, depth, f, i))
@@ -1529,7 +1495,7 @@ class EditorApp:
         self.selected = self.drag_joint = idx
         sx, sy, _ = view.camera.project(self.skeleton.points[idx])
         self.drag_offset = (event.x - sx, event.y - sy)
-        self.drag_free_length = free_length or self.length_mode
+        self.drag_free_length = False   # a rotation cannot resize a bone
         self.drag_plane = self.skeleton.sagittal_plane()
         _, _, fwd = view.camera.basis()
         parent_idx = self.skeleton.parent_of(idx)
@@ -1589,12 +1555,12 @@ class EditorApp:
             if self.skeleton.hinge_screen_extent(idx, camera.project) < 8.0:
                 self.status.set(
                     "The hinge is edge-on here: swing %s in the Left or Top "
-                    "view, or use < and >." % KEYPOINT_NAMES[idx])
+                    "view, or use < and >." % self.skeleton.label(idx))
                 return
             angle = self.skeleton.hinge_angle(idx, (mx, my), camera.project)
             if angle is None:
                 self.status.set("%s lies on the hinge axis, nothing to swing."
-                                % KEYPOINT_NAMES[idx])
+                                % self.skeleton.label(idx))
                 return
             self.skeleton.hinge_spin(idx, angle)
             self.redraw()
@@ -1602,11 +1568,14 @@ class EditorApp:
             return
         ax, ay, _ = camera.project(pivot)
         offset = camera.screen_delta_to_world(mx - ax, my - ay)
-        target = self.skeleton.solve_drag(idx, offset, fwd, self.drag_sign,
-                                          self.drag_free_length)
-        self.skeleton.move_joint(idx, target, stretch=self.drag_free_length)
-        if self.symmetry and idx in MIRROR_OF:
-            self.mirror_drag(idx, target)
+        pinned = ([self.skeleton.points[j] for j in self.skeleton.anchors]
+                  or [None])[0]
+        target = self.skeleton.solve_drag(idx, offset, fwd, self.drag_sign)
+        self.skeleton.move_joint(idx, target)
+        if self.symmetry:
+            self.skeleton.mirror_drag(idx, target)
+        if pinned is not None:
+            self.skeleton.hold_anchors(pinned)
         self.redraw()
         self.report_joint(idx)
 
@@ -1620,7 +1589,7 @@ class EditorApp:
         """
         guard = getattr(self, "_length_guard", None)
         self._length_guard = None
-        if guard is None or self.drag_free_length or self.length_mode:
+        if guard is None:
             return
         moved = [c for c in guard
                  if abs(self.skeleton.lengths.get(c, guard[c]) - guard[c]) > 1e-6]
@@ -1629,31 +1598,9 @@ class EditorApp:
         if self.undo_stack:
             self.restore_scene(self.undo_stack.pop())
         self.status.set("That drag would have resized %s, so it was undone. "
-                        "Hold Alt or turn on length mode to resize a limb."
-                        % KEYPOINT_NAMES[moved[0]])
-
-    def mirror_drag(self, idx, target):
-        """Apply the drag to the opposite limb.
-
-        The reflected *position* is the wrong thing to aim at: it only sits at
-        the right distance from the twin's own parent while the figure is
-        perfectly symmetric. Reflect the bone's direction instead and give it
-        the twin's own length, which holds however asymmetric the pose is.
-        """
-        twin = MIRROR_OF[idx]
-        skeleton = self.skeleton
-        parent = skeleton.parent_of(idx)
-        twin_parent = skeleton.parent_of(twin)
-        if parent < 0 or twin_parent < 0:
-            return
-        _origin, normal = self.drag_plane
-        offset = vsub(target, skeleton.points[parent])
-        mirrored = vsub(offset, vmul(normal, 2.0 * vdot(offset, normal)))
-        if vlen(mirrored) < 1e-9:
-            return
-        length = skeleton.bone_length(twin_parent, twin)
-        skeleton.move_joint(twin, vadd(skeleton.points[twin_parent],
-                                       vmul(vnorm(mirrored), length)))
+                        "A rotation cannot do that, so if you are reading "
+                        "this it is a bug worth reporting."
+                        % self.skeleton.label(moved[0]))
 
     def on_release(self, _event, view=None):
         was_dragging = self.drag_joint is not None or self.drag_prop is not None
@@ -1686,13 +1633,13 @@ class EditorApp:
         self.selected = idx
         if self.skeleton.parent_of(idx) < 0:
             self.status.set("%s has nothing above it to swing."
-                            % KEYPOINT_NAMES[idx])
+                            % self.skeleton.label(idx))
             return
         self.push_undo()
         _, _, fwd = view.camera.basis()
         self.skeleton.flip_depth(idx, fwd)
-        if self.symmetry and idx in MIRROR_OF:
-            self.skeleton.flip_depth(MIRROR_OF[idx], fwd)
+        if self.symmetry and idx in self.skeleton.mirror:
+            self.skeleton.flip_depth(self.skeleton.mirror[idx], fwd)
         self.redraw()
         self.report_joint(idx)
 
@@ -1708,49 +1655,41 @@ class EditorApp:
             self.status.set("Select a joint to anchor it.")
             return
         self.push_undo()
+        # One anchor, not two. The second one used to make a hinge by
+        # re-rooting the keypoint tree at the pair, and a rig cannot be
+        # re-rooted - every bone hangs off one root. Pinning a single joint
+        # still means what it always did: whatever the figure does next, it
+        # does without moving that point.
         anchors = list(self.skeleton.anchors)
         if self.selected in anchors:
-            anchors.remove(self.selected)
+            anchors = []
         else:
-            anchors.append(self.selected)
-            if len(anchors) > 2:
-                anchors.pop(0)          # oldest gives way
-        self.skeleton.anchors = anchors
+            anchors = [self.selected]
+        self.skeleton.anchor(anchors[0] if anchors else None)
         self.redraw()
         if not anchors:
-            self.status.set("Anchors cleared, back to the neck.")
-        elif len(anchors) == 1:
-            self.status.set("Anchored at %s: the body pivots around it. "
-                            "Anchor a second joint to make a hinge."
-                            % KEYPOINT_NAMES[anchors[0]])
+            self.status.set("Anchor cleared.")
         else:
-            self.status.set("Hinge %s to %s: dragging now swings about that "
-                            "axis only." % (KEYPOINT_NAMES[anchors[0]],
-                                            KEYPOINT_NAMES[anchors[1]]))
+            self.status.set("Anchored at %s: the figure slides to keep it "
+                            "where it is." % self.skeleton.label(anchors[0]))
 
     def clear_anchor(self):
         self.push_undo()
-        self.skeleton.anchors = []
+        self.skeleton.anchor(None)
         self.redraw()
-        self.status.set("Anchors cleared, back to the neck.")
+        self.status.set("Anchor cleared.")
 
     def rotate_hinge(self, direction):
-        """Step the torso about the hinge axis, so it tips cleanly rather than
-        being swung by hand."""
-        if not self.skeleton.hinged:
-            self.status.set("Set two anchors first, then this tips the body "
-                            "about the axis between them.")
-            return
-        self.push_undo()
-        origin, axis = self.skeleton.hinge_axis()
-        moving = self.skeleton.hinge_set(ROOT)
-        self.skeleton.rotate_about_axis(
-            moving, origin, axis, math.radians(direction * self._step()))
-        self.redraw()
-        self.status.set("Tipped %.1f degrees about %s-%s."
-                        % (direction * self._step(),
-                           KEYPOINT_NAMES[self.skeleton.anchors[0]],
-                           KEYPOINT_NAMES[self.skeleton.anchors[1]]))
+        """Two anchors used to make a hinge the body swung about.
+
+        That was a re-rooting of the keypoint tree - pick a new root and the
+        chain runs outward from it - and a rig cannot be re-rooted: every bone
+        hangs off one root, so the same gesture is an IK solve. One anchor
+        still pins a joint, which is the half of it that carries over.
+        """
+        self.status.set("The two-anchor hinge is not on the rig path. "
+                        "Anchor one joint instead: the figure slides to keep "
+                        "it where it is.")
 
     def on_pan_start(self, event):
         self.pan_last = (event.x, event.y)
@@ -1824,7 +1763,7 @@ class EditorApp:
 
     def reset_pose(self):
         self.push_undo()
-        self.skeleton = Skeleton(preset_params(self.preset_name.get()))
+        self.skeleton = rigpose.figure_for(self.preset_name.get())
         self.redraw()
         self.status.set("Rest pose restored.")
 
@@ -1957,7 +1896,8 @@ class EditorApp:
         _, _, fwd = self.camera.basis()
         self.skeleton.flip_depth(self.selected, fwd)
         self.redraw()
-        self.status.set(f"Flipped {KEYPOINT_NAMES[self.selected]} through the view plane.")
+        self.status.set("Flipped %s through the view plane."
+                        % self.skeleton.label(self.selected))
 
     def toggle_visibility(self):
         if self.selected is None:
@@ -1966,25 +1906,34 @@ class EditorApp:
         self.skeleton.visible[self.selected] = not self.skeleton.visible[self.selected]
         state = "shown" if self.skeleton.visible[self.selected] else "hidden"
         self.redraw()
-        self.status.set(f"{KEYPOINT_NAMES[self.selected]} {state}.")
+        self.status.set(f"{self.skeleton.label(self.selected)} {state}.")
 
     def toggle_length_mode(self):
-        self.length_mode = not self.length_mode
-        self.status.set("Length mode on: dragging changes limb length."
-                        if self.length_mode else "Length mode off.")
+        """There is no length mode any more.
+
+        It stretched a bone by dragging with Alt held. The figure was a
+        keypoint skeleton then, whose proportions were yours to edit; it is a
+        measured body's armature now, and the only thing that resizes it is
+        the figure's stature, on the Figure tab. Every drag is a rotation, so
+        a bone CANNOT change length - the runtime guard that used to catch it
+        going wrong has nothing left to catch.
+        """
+        self.status.set("Bones keep the length the body was measured with. "
+                        "Resize the whole figure with Stature, on Figure.")
         self.redraw()
 
     def report_joint(self, idx):
-        if idx not in PARENT:
+        parent = self.skeleton.parent_of(idx)
+        if parent < 0:
             self.status.set("Moving the whole figure.")
             return
         _, _, fwd = self.camera.basis()
-        offset = vsub(self.skeleton.points[idx], self.skeleton.points[PARENT[idx]])
+        offset = vsub(self.skeleton.points[idx], self.skeleton.points[parent])
         length = vlen(offset)
         depth = vdot(offset, fwd)
         visible_len = math.sqrt(max(0.0, length * length - depth * depth))
         self.status.set(
-            f"{KEYPOINT_NAMES[idx]}   length {length:.1f}   "
+            f"{self.skeleton.label(idx)}   length {length:.1f}   "
             f"on screen {visible_len:.1f}   depth {depth:+.1f}")
 
     # -- file I/O ----------------------------------------------------------
@@ -2239,7 +2188,7 @@ class EditorApp:
         return (tuple(tuple(f.points) for f in self.figures),
                 tuple(tuple(f.visible) for f in self.figures),
                 tuple(tuple(f.anchors) for f in self.figures),
-                self.active, self.selected, self.show_body, self.show_rig,
+                self.active, self.selected, self.show_body, self.show_fine,
                 self._thickness())
 
     def redraw(self, force_ortho=False):
@@ -2283,7 +2232,6 @@ class EditorApp:
             self.draw_frame()
         if self.show_body:
             self.draw_body(camera, c, coarse=compact)
-        rig_drawn = self.show_rig and self.draw_rig(camera, c, compact)
 
         if self.skeleton.hinged:
             a, b = self.skeleton.anchors
@@ -2314,37 +2262,50 @@ class EditorApp:
         # front of each other overlap correctly
         limbs = []
         for f, screen in enumerate(screens):
-            visible = self.figures[f].visible
-            for i, (a, b) in enumerate(LIMB_SEQ):
-                if visible[a] and visible[b]:
-                    limbs.append(((screen[a][2] + screen[b][2]) / 2.0, f, i))
-        for mid, f, i in sorted(limbs, key=lambda t: -t[0]):
-            a, b = LIMB_SEQ[i]
+            figure = self.figures[f]
+            visible = figure.visible
+            for j, p in enumerate(figure.pose.parents):
+                p = int(p)
+                if not (visible[j] and visible[p]) or p < 0:
+                    continue
+                if _is_fine(figure.pose.names[j]) and not self.show_fine:
+                    continue
+                limbs.append(((screen[j][2] + screen[p][2]) / 2.0, f, j, p))
+        for mid, f, j, p in sorted(limbs, key=lambda t: -t[0]):
             screen = screens[f]
             factor = 1.0 - 0.5 * ((mid - lo) / span) if self.depth_shading else 1.0
             if f != self.active:
                 factor *= 0.92          # dim, but not enough to hide the tint
-            # With the rig on screen the OpenPose limbs are the handles you
-            # drag, not the subject, so they thin down out of its way.
-            thick = ((2 if compact else 3) if rig_drawn
-                     else (3 if compact else 7) if self.show_body
-                     else (5 if compact else 9))
-            c.create_line(screen[a][0], screen[a][1], screen[b][0], screen[b][1],
-                          fill=self.shade(self.figure_palette(f)[i], factor),
+            # A bone of the hand is a centimetre long and there are thirty of
+            # them; a thigh is forty. One width for both turns a hand into a
+            # blob, so the smaller bones draw thinner.
+            name = self.figures[f].pose.names[j]
+            fine = _is_fine(name)
+            thick = (1 if compact else 2) if fine else \
+                    (2 if compact else 4) if self.show_body else \
+                    (2 if compact else 5)
+            c.create_line(screen[p][0], screen[p][1], screen[j][0], screen[j][1],
+                          fill=self.shade(rigpose.bone_colour(name), factor),
                           width=thick, capstyle="round")
 
         joints = [(screen[i][2], f, i) for f, screen in enumerate(screens)
-                  for i in range(len(KEYPOINT_NAMES))]
+                  for i in range(len(screen))
+                  if self.figures[f].draggable(i)
+                  and (self.show_fine
+                       or not _is_fine(self.figures[f].pose.names[i]))]
         for depth, f, i in sorted(joints, key=lambda t: -t[0]):
             x, y, _ = screens[f][i]
             factor = 1.0 - 0.5 * ((depth - lo) / span) if self.depth_shading else 1.0
             if f != self.active:
                 factor *= 0.92
-            r = (2.5 if compact else 4.0) if self.show_body \
-                else (3.5 if compact else 5.5)
+            name = self.figures[f].pose.names[i]
+            fine = _is_fine(name)
+            r = (1.2 if compact else 2.0) if fine else \
+                (2.0 if compact else 3.2) if self.show_body else \
+                (2.2 if compact else 3.6)
             if self.figures[f].visible[i]:
                 c.create_oval(x - r, y - r, x + r, y + r,
-                              fill=self.shade(self.figure_palette(f)[i], factor),
+                              fill=self.shade(rigpose.bone_colour(name), factor),
                               outline="")
             else:
                 c.create_oval(x - r, y - r, x + r, y + r, outline="#55555f",
@@ -2360,20 +2321,22 @@ class EditorApp:
                 c.create_line(x, y - r - 7, x, y + r + 7, fill="#ffd27f")
                 c.create_oval(x - r - 5, y - r - 5, x + r + 5, y + r + 5,
                               outline="#ffd27f", width=1)
-            if self.show_labels and f == self.active and not compact:
-                c.create_text(x + 10, y - 10, text=KEYPOINT_NAMES[i], fill=MUTED,
-                              anchor="w", font=("TkFixedFont", 8))
+            # Only the named handles get a label: a hundred and four names on
+            # one figure is a wall of text, and "metacarpal3.L" is not what
+            # anyone is looking for anyway.
+            if (self.show_labels and f == self.active and not compact
+                    and name in rigpose.FRIENDLY):
+                c.create_text(x + 10, y - 10, text=rigpose.FRIENDLY[name],
+                              fill=MUTED, anchor="w", font=("TkFixedFont", 8))
 
         if compact:
             return
-        mode = "length" if (self.length_mode or self.drag_free_length) else "rotate"
+        mode = "rotate"
         if self.symmetry:
             mode += " +mirror"
-        if self.skeleton.hinged:
-            mode += " hinge:%s-%s" % (KEYPOINT_NAMES[self.skeleton.anchors[0]],
-                                      KEYPOINT_NAMES[self.skeleton.anchors[1]])
-        elif self.skeleton.anchors:
-            mode += " anchor:" + KEYPOINT_NAMES[self.skeleton.anchors[0]]
+        if self.skeleton.anchors:
+            mode += " anchor:" + self.skeleton.label(
+                next(iter(self.skeleton.anchors)))
         c.create_text(12, 12, anchor="nw", fill=MUTED, font=("TkFixedFont", 9),
                       text=f"yaw {math.degrees(self.camera.yaw):+.0f}"
                            f"   pitch {math.degrees(self.camera.pitch):+.0f}"

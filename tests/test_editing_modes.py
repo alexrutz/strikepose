@@ -26,29 +26,43 @@ check("front view frames the figure",
 
 # --- dragging inside an ortho view edits the figure, does not orbit it
 before_yaw = top.camera.yaw
-sx, sy, _ = top.camera.project(app.skeleton.points[4])
+WRIST_R = app.skeleton.pose.bone("wrist.R")
+WRIST_L = app.skeleton.pose.bone("wrist.L")
+ELBOW_R = app.skeleton.pose.bone("lowerarm01.R")
+ELBOW_L = app.skeleton.pose.bone("lowerarm01.L")
+rest_points = list(app.skeleton.points)
+sx, sy, _ = top.camera.project(app.skeleton.points[WRIST_R])
 app.on_press(E(sx,sy), top)
 for i in range(1,8): app.on_drag(E(sx+3*i, sy+4*i), top)
 app.on_release(E(sx,sy), top)
 check("dragging in the top view moved the wrist",
-      vlen(vsub(app.skeleton.points[4], Skeleton().points[4])) > 1.0)
+      vlen(vsub(app.skeleton.points[WRIST_R], rest_points[WRIST_R])) > 1.0)
 app.on_press(E(5,5), top); app.on_drag(E(60,40), top); app.on_release(E(60,40), top)
 check("locked view refuses to orbit", top.camera.yaw == before_yaw)
 
 # --- symmetry
 app.reset_pose(); app.symmetry = True
 sk = app.skeleton; plane = sk.sagittal_plane()
-sx, sy, _ = app.camera.project(sk.points[3])
+sx, sy, _ = app.camera.project(sk.points[ELBOW_R])
 app.on_press(E(sx,sy))
 for i in range(1,9): app.on_drag(E(sx-6*i, sy-5*i))
 app.on_release(E(sx,sy))
-r, l = sk.points[3], sk.points[6]
-check("mirrored elbow follows", vlen(vsub(l, Skeleton.reflect(r, plane))) < 1e-6,
-      "%.4f cm apart" % vlen(vsub(l, Skeleton.reflect(r, plane))))
+# The body rests facing +Z with its left at +X, so mirroring is a sign flip on
+# X - and because what is mirrored is the limb's ANGLES rather than one
+# joint's position, it holds all the way to the fingertips, which eighteen
+# keypoints had nothing to say about.
+flip = lambda p: (-p[0], p[1], p[2])
+r, l = sk.points[ELBOW_R], sk.points[ELBOW_L]
+check("mirrored elbow follows", vlen(vsub(l, flip(r))) < 1e-6,
+      "%.4e cm apart" % vlen(vsub(l, flip(r))))
 check("wrists carried along too",
-      vlen(vsub(sk.points[7], Skeleton.reflect(sk.points[4], plane))) < 1e-6)
+      vlen(vsub(sk.points[WRIST_L], flip(sk.points[WRIST_R]))) < 1e-6)
+tipR, tipL = sk.pose.bone("finger3-3.R"), sk.pose.bone("finger3-3.L")
+check("and so are the fingertips",
+      vlen(vsub(sk.points[tipL], flip(sk.points[tipR]))) < 1e-6,
+      "%.4e cm apart" % vlen(vsub(sk.points[tipL], flip(sk.points[tipR]))))
 check("bone lengths intact",
-      max(abs(vlen(vsub(sk.points[c],sk.points[p]))-sk.lengths[c]) for p,c in LIMB_SEQ) < 1e-9)
+      max(abs(v - sk.lengths[j]) for j, v in sk.lengths.items()) < 1e-9)
 app.symmetry = False
 
 # --- double click flips hemisphere
@@ -69,31 +83,50 @@ app.on_double(E(*app.camera.project(sk.points[3])[:2]))
 check("double click again flips it back", abs(vdot(vsub(sk.points[3],sk.points[2]),fwd) - d0) < 1e-9)
 
 # --- anchor
+#
+# One joint, pinned: whatever the figure does next, it does without moving
+# that point. Two anchors used to make a hinge by re-rooting the keypoint
+# tree; a rig has one root and every bone hangs off it, so the same gesture is
+# an IK solve rather than a re-parent, and it is not on this path.
 app.reset_pose(); sk = app.skeleton
-app.selected = 9; app.set_anchor()
-check("anchor set to r_knee", sk.anchor == 9)
-knee, ankle, neck = sk.points[9], sk.points[10], sk.points[1]
-sx, sy, _ = app.camera.project(sk.points[8])
+KNEE = sk.pose.bone("lowerleg01.R")
+app.selected = KNEE; app.set_anchor()
+check("anchor set to the right knee", sk.anchors == {KNEE})
+knee, neck = sk.points[KNEE], sk.points[sk.pose.bone("neck01")]
+sx, sy, _ = app.camera.project(sk.points[sk.pose.bone("lowerarm01.R")])
 app.on_press(E(sx,sy))
 for i in range(1,10): app.on_drag(E(sx+7*i, sy-3*i))
 app.on_release(E(sx,sy))
-check("anchored knee stayed put", vlen(vsub(sk.points[9], knee)) < 1e-9)
-check("shin below it stayed put", vlen(vsub(sk.points[10], ankle)) < 1e-9)
-check("upper body rotated around it", vlen(vsub(sk.points[1], neck)) > 1.0)
-app.selected = 9; app.set_anchor()
-check("pressing again clears the anchor", sk.anchor == ROOT)
+check("the anchored knee stayed put", vlen(vsub(sk.points[KNEE], knee)) < 1e-9,
+      "%.2e cm" % vlen(vsub(sk.points[KNEE], knee)))
+check("and the arm that was dragged did move",
+      vlen(vsub(sk.points[sk.pose.bone("wrist.R")], rest_points[
+          sk.pose.bone("wrist.R")])) > 1.0)
+app.selected = KNEE; app.set_anchor()
+check("pressing again clears the anchor", not sk.anchors)
 
 # --- axis rotation in steps
 app.reset_pose(); sk = app.skeleton
 app.turn_step.set("15")
-head0 = sk.points[0]
+before = list(sk.points)
 for _ in range(6): app.rotate_figure(1, "y")
-check("6 x 15 deg about Y returns a quarter turn",
-      abs(vlen(vsub(sk.points[0], sk.points[1])) - vlen(vsub(head0, Skeleton().points[1]))) < 1e-9)
+# 90 degrees about Y: x and z swap, and no bone changes length because a turn
+# is one rotation of the root bone rather than a rewrite of every point
+# about the ROOT BONE's own head, which is where the figure stands, not the
+# world origin
+pivot = before[sk.pose.roots[0]]
+turned = [(pivot[0] + (p[2] - pivot[2]), p[1], pivot[2] - (p[0] - pivot[0]))
+          for p in before]
+drift = max(vlen(vsub(a, b)) for a, b in zip(sk.points, turned))
+check("6 x 15 deg about Y is a quarter turn", drift < 1e-6, "%.2e cm" % drift)
+check("and it resized nothing",
+      max(abs(v - sk.lengths[j]) for j, v in sk.lengths.items()) < 1e-9)
 app.reset_pose(); sk = app.skeleton
-app.selected = 9; app.set_anchor(); knee = sk.points[9]
+app.selected = sk.pose.bone("lowerleg01.R"); app.set_anchor()
+knee = sk.points[sk.pose.bone("lowerleg01.R")]
 app.rotate_figure(1, "x"); app.rotate_figure(1, "z")
-check("rotation pivots on the anchor", vlen(vsub(sk.points[9], knee)) < 1e-9)
+check("rotation pivots on the anchor",
+      vlen(vsub(sk.points[sk.pose.bone("lowerleg01.R")], knee)) < 1e-9)
 app.turn_step.set("bad"); check("bad step falls back to 15", app._step() == 15.0)
 
 # --- perf with the extra views

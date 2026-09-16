@@ -1,5 +1,6 @@
 import os, sys, math; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tkinter as tk
+import rigpose
 from openpose3d_editor import EditorApp, KEYPOINT_NAMES, BODY_PRESETS, vlen, vsub, LIMB_SEQ
 root = tk.Tk(); root.geometry("1180x800")
 app = EditorApp(root); root.update()
@@ -47,7 +48,7 @@ p = os.path.join(tempfile.gettempdir(), "scene.json")
 from openpose3d_editor import scene_to_dict, scene_from_dict
 d = scene_to_dict(app.skeleton, app.camera, app.export_points(512,768), 512,768)
 json.loads(json.dumps(d))
-sk2 = app.skeleton.__class__()
+sk2 = rigpose.figure_for("Male, average")
 scene_from_dict(json.loads(json.dumps(d)), sk2, app.camera)
 print("body params survive json:", sk2.body["preset"], round(sk2.body_scale,3))
 print("OK")

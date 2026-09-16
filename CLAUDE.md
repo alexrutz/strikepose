@@ -9,8 +9,14 @@ pose and depth images for ControlNet. The layout:
 
 - `openpose3d_editor.py` - the entry point and the public surface. What used
   to be one 4300-line file is now `vecmath`, `anthro`, `camera`, `skeleton`,
-  `posemap`, `anatomy`, `raster`, `exporting`, `scenefile`, `randomize` and
-  `ui_app`; this re-exports all of them, so existing callers are untouched.
+  `posemap`, `anatomy`, `raster`, `exporting`, `scenefile`, `randomize`,
+  `rigpose` and `ui_app`; this re-exports all of them, so existing callers are
+  untouched.
+- `rigpose.py` - THE POSE. `RigPose` is a local rotation per bone on Anny's
+  104-bone armature, and `Figure` is one posable person: that armature plus
+  who the body is. This is what the editor drags, what a command applies to,
+  what a scene file stores and what the depth map is skinned from. There is
+  no second description of a pose anywhere.
 - `mesh_backend.py` - loads an Anny body and poses its own armature. This is
   where a depth export comes from, and it is the only place one comes from.
 - `bodies_lib.py` / `bodies/` - the nine rigged bodies, one per preset, built
@@ -29,10 +35,15 @@ pose and depth images for ControlNet. The layout:
 ```
 ./tests/run_all.sh                  # 23 checks; needs python3-tk and xvfb
 python3 tests/test_core.py          # pure maths, no display needed
+python3 rigpose.py --selftest       # the pose itself: FK, drags, undo, files
 python3 mesh_backend.py --selftest  # rigged mesh maths, no model files needed
 python3 randomize.py --selftest     # the randomizer, no display needed
 python3 tests/check_glb.py bodies/*.glb   # the body set itself, not in run_all
 ```
+
+The body set is not optional any more. The editor poses Anny's armature, so
+without `bodies/` there is nothing to pose and nothing to draw; `bodies_lib`
+raises `MissingBodies`, which names the command that builds them.
 
 These are not decoration. Every check in them was written because something
 actually broke. Several bugs below were invisible for multiple releases because
@@ -40,13 +51,19 @@ the test that would have caught them made a wrong assumption.
 
 ## Invariants that must never regress
 
-**A bone may not change length unless explicitly asked.** `Skeleton.move_joint`
-takes `stretch=False` by default. A target at the wrong distance aims the bone;
-it never resizes it. Only the deliberate free-length drag passes `stretch=True`.
-Two separate bugs stretched limbs before this existed: symmetric editing fed a
-reflected *position* into `move_joint`, and a modifier misread made every drag
-look like a free-length drag. There is also a runtime guard, `check_lengths`,
-that reverts a drag which resized a bone without being asked.
+**A bone cannot change length, and that is now structural rather than
+enforced.** Everything that moves a figure - a drag, a randomizer, a command
+from a model - ends in `RigPose.rotate` or `RigPose.aim`, which compose a
+rotation onto one bone's local matrix. A rotation cannot resize anything, so
+there is no flag to get wrong and no free-length drag to misread. `Skeleton`
+still has `move_joint(stretch=...)` because the pure keypoint maths still
+exists and is still tested; nothing the editor does goes through it.
+
+What this replaced is worth remembering, because both bugs were in the FLAG
+and not in the maths: symmetric editing fed a reflected *position* into
+`move_joint`, and a modifier misread made every drag on Windows look like a
+free-length drag. `check_lengths` is still there as a backstop and now has
+nothing left to catch - if it ever fires, that is a bug report.
 
 **Never read modifier keys from `event.state`.** The bit values differ between
 Windows, X11 and macOS. Bind `<Alt-ButtonPress-1>` and friends and let Tk map
@@ -100,9 +117,27 @@ relationship. Gate it on the *keypoints*, not on `q`: the rig has not been
 slid onto them yet, so its own bone lengths put the knee elsewhere and its
 shin reads 11 degrees steeper than the pose asked for.
 
-**Twist is not observable from 18 keypoints.** Bone roll is tied to the body's
-rest orientation instead. Rolling a bone about its own axis must not move the
-joint it points at.
+**Twist is not observable from 18 keypoints - so it is EDITED instead.**
+Nothing in a keypoint skeleton says how far a forearm has pronated, and the
+old solver had to tie every bone's roll to the body's rest orientation and
+hope. On the armature a roll is just another rotation: `RigPose.spin` turns a
+bone about its own axis, which by construction does not move the joint it
+points at and does turn everything hanging off it. The selftest measures both.
+
+MakeHuman splits each limb segment in two so the second half can carry roll
+without wringing the skin at the joint, and `rigpose.TWIST` names those eight
+bones - `upperarm02`, `lowerarm02`, `upperleg02`, `lowerleg02`, both sides.
+They are NOT joints. A dragged elbow walks up past `upperarm02.L` to the
+shoulder so the whole humerus swings as the one rigid piece it is; rotating
+the twist bone instead folds the arm 8 cm below the shoulder, which the depth
+map shows as a crease no arm has. A roll goes the other way and is applied TO
+the twist bone, which is what it is for.
+
+They are named, not detected, and both obvious rules fail. "A bone continuing
+its parent's name one number higher" also catches every finger phalanx, every
+toe joint and the two lower cervicals, which are real joints. "Near-collinear
+with its parent" puts `upperleg02` at 12.9 degrees on the same side as
+`finger2-2` at 12.6. There is one rig; the honest thing is to say which eight.
 
 **Roll is carried along a limb, never re-derived per bone.** Both depth paths
 learned this the hard way. `openpose3d_editor.carry_frame` swings a bone's
@@ -327,18 +362,25 @@ two centimetres above where the format puts it and the shoulder line the same
 distance below measured acromial height - one constant, wrong against both the
 survey and the format.
 
-**The viewport draws the rig, because the rig is what comes out.** The editor
-showed only the eighteen keypoints - the thing you drag - while the export was
-made from the body's own 104-bone armature, so what was on screen and what came
-out of the file were two different pictures and nothing said so. `draw_rig`
-puts the armature on the canvas, posed exactly as the export poses it, and the
-keypoint limbs thin down to the handles they are. `rig_bones` caches on the
-pose, because a drag redraws several times a second.
+**You drag the armature, because the armature IS the pose.** There is one
+description of a figure now and it is `rigpose.Figure`: a local rotation per
+bone on Anny's own skeleton. The joints on the canvas are its joints, a drag
+rotates the bone above the one you grabbed, everything below follows because
+that is what a local rotation composed down a tree means, and the depth map is
+skinned from the same array without anything in between.
 
-The swept body preview defaults off now that there is something better to look
-at. It stays, on B, because it is the only shading that survives a drag at
-sixty frames a second - but it is the approximation, not the export, and its
-status line says so. The real thing is P.
+What this replaced was an eighteen-point OpenPose skeleton that you dragged
+and a solver that aimed the rig at it. The intermediate step was drawn as an
+overlay so you could at least SEE the armature, which papered over the real
+problem: it was a translation between two descriptions of one pose, and the
+second could only ever lose what the poorer of the two could not say. That was
+the whole hand, both collarbones, the roll of every limb and 85 of the rig's
+104 bones. All of it is editable now, and none of it needed new machinery -
+they were always bones.
+
+The swept body preview stays on B because it is the only shading that survives
+a drag at sixty frames a second, and it is still the approximation, not the
+export. The real thing is P.
 
 **One rig, named, and nothing else.** `mesh_backend.ANNY_BONES` maps every
 role onto an exact bone name in the 104-bone MakeHuman skeleton that
@@ -510,25 +552,28 @@ panel was enough to expose it; it had been latent for as long as the two
 existed.
 
 **A random pose is made of the same rotations a drag is.** `randomize` goes
-through `move_joint` and `rotate_about_axis` and never writes a coordinate, so
-no bone can change length whatever the dice say, and an edge case it finds is
-a real one rather than an artefact of how it was generated. A seed names a
-pose, which is what makes "the elbow is inside the ribcage at seed 412" a bug
-report instead of a screenshot.
+through `move_joint` and `RigPose.rotate` and never writes a coordinate, so an
+edge case it finds is a real one rather than an artefact of how it was
+generated. A seed names a pose, which is what makes "the elbow is inside the
+ribcage at seed 412" a bug report instead of a screenshot.
 
-The two bugs its own length check caught on the first run are the general
-lesson about rotating part of a figure. **Both are about where the AXIS runs,
-not about what is being rotated.** Leaning the torso about the hip LINE is
-exact because both hips lie on that axis and so cannot move, so the neck's
-distance to each of them is preserved however far it swings. Twisting about
-the vertical through the hip midpoint is not, because by then the legs have
-moved the hips and the neck is no longer over them - 17 cm on a neck-to-hip
-bone. Anchoring the twist at the neck fixes that, and then reading the neck
-BEFORE the lean moved it put 5 cm back, which looked identical to the first
-bug and needed its own fix. `pose_agent`'s `lean` is safe for a reason worth
-knowing: its "sideways" axis is the torso's own up vector through the hip
-midpoint, and OpenPose's neck IS the shoulder midpoint, so the neck sits
-exactly on that axis by construction.
+The two bugs its own length check caught on the first run are worth keeping
+even though **neither is expressible any more**, because the lesson generalises
+to anything that rotates part of a figure by hand. **Both were about where the
+AXIS ran, not about what was being rotated.** Leaning a list of keypoints
+about the hip LINE is exact, because both hips lie on that axis and cannot
+move. Twisting the same list about the vertical through the hip midpoint is
+not, because by then the legs have moved the hips and the neck is no longer
+over them - 17 cm on a neck-to-hip bone. Anchoring the twist at the neck fixed
+that, and then reading the neck BEFORE the lean had moved it put 5 cm back,
+which looked identical to the first bug and needed its own fix.
+
+A bone rotation cannot make either mistake. It turns about its own head, it
+carries exactly what hangs off it, and it cannot change a length at all. The
+torso leans by rotating the spine chain and the legs stay because they hang
+off `root` beside it, so there is no list of what moves and no axis to choose.
+That is the general argument for posing a rig rather than a point cloud: a
+whole class of error stops being a thing you can get wrong.
 
 **The panel is four tabs, and every section names the tab it lives on.**
 Twelve collapsible groups in one column is a list to hunt through even folded,
@@ -545,6 +590,32 @@ measured the offset inside that frame and nothing else, and reported the
 lowest control on a 31-control tab as 107 pixels down. Position against the
 scrolling canvas, plus wherever the canvas is scrolled to, is the only thing
 that answers the question.
+
+**A posed figure is put back on the ground.** Posing is rotation and nothing
+moves the pelvis, so folding the legs for a sit lifts the whole body's lowest
+point off the floor - 83 cm on a cross-legged sit, which is most of a person.
+`apply_commands` calls `pose.stand()` once the pose is finished and before
+anything is anchored to it, so a chair placed under the hips measures a real
+gap. The keypoint version never noticed because its "floor" was the lowest
+ankle less 8 cm for a sole: it moved the floor to the figure instead of the
+figure to the floor, and a test asserting a chair reached from floor to hip
+passed on exactly that hovering gap.
+
+Once, at the end, rather than inside each command - a stance that re-grounded
+halfway through building itself would fight its own steps.
+
+**Which way a figure faces is the hips bone's own orientation.** Anny is
+authored standing upright facing +Z with its left at +X, so `Figure.body_frame`
+is the world axes at rest and whatever the pelvis has been turned to after
+that. It stays right for a figure lying down, where a shoulder-to-hip line
+says nothing about facing at all.
+
+What this replaced measured `up` from the hips to a point on the spine. That
+is exact on a keypoint figure, whose torso is vertical because a table built
+it that way, and 8 degrees out on a real body, whose lumbar curve leans back.
+Every direction in the command vocabulary resolves against this frame, so
+those 8 degrees reached all of them: a crate placed in front of someone at
+arm's length landed 12 cm high.
 
 **The figure stands on something, and the floor is not a prop.** A depth map
 with nothing under the feet says the person is floating, and a generator
@@ -601,30 +672,31 @@ brightness every 22 cm and `GROUND_BRIGHT` starts it at 0.60 of full white, so
 it is a pool of ground around the feet reaching about the bottom fifth of the
 frame, under the figure rather than competing with it.
 
-**A hand and a foot are SET, never inferred.** The wrist and the ankle are the
-last keypoints on their chains, so nothing in a pose says which way a palm
-faces or whether a toe points in - a rig's hand rides its forearm and its foot
-rides its shin, and that is the whole of what eighteen keypoints can
-determine. `Skeleton.extremities` carries two angles each, put there by a
-slider or by a `hand`/`foot` command, and `mesh_backend.turn_extremities`
-applies them last, after everything the keypoints did settle. Rotations about
-the joint, so the fingers and toes come along and no bone changes length: the
-selftest asserts nothing above the wrist or the ankle moves at all.
+**A hand and a foot are SET, never inferred - and they are ordinary bones.**
+Nothing in a pose says which way a palm faces, so it has to be said. It used
+to be said in a pair of angles carried BESIDE the pose and applied by a
+special case at the end of the solve, because the wrist and the ankle ended
+the keypoint chains and there was nowhere else to put them.
+`Figure.set_extremity` is two rotations of one bone now, and the wrist, every
+knuckle and every toe joint are all draggable in the viewport like anything
+else. A wrist that also deviates sideways is a third rotation, not a change to
+the format.
 
-**Their frame is read off the rig, and then canonicalised.**
-`mesh_backend.limb_frame` takes the joint's own children - the metacarpals
-span a palm, the toes span the ball of a foot - so it needs no bone names and
-works on any rig. But the sign of that spread is arbitrary, whichever pair
-`argmax` returned, and it comes out mirrored between the sides: +30 degrees of
-turn pointed the left toe inward and the right toe outward, which is a control
-nobody can use. So `up` is turned to agree with the rig's rest pose - the back
-of the hand, the top of the foot - and `across` rebuilt from it.
+**Their axes are derived; their four SIGNS were measured.** A canonical axis
+still leaves the handedness of each rotation open, and a control whose +30
+points the left toe in and the right toe out is one nobody can use. So the
+signs were measured on the body set rather than reasoned about, and the
+selftest measures them again: a positive lift raises both sets of toes 8.3 cm,
+a positive foot turn points both toes outward 7.4 cm, a positive hand bend
+curls both hands toward their own palms, and a positive hand turn is
+pronation, taking both thumbs down.
 
-Even canonical axes leave the handedness of each rotation open, so the four
-signs were MEASURED on the body set rather than reasoned about, and the
-selftest measures them again: a positive turn moves both toes outward by the
-same 7.6 cm, a positive lift raises them, a positive bend curls the hand
-towards its own palm, and a positive hand turn is pronation.
+The perpendicular a bend turns about is built from each part's OWN direction,
+so it is already mirrored between the sides and must not be given a side sign
+as well - that flips it twice on one side and not at all on the other, which
+is exactly what made the lift raise one toe and drop the other. The turn axis
+IS shared between the sides, so that one does take the sign. Getting this
+backwards is silent and symmetrical-looking on a screenshot of one foot.
 
 **A tk Scale fires its `command` from the event loop, not from the
 assignment.** So a guard raised and cleared inside the method that sets the
@@ -655,6 +727,36 @@ of the width black at any window size - 880 of 1340 pixels at 1600x1000. The
 five small views are a column down the left rather than a strip across the
 bottom, which fills exactly that space and gives the main view back the height
 the strip was taking.
+
+**Keypoints are OUTPUT, with exactly one importer.** `keypoints_of` reads the
+eighteen off a posed rig for a pose PNG, for the swept preview and for the
+phone, and nothing reads them back into a figure - except `from_keypoints`,
+which exists because scene files written before the editor posed the rig hold
+eighteen points and nothing else, and because the phone genuinely has only
+eighteen points to drag. It runs the old solver once, at load, and keeps the
+joint angles. The file is a rig pose from then on.
+
+It is lossy and the number is worth knowing: rig, out to keypoints, back to
+rig loses up to 6.6 cm of body - every roll, both collarbones and all thirty
+bones of each hand. So the wire format between the phone and `server.py`
+carries `bones` as well as `points`: a client echoing a scene back gets the
+same pixels, and a client that has actually dragged sends keypoints and is
+solved. A test asserts both. Nothing else in the program may import keypoints.
+
+**The pose PNG never sees the armature.** `project_people` asks each figure
+for its eighteen and projects those. Handing it `figure.points` instead hands
+it 104 joints in the rig's own order, which runs straight off the end of the
+OpenPose palette - and that is the friendly failure. The unfriendly one is a
+scene with a figure whose bone count happens to be 18.
+
+**One anchor pins a joint; there is no two-anchor hinge.** Pinning means the
+figure slides so that joint ends up where it started, which is exactly right
+for "hold the hand still and lean the body" and is honestly all that one
+anchor can mean. Two anchors used to make a hinge the body swung about, built
+by re-rooting the keypoint tree at the pair. A rig has one root and every one
+of its 104 bones hangs off it, so the same gesture is an IK solve rather than
+a re-parent. It is not implemented, and `rotate_hinge` says so rather than
+doing nothing quietly.
 
 **Assets ride the body's pose solution.** `pose_rig` returns the result keyed
 by bone name; `skin_with` applies it to any mesh on the same armature. Never
@@ -834,11 +936,16 @@ a build.
    out most cleanly.
 3. Depth export is CPU rasterisation. Live depth would want the geometry on the
    GPU rather than the analytic rasteriser ported.
-4. Hands and feet are set by hand, which is the only way they can be set, but
-   only two angles each: a wrist's side-to-side deviation and a foot's roll
-   are not in the vocabulary. Nothing is inferred from context either - a
-   figure whose palm is flat on a table still has to be told so.
-5. The garment vocabulary was cut back to what the library can actually put
+4. There is no IK. Every bone is posed from its parent down, so "put the hand
+   here and let the arm work it out" is not a thing you can ask for, and the
+   two-anchor hinge that used to approximate it is gone with the keypoint
+   tree it was built on. One anchor pins a joint by sliding the figure. This
+   is the biggest thing the rig path does not do that a poser should.
+5. The `hand` and `foot` COMMANDS still take two angles each, though the bones
+   underneath take any rotation and every finger is draggable. Nothing is
+   inferred from context either - a figure whose palm is flat on a table
+   still has to be told so.
+6. The garment vocabulary was cut back to what the library can actually put
    on a figure: the `over` slot (apron, cape, backpack, scarf) and eleven
    presets with no mesh behind them are gone rather than silently absent from
    a rigged export. Headgear is one fedora standing in for hat, cap and sun
@@ -846,7 +953,7 @@ a build.
    fifty-odd available - so widening the vocabulary again is a matter of
    building and vendoring meshes first, never of naming things the export
    cannot deliver.
-6. The web prototype duplicates the maths in JavaScript. It is tested
+7. The web prototype duplicates the maths in JavaScript. It is tested
    independently (`node web/test.mjs`) and will drift from the Python. Two
    things no longer can: the preset table is generated from `preset_params`
    and `tests/test_proportions.py` reads it back and compares - it had drifted

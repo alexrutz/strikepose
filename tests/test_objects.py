@@ -67,7 +67,7 @@ sx, sy, _ = app.camera.project(prop["position"])
 sx, sy = sx, sy - 20                        # a little way up the crate's face
 check("an object under the cursor is picked",
       app.pick_prop(sx, sy, app.camera) == 0)
-wrist = KEYPOINT_NAMES.index("l_wrist")
+wrist = app.skeleton.pose.bone("wrist.L")
 wx, wy, _ = app.camera.project(app.skeleton.points[wrist])
 app.on_press(E(wx, wy))
 check("but a joint still wins where the two overlap",
@@ -185,26 +185,31 @@ check("and a cylinder still comes out round", abs(ratio - math.pi / 4.0) < 0.03,
 
 # -- the viewport shows the rig the export is made of ----------------------
 #
-# The editor used to draw only the eighteen keypoints, which is the thing you
-# drag and not the thing that comes out: the depth map is made from the body's
-# own 104-bone armature, posed by joint angle. Two different pictures, and only
-# one of them was on screen.
-check("the native rig is on by default, the swept preview is not",
-      app.show_rig and not app.show_body,
-      "rig %s body %s" % (app.show_rig, app.show_body))
-bones = app.rig_bones(0)
-check("and the rig it draws is the real one, hands and all",
-      len(bones) > 90, "%d bones" % len(bones))
+# The editor draws the armature because the armature IS the pose. It used to
+# draw eighteen keypoints - the thing you dragged - while the depth map was
+# made from the body's own 104 bones, posed by a solver in between. Two
+# pictures of one figure, and only the poorer one was on screen or editable.
+check("the swept preview is off by default: the rig is the subject",
+      not app.show_body, "body %s" % (app.show_body,))
+check("and what is on screen is the whole armature, hands and all",
+      len(app.skeleton.points) > 90,
+      "%d bones" % len(app.skeleton.points))
 
-elbow = KEYPOINT_NAMES.index("l_elbow")
-before = [tuple(b[1]) for b in app.rig_bones(0)]
-was = list(app.figures[0].points[elbow])
-app.figures[0].points[elbow] = [was[0] + 12.0, was[1] - 8.0, was[2] + 4.0]
-after = [tuple(b[1]) for b in app.rig_bones(0)]
-app.figures[0].points[elbow] = was
-moved = sum(1 for a, b in zip(before, after) if a != b)
-check("and it follows the keypoints it is posed by",
-      moved > 3, "%d of %d bones moved" % (moved, len(after)))
+# dragging a joint moves the bone above it and everything below, and nothing
+# else - which is what a local rotation composed down a tree means
+elbow = app.skeleton.pose.bone("lowerarm01.L")
+before = [tuple(p) for p in app.skeleton.points]
+ex, ey, _ = app.camera.project(app.skeleton.points[elbow])
+app.on_press(E(ex, ey))
+app.on_drag(E(ex + 25, ey - 18))
+app.on_release(E(ex + 25, ey - 18))
+after = [tuple(p) for p in app.skeleton.points]
+moved = {i for i, (a, b) in enumerate(zip(before, after)) if a != b}
+below = set(app.skeleton.subtree(app.skeleton.pose.swing_above(elbow)))
+check("and dragging a joint moves exactly the chain below the bone above it",
+      moved and moved <= below and elbow in moved,
+      "%d bones moved, all of them inside the %d below the shoulder"
+      % (len(moved), len(below)))
 
 # -- hair and clothes ------------------------------------------------------
 import wearables

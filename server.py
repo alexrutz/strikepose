@@ -43,6 +43,8 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import exporting
+import rigpose
+from exporting import KEYPOINT_BONES
 import bodies_lib
 import everyday
 import pose_agent
@@ -87,20 +89,46 @@ def scene_from_points(payload, aspect):
             if preset is not None:
                 warnings.append("unknown preset %r" % (preset,))
             preset = DEFAULT_PRESET
-        skeleton = Skeleton(preset_params(preset))
+        skeleton = rigpose.figure_for(preset)
+        # A client that is echoing a scene back sends the joint angles it was
+        # given and gets the same pixels; a client that has DRAGGED sends the
+        # eighteen keypoints, because that is all the phone has, and those are
+        # solved onto the armature. Keypoints alone cannot carry a rig pose -
+        # the round trip loses up to 6.6 cm of body, most of it roll and the
+        # bones no keypoint names - so the bones travel too rather than the
+        # wire format quietly being the lossy one.
+        bones = entry.get("bones")
+        if isinstance(bones, dict) and bones:
+            skeleton.pose.from_dict({"bones": bones,
+                                     "offset": entry.get("offset")
+                                     or [0.0, 0.0, 0.0]})
         points = entry.get("points")
+        if bones:
+            points = None
         if isinstance(points, list) and len(points) == len(KEYPOINT_NAMES):
             try:
-                skeleton.points = [tuple(float(v) for v in p[:3]) for p in points]
+                # The phone drags eighteen keypoints - it has no rig and no
+                # room for one - so a drag arrives as keypoints and is solved
+                # onto the armature here. The wire format is unchanged; what
+                # changed is that the answer is a rig pose, which is what the
+                # depth map is made from.
+                skeleton.from_keypoints(dict(zip(
+                    KEYPOINT_NAMES,
+                    [tuple(float(v) for v in p[:3]) for p in points])))
             except (TypeError, ValueError):
                 warnings.append("a figure's points are not numbers; using rest")
         visible = entry.get("visible")
         if isinstance(visible, list) and len(visible) == len(KEYPOINT_NAMES):
-            skeleton.visible = [bool(v) for v in visible]
+            for name, seen in zip(KEYPOINT_NAMES, visible):
+                bone = KEYPOINT_BONES.get(name)
+                if bone in skeleton.pose.index:
+                    for j in skeleton.pose.subtree(skeleton.pose.bone(bone)):
+                        if not seen:
+                            skeleton.visible[j] = False
         skeleton.outfit = wearables.clean(entry.get("outfit") or {})
         figures.append(skeleton)
     if not figures:
-        figures = [Skeleton(preset_params(DEFAULT_PRESET))]
+        figures = [rigpose.figure_for(DEFAULT_PRESET)]
 
     objects = []
     for entry in payload.get("props") or []:
@@ -126,8 +154,15 @@ def scene_from_points(payload, aspect):
 def describe(figures, objects, camera, warnings):
     """What the phone needs to draw the scene it just asked for."""
     return {
-        "people": [{"points": [list(p) for p in figure.points],
-                    "visible": list(figure.visible),
+        # the eighteen, read off each posed rig - the phone draws capsules
+        # around them and has nothing to do with the 104 bones behind
+        "people": [{"bones": figure.pose.to_dict()["bones"],
+                    "offset": figure.pose.to_dict()["offset"],
+                    "points": [[float(v) for v in figure.keypoints()[n]]
+                               for n in KEYPOINT_NAMES],
+                    "visible": [bool(figure.visible[
+                        figure.pose.bone(KEYPOINT_BONES[n])])
+                        for n in KEYPOINT_NAMES],
                     "outfit": dict(figure.outfit or {})} for figure in figures],
         "props": [{"shape": p["shape"], "size": list(p["size"]),
                    "position": list(p["position"]), "yaw": p["yaw"]}
